@@ -5,20 +5,18 @@
   let { match }: { match: HiddenCityMatch } = $props();
   let open = $state(false);
   const t = $derived(match.through_offer);
+  const getOff = $derived(t.segments[0]?.dest || '');
 </script>
 
 <article class="hc">
   <div class="row">
     <div>
-      <span class="chip hot">Hidden city · {match.hidden_city_name}</span>
+      <span class="chip hot">Get off in {getOff}</span>
       {#if match.first_flight_match}
-        <span class="chip">same first flight</span>
+        <span class="chip good">Same first flight</span>
       {/if}
-      <span class="chip">one-way only</span>
-      <span class="chip">carry-on only</span>
-      <h3 class="serif" style="margin:12px 0 6px;font-size:1.35rem">
-        {t.segments[0].origin} → {t.segments[0].dest}
-        <span style="color:var(--mist);font-size:0.9rem"> then unused {t.segments[1]?.origin}→{t.segments[1]?.dest}</span>
+      <h3 style="margin:10px 0 8px;font-size:1.15rem">
+        Ticket to {match.hidden_city} · leave at {getOff}
       </h3>
       <div class="seg">
         {#each t.segments as s}
@@ -26,28 +24,29 @@
         {/each}
       </div>
       <div class="seg" style="margin-top:6px">
-        {duration(t.duration_min)} · {t.fare_basis} · {t.carrier}
+        {duration(t.duration_min)} · {t.carrier}
       </div>
+      {#if match.bookers?.length}
+        <div class="book-row" style="margin-top:12px">
+          {#each match.bookers.slice(0, 4) as b}
+            <a class="book-btn" href={b.url} target="_blank" rel="noreferrer">{b.name}</a>
+          {/each}
+        </div>
+      {/if}
     </div>
-    <div>
-      <div class="price">
-        {money(t.price, match.currency)}
-        <small>
-          {money(match.gross_saving, match.currency)} / {match.saving_pct}% vs local
-          {money(match.local_offer.price, match.currency)}
-        </small>
-        <small style="color:var(--mist)">
-          est. net {money(match.risk.net_saving_estimate, match.currency)} after disruption &amp; enforcement costs
-        </small>
-      </div>
+    <div class="price">
+      {money(t.price, match.currency)}
+      <small>Save {money(match.gross_saving, match.currency)} vs {money(match.local_offer.price, match.currency)}</small>
     </div>
   </div>
 
   <div class="risk">
-    <p style="margin:0 0 8px">{match.risk.headline} · fragility {100 - match.risk.score}/100</p>
-    <button class="chip" type="button" onclick={() => (open = !open)}>{open ? 'Hide' : 'Show'} operational risks</button>
+    <button class="ghost" type="button" onclick={() => (open = !open)}>
+      {open ? 'Hide risks' : 'Risks of getting off early'}
+    </button>
     {#if open}
-      <div class="risk-grid" style="margin-top:12px">
+      <p class="note" style="margin:10px 0 8px">{match.risk.headline}</p>
+      <div class="risk-grid">
         {#each match.risk.items as item}
           <div>
             <div class="chip bad">{item.severity}</div>

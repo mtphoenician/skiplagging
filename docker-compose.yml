@@ -1,4 +1,15 @@
 services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: skiplagging
+      POSTGRES_USER: skiplag
+      POSTGRES_PASSWORD: skiplag
+    ports:
+      - "5432:5432"
+    volumes:
+      - skiplag_pg:/var/lib/postgresql/data
+
   api:
     image: python:3.12-slim
     working_dir: /app/backend
@@ -6,13 +17,17 @@ services:
       - ./:/app
     command: >
       sh -c "pip install -q -r requirements.txt &&
+             python -m app.db.ingest &&
              uvicorn app.main:app --host 0.0.0.0 --port 8000"
     ports:
       - "8000:8000"
     env_file:
       - .env.example
     environment:
+      DATABASE_URL: postgresql+asyncpg://skiplag:skiplag@db:5432/skiplagging
       CORS_ORIGINS: http://localhost:5173,http://127.0.0.1:5173
+    depends_on:
+      - db
 
   web:
     image: node:22-alpine
@@ -24,3 +39,6 @@ services:
       - "5173:5173"
     depends_on:
       - api
+
+volumes:
+  skiplag_pg:

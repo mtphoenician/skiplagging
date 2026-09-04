@@ -1,18 +1,56 @@
 <script lang="ts">
-  import { searchAirports } from '$lib/api';
+  import { fetchAirport, searchAirports } from '$lib/api';
   import type { Airport } from '$lib/types';
 
-  let { label, value = $bindable(''), placeholder = 'JFK' }: { label: string; value: string; placeholder?: string } =
-    $props();
+  let {
+    label,
+    value = $bindable(''),
+    placeholder = 'City or airport'
+  }: { label: string; value: string; placeholder?: string } = $props();
 
   let open = $state(false);
   let hits = $state<Airport[]>([]);
   let active = $state(0);
+  let draft = $state('');
+  let picked = $state<Airport | null>(null);
+  let focused = $state(false);
   let timer: ReturnType<typeof setTimeout>;
+  let root: HTMLDivElement | undefined = $state();
+  let inputEl: HTMLInputElement | undefined = $state();
+
+  $effect(() => {
+    if (focused) return;
+    const v = value;
+    if (v === draft) {
+      if (/^[A-Z]{3}$/.test(v) && (!picked || picked.iata !== v)) void hydrate(v);
+      return;
+    }
+    draft = v;
+    if (/^[A-Z]{3}$/.test(v.trim())) {
+      draft = v.trim();
+      if (!picked || picked.iata !== draft) void hydrate(draft);
+    } else if (!v) {
+      picked = null;
+    }
+  });
+
+  async function hydrate(code: string) {
+    try {
+      const ap = await fetchAirport(code);
+      if (ap && !focused && value.toUpperCase() === code) picked = ap;
+    } catch {
+      /* keep the IATA even if the name never loads */
+    }
+  }
+
+  function onDoc(e: MouseEvent) {
+    if (root && !root.contains(e.target as Node)) open = false;
+  }
 
   async function lookup(q: string) {
     if (q.trim().length < 1) {
       hits = [];
+      open = false;
       return;
     }
     try {
@@ -21,23 +59,44 @@
       active = 0;
     } catch {
       hits = [];
+      open = false;
     }
   }
 
   function onInput(e: Event) {
-    const next = (e.target as HTMLInputElement).value.toUpperCase();
+    const next = (e.target as HTMLInputElement).value;
+    draft = next;
+    picked = null;
     value = next;
     clearTimeout(timer);
-    timer = setTimeout(() => lookup(next), 120);
+    timer = setTimeout(() => lookup(next.trim()), 80);
   }
 
   function pick(a: Airport) {
+    picked = a;
     value = a.iata;
+    draft = a.iata;
     open = false;
     hits = [];
   }
 
+  function onFocus() {
+    focused = true;
+    if (picked && /^[A-Za-z]{3}$/.test(draft)) {
+      queueMicrotask(() => inputEl?.select());
+    }
+    if (hits.length) open = true;
+    else if (draft.trim().length >= 1) lookup(draft.trim());
+  }
+
+  function onBlur() {
+    focused = false;
+  }
+
   function onKey(e: KeyboardEvent) {
+    if (e.key === 'Enter' && (!open || !hits.length)) {
+      return;
+    }
     if (!open || !hits.length) return;
     if (e.key === 'ArrowDown') {
       e.preventDefault();
@@ -52,26 +111,55 @@
       open = false;
     }
   }
+
+  function kind(a: Airport) {
+    if (a.type === 'large_airport' && a.scheduled_service) return '';
+    if (!a.scheduled_service) return 'No scheduled flights';
+    if (a.type === 'medium_airport') return 'Regional';
+    if (a.type === 'heliport') return 'Heliport';
+    return '';
+  }
 </script>
 
-<div class="field suggest">
+<svelte:window onclick={onDoc} />
+
+<div class="field suggest" bind:this={root}>
   <label for="ap-{label}">{label}</label>
-  <input
-    id="ap-{label}"
-    {placeholder}
-    maxlength="32"
-    value={value}
-    oninput={onInput}
-    onkeydown={onKey}
-    onfocus={() => hits.length && (open = true)}
-    autocomplete="off"
-  />
+  <div class="suggest-box">
+    <input
+      id="ap-{label}"
+      bind:this={inputEl}
+      class:has-meta={Boolean(picked && !focused)}
+      {placeholder}
+      maxlength="48"
+      value={draft}
+      oninput={onInput}
+      onkeydown={onKey}
+      onfocus={onFocus}
+      onblur={onBlur}
+      autocomplete="off"
+      autocorrect="off"
+      autocapitalize="none"
+      spellcheck="false"
+    />
+    {#if picked && !focused}
+      <span class="suggest-inline">{picked.city}</span>
+    {/if}
+  </div>
   {#if open && hits.length}
-    <div class="suggest-list">
+    <div class="suggest-list scroll" role="listbox">
       {#each hits as a, i}
-        <button class:active={i === active} type="button" onmousedown={() => pick(a)}>
-          <strong>{a.iata}</strong>
-          <span style="color:var(--mist)"> {a.city} · {a.name}</span>
+        <button class:active={i === active} type="button" role="option" aria-selected={i === active} onmousedown={() => pick(a)}>
+          <span class="suggest-top">
+            <strong>{a.iata}</strong>
+            <span class="suggest-name">{a.name}</span>
+          </span>
+          <span class="suggest-meta">
+            {a.city} · {a.country_name || a.country}
+            {#if kind(a)}
+              · {kind(a)}
+            {/if}
+          </span>
         </button>
       {/each}
     </div>

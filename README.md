@@ -1,84 +1,68 @@
 # Skiplagging
 
-**A Technical, Economic and Operational Anatomy of Hidden-City Ticketing**
+Hidden-city fare discovery with a **PostgreSQL** airport/route database and layers that are not mixed up.
 
-A Svelte search surface and a Python fare shop that looks at every ordinary way to buy a seat to B — nonstop, connecting, nearby airports — and then ranks hidden-city inversions where
+| Layer | What it is | What it is not | Source |
+| --- | --- | --- | --- |
+| Reference | Where the airport is | A flight, a fare, a booking | [OurAirports](https://ourairports.com/data/) nightly CSV |
+| Historical route map | Who used to publish A→B | Current schedule or inventory | [OpenFlights](https://openflights.org/data.php) (~2014–2017, stale) |
+| Live track | Transponder state (ADS-B/MLAT/…) | A ticket or a future flight | [OpenSky](https://opensky-network.org) + FR24 / FlightAware links |
+| Schedule / FIDS | Scheduled, estimated, actual board | A fare or ADS-B | [AeroDataBox](https://aerodatabox.com) if `RAPIDAPI_KEY` |
+| Priced offer | Shopped itinerary + tax + RBD | A PNR | [Amadeus](https://developers.amadeus.com) GDS and/or [Duffel](https://duffel.com/docs) NDC |
+| Booker | Outbound search URL | A reservation this app created | Google Flights, Kayak, Skyscanner (meta); Expedia (OTA); airline.com |
+| Order / PNR | Reservation + coupons | — | **Not implemented.** We never call Create Orders. |
 
-\[
-P(A,B,C) < P(A,B)
-\]
+Hidden-city rows exist only when a shop API returns **P(A,B,C) < P(A,B)** and the first sector is A→B. OpenFlights spokes are labeled **connection hints**, not savings.
 
-on an itinerary whose first sector is the A→B flight you actually want.
+## Database
 
-This is fare discovery and systems explanation. It does not book tickets, and it does not treat a through fare as two disposable flights. Carriers prohibit hidden-city / point-beyond ticketing. Sequential coupons, baggage, irregular operations and fare-difference collection can erase the displayed gap. Read `/anatomy` before treating any row as a plan.
+Local PostgreSQL (`skiplagging`). Create once, then ingest official files:
 
-## Stack
+```bash
+createdb skiplagging
+cd backend
+source .venv/bin/activate
+pip install -r requirements.txt
+python -m app.db.ingest
+```
 
-| Layer | Choice | Why |
-| --- | --- | --- |
-| Shop API | FastAPI + `orjson` + async `httpx` | Bounded fan-out over C candidates, connection pooling, TTL cache |
-| Engine | In-process O-D graph + concurrent gather | No pandas; hub spokes and seeded inversions ranked in memory |
-| Live GDS | Optional Amadeus Flight Offers Search | Same parser, same ranking, same risk layer |
-| UI | SvelteKit | Search, results, long-form anatomy |
+That loads the official gazetteers, not a hand-built list:
 
-Without API keys the **demo engine** is on. It is not a live ticket cache. It reproduces the O-D mechanism (hub local power versus competitive through markets), including the published ORD–DCA–BOS and JFK–SFO–SEA quotations, so the search and risk layers are usable immediately.
+- OurAirports `countries.csv`, `regions.csv`, `airports.csv`, `runways.csv`, `navaids.csv` (nightly, public domain)
+- GeoNames `countryInfo.txt` (ISO3, capital, currency, population, languages)
+- OpenFlights airlines/routes (historical, stale)
+
+Browse them at `/places`. `GET /countries`, `/countries/US/regions`, `/airports/ORD` include runways.
 
 ## Run
 
 ```bash
-# backend
-cd backend
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-uvicorn app.main:app --reload --app-dir . --port 8000
+# API
+cd backend && source .venv/bin/activate
+uvicorn app.main:app --reload --port 8000
 
-# frontend
-cd frontend
-npm install
-npm run dev
+# UI
+cd frontend && npm install && npm run dev
 ```
 
-Open [http://localhost:5173](http://localhost:5173). Try `ORD → DCA` or `JFK → SFO`.
+[http://localhost:5173](http://localhost:5173) · [Sources](http://localhost:5173/sources)
 
-Copy `.env.example` to `.env` and add Amadeus Self-Service credentials to shop live GDS offers. Toggle **Live GDS** on the search form.
+Copy `.env.example` to `.env`. Without Amadeus/Duffel keys you still get the real airport table, OpenSky traffic, connection hints, and live booker links. You will **not** get invented prices.
 
-```bash
+```
 AMADEUS_CLIENT_ID=
 AMADEUS_CLIENT_SECRET=
-AMADEUS_HOSTNAME=test
+DUFFEL_TOKEN=
+RAPIDAPI_KEY=
 ```
 
-## What the shop returns
+## API
 
-1. **Nonstop A→B** — the local origin-destination product.
-2. **Connecting to B** — itineraries that actually end at the intended city.
-3. **Nearby airports** — same metro, different runway.
-4. **Hidden-city A→B→C** — through fares cheaper than local A–B, preferably the same first flight.
+- `GET /health` — DB counts and which shop/track keys are on
+- `GET /sources` — full capability matrix
+- `GET /airports?q=` — OurAirports
+- `POST /search` — all layers for A, B, date (persisted in `searches` / `offers`)
+- `GET /track/{iata}` — OpenSky box + tracker links
+- `GET /board/{iata}` — AeroDataBox FIDS if keyed
 
-Each inversion carries a risk matrix (baggage, gate-check, reroute, coupon sequence, documents, enforcement) and an estimated
-
-\[
-S_{\mathrm{net}} = P_{AB}-P_{ABC}-\text{fees}-E[\text{disruption}]-E[\text{enforcement}].
-\]
-
-Those expected costs are ranking aids, not a prediction of any airline’s action.
-
-## Architecture
-
-```
-frontend (SvelteKit :5173)
-    └── /api → FastAPI :8000
-            ├── /airports
-            ├── /search
-            └── engines/shop.py
-                    ├── DemoProvider   (instant O-D model)
-                    ├── AmadeusProvider (optional live)
-                    └── risk.py
-```
-
-Candidate C cities are not a brute-force world dump. They are ranked from fortress-hub structure and historically cited inversions (Luttmann–Gaggero-style US hubs; Zaman’s JFK–SFO–SEA), then shopped concurrently with a semaphore.
-
-## Disclaimer
-
-Airline conditions of carriage treat hidden-city and point-beyond ticketing as prohibited booking practices. This repository does not provide legal analysis, booking, or guidance on avoiding carrier review. Use it to understand why a journey with more flying can sell for less money.
+Airline conditions treat hidden-city / point-beyond ticketing as prohibited. This repo does not book, and does not advise on avoiding carrier review.

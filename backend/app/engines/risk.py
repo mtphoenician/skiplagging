@@ -1,10 +1,16 @@
 from __future__ import annotations
 
-from app.graph.airports import airport
 from app.models import HiddenCityMatch, Offer, RiskAssessment, RiskItem
 
 
-def assess(local: Offer, through: Offer, hidden_city: str, true_dest: str) -> RiskAssessment:
+def assess(
+    local: Offer,
+    through: Offer,
+    hidden_city: str,
+    true_dest: str,
+    origin_country: str = "",
+    hidden_country: str = "",
+) -> RiskAssessment:
     """
     S_net = P_AB - P_ABC - extra fees - E[disruption] - E[enforcement]
 
@@ -56,10 +62,7 @@ def assess(local: Offer, through: Offer, hidden_city: str, true_dest: str) -> Ri
         ),
     ]
 
-    origin = through.segments[0].origin if through.segments else ""
-    dest_c = hidden_city
-    a, b, c = airport(origin), airport(true_dest), airport(dest_c)
-    international = bool(a and c and a.country != c.country)
+    international = bool(origin_country and hidden_country and origin_country != hidden_country)
     if international:
         items.append(
             RiskItem(
@@ -81,7 +84,7 @@ def assess(local: Offer, through: Offer, hidden_city: str, true_dest: str) -> Ri
         )
     )
 
-    gross = max(local.price - through.price, 0.0)
+    gross = max((local.price or 0) - (through.price or 0), 0.0)
     extra_fees = 18.0 if through.bags_included == 0 else 0.0
     # Fragility rises when C is international, when connect is tight, when near departure.
     disruption = round(min(gross * 0.22, local.price * 0.18), 2)
@@ -123,7 +126,16 @@ def assess(local: Offer, through: Offer, hidden_city: str, true_dest: str) -> Ri
     )
 
 
-def attach_risk(match_id: str, hidden_city: str, hidden_name: str, local: Offer, through: Offer, true_dest: str) -> HiddenCityMatch:
+def attach_risk(
+    match_id: str,
+    hidden_city: str,
+    hidden_name: str,
+    local: Offer,
+    through: Offer,
+    true_dest: str,
+    origin_country: str = "",
+    hidden_country: str = "",
+) -> HiddenCityMatch:
     first_match = bool(local.first_flight and local.first_flight == through.first_flight)
     if not first_match and local.segments and through.segments:
         first_match = (
@@ -131,7 +143,7 @@ def attach_risk(match_id: str, hidden_city: str, hidden_name: str, local: Offer,
             and local.segments[0].dest == through.segments[0].dest
             and local.segments[0].carrier == through.segments[0].carrier
         )
-    gross = round(local.price - through.price, 2)
+    gross = round((local.price or 0) - (through.price or 0), 2)
     pct = round(100.0 * gross / local.price, 1) if local.price else 0.0
     return HiddenCityMatch(
         id=match_id,
@@ -143,7 +155,7 @@ def attach_risk(match_id: str, hidden_city: str, hidden_name: str, local: Offer,
         gross_saving=gross,
         saving_pct=pct,
         currency=through.currency,
-        risk=assess(local, through, hidden_city, true_dest),
+        risk=assess(local, through, hidden_city, true_dest, origin_country, hidden_country),
     )
 
 

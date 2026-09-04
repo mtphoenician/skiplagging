@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from datetime import datetime, timezone
 from typing import Any
 
 import httpx
@@ -21,7 +22,7 @@ class AmadeusProvider:
 
     async def shop(self, req: ShopRequest) -> list[Offer]:
         token = await self._access_token()
-        params = {
+        params: dict[str, Any] = {
             "originLocationCode": req.origin,
             "destinationLocationCode": req.dest,
             "departureDate": req.date,
@@ -36,12 +37,29 @@ class AmadeusProvider:
             f"{self._s.amadeus_base}/v2/shopping/flight-offers",
             params=params,
             headers={"Authorization": f"Bearer {token}"},
+            timeout=25.0,
+        )
+        if r.status_code >= 400:
+            return []
+        return self._parse(r.json(), req)
+
+    async def direct_destinations(self, origin: str) -> list[str]:
+        """Amadeus Airport Routes: published direct destinations. Not prices."""
+        token = await self._access_token()
+        r = await self._client.get(
+            f"{self._s.amadeus_base}/v1/airport/direct-destinations",
+            params={"departureAirportCode": origin, "max": 50},
+            headers={"Authorization": f"Bearer {token}"},
             timeout=20.0,
         )
         if r.status_code >= 400:
             return []
-        data = r.json()
-        return self._parse(data, req)
+        out: list[str] = []
+        for item in r.json().get("data") or []:
+            code = (item.get("iataCode") or "").upper()
+            if len(code) == 3:
+                out.append(code)
+        return out
 
     async def _access_token(self) -> str:
         now = time.time()
@@ -64,74 +82,102 @@ class AmadeusProvider:
         return self._token
 
     def _parse(self, data: dict[str, Any], req: ShopRequest) -> list[Offer]:
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
         offers: list[Offer] = []
         for raw in data.get("data") or []:
-            parsed = self._one(raw, req)
+            parsed = self._one(raw, req, now)
             if parsed:
                 offers.append(parsed)
         return offers
 
-    def _one(self, raw: dict[str, Any], req: ShopRequest) -> Offer | None:
+    def _one(self, raw: dict[str, Any], req: ShopRequest, now: str) -> Offer | None:
         itineraries = raw.get("itineraries") or []
         if not itineraries:
             return None
         segs_raw = itineraries[0].get("segments") or []
         if not segs_raw:
             return None
+        fare_by_seg = _fare_map(raw)
         segments: list[Segment] = []
         for s in segs_raw:
-            dep = s.get("departure") or {}
-            arr = s.get("arrival") or {}
-            dep_at = (dep.get("at") or "")[:16]
-            arr_at = (arr.get("at") or "")[:16]
-            duration = _iso_minutes(s.get("duration") or itineraries[0].get("duration") or "PT0M")
+            dep, arr = s.get("departure") or {}, s.get("arrival") or {}
+            sid = str(s.get("id") or "")
+            fare = fare_by_seg.get(sid, {})
             segments.append(
                 Segment(
                     origin=dep.get("iataCode") or "",
                     dest=arr.get("iataCode") or "",
-                    carrier=s.get("carrierCode") or s.get("operating", {}).get("carrierCode") or "XX",
+                    carrier=s.get("carrierCode") or "XX",
+                    operating_carrier=(s.get("operating") or {}).get("carrierCode"),
                     flight_number=f"{s.get('carrierCode', 'XX')}{s.get('number', '')}",
-                    dep=dep_at,
-                    arr=arr_at,
-                    duration_min=duration,
-                    rbd=((raw.get("travelerPricings") or [{}])[0]
-                         .get("fareDetailsBySegment") or [{}])[0]
-                    .get("class")
-                    or "Y",
-                    aircraft=(s.get("aircraft") or {}).get("code") or "32N",
+                    dep=(dep.get("at") or "")[:16],
+                    arr=(arr.get("at") or "")[:16],
+                    duration_min=_iso_minutes(s.get("duration") or "PT0M"),
+                    rbd=fare.get("class") or fare.get("rbd") or "",
+                    fare_basis=fare.get("fareBasis"),
+                    aircraft=(s.get("aircraft") or {}).get("code") or "",
                 )
             )
         if not segments[0].origin or not segments[-1].dest:
             return None
-        price = float((raw.get("price") or {}).get("grandTotal") or 0)
-        fare_basis = (
-            ((raw.get("travelerPricings") or [{}])[0].get("fareDetailsBySegment") or [{}])[0].get("fareBasis")
-            or "NA"
-        )
+        price = raw.get("price") or {}
+        grand = _f(price.get("grandTotal"))
+        base = _f(price.get("base"))
+        taxes = None
+        if grand is not None and base is not None:
+            taxes = round(grand - base, 2)
         kind = "nonstop" if len(segments) == 1 else "connecting"
         return Offer(
             id=f"amadeus-{raw.get('id', segments[0].flight_number)}",
             kind=kind,  # type: ignore[arg-type]
             channel="gds",
             source="amadeus",
+            layer="priced-offer",
             segments=segments,
-            price=round(price, 2),
-            currency=(raw.get("price") or {}).get("currency") or req.currency,
+            price=grand,
+            base_price=base,
+            taxes=taxes,
+            currency=price.get("currency") or req.currency,
             cabin=req.cabin,
-            fare_basis=fare_basis,
-            seats=int(raw.get("numberOfBookableSeats") or 4),
+            fare_basis=segments[0].fare_basis or "NA",
+            seats=int(raw["numberOfBookableSeats"]) if raw.get("numberOfBookableSeats") is not None else None,
+            last_ticketing_date=raw.get("lastTicketingDate"),
+            validating_airline=(raw.get("validatingAirlineCodes") or [None])[0],
+            instant_ticketing=raw.get("instantTicketingRequired"),
             refundable=False,
             bags_included=0,
             carrier=segments[0].carrier,
-            duration_min=sum(s.duration_min for s in segments),
+            duration_min=_iso_minutes(itineraries[0].get("duration") or "PT0M")
+            or sum(s.duration_min for s in segments),
             stops=max(len(segments) - 1, 0),
             first_flight=segments[0].flight_number,
+            retrieved_at=now,
+            note="Amadeus Flight Offers Search priced itinerary. Not a PNR. Confirm with Flight Offers Price before any booking API.",
         )
 
 
+def _fare_map(raw: dict[str, Any]) -> dict[str, dict]:
+    out: dict[str, dict] = {}
+    for traveler in raw.get("travelerPricings") or []:
+        for fd in traveler.get("fareDetailsBySegment") or []:
+            sid = str(fd.get("segmentId") or "")
+            if sid:
+                out[sid] = fd
+        break
+    return out
+
+
+def _f(v: Any) -> float | None:
+    if v is None or v == "":
+        return None
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
 def _iso_minutes(iso: str) -> int:
-    # PT2H15M
-    iso = iso.replace("PT", "")
+    iso = (iso or "").replace("PT", "")
     hours = mins = 0
     if "H" in iso:
         h, iso = iso.split("H", 1)

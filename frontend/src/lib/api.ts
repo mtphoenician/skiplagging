@@ -1,10 +1,20 @@
-import type { Airport, SearchQuery, SearchResponse } from './types';
+import type { Airport, Country, SearchQuery, SearchResponse, SourceDef } from './types';
 
 const prefix = '/api';
 
+export async function fetchAirport(iata: string): Promise<Airport | null> {
+  const r = await fetch(`${prefix}/airports/${encodeURIComponent(iata)}`);
+  if (r.status === 404) return null;
+  if (!r.ok) throw new Error('Airport lookup failed');
+  return r.json();
+}
+
 export async function searchAirports(q: string): Promise<Airport[]> {
   const r = await fetch(`${prefix}/airports?q=${encodeURIComponent(q)}`);
-  if (!r.ok) throw new Error('Airport lookup failed');
+  if (!r.ok) {
+    const body = await r.json().catch(() => ({ detail: r.statusText }));
+    throw new Error(body.detail || 'Airport lookup failed');
+  }
   return r.json();
 }
 
@@ -21,7 +31,30 @@ export async function searchFares(query: SearchQuery): Promise<SearchResponse> {
   return r.json();
 }
 
-export function money(n: number, currency = 'USD'): string {
+export async function fetchDefaults(): Promise<{ origin: Airport; destination: Airport }> {
+  const r = await fetch(`${prefix}/defaults`);
+  if (!r.ok) throw new Error('No default city pair in the route table');
+  return r.json();
+}
+
+export async function fetchCountries(q = ''): Promise<Country[]> {
+  const r = await fetch(`${prefix}/countries?q=${encodeURIComponent(q)}`);
+  if (!r.ok) {
+    const body = await r.json().catch(() => ({ detail: r.statusText }));
+    const detail = body.detail;
+    throw new Error(typeof detail === 'string' ? detail : 'Country lookup failed');
+  }
+  return r.json();
+}
+
+export async function fetchSources(): Promise<{ layers: string[]; sources: SourceDef[] }> {
+  const r = await fetch(`${prefix}/sources`);
+  if (!r.ok) throw new Error('Sources failed');
+  return r.json();
+}
+
+export function money(n: number | null | undefined, currency = 'USD'): string {
+  if (n == null) return '—';
   return new Intl.NumberFormat('en-US', { style: 'currency', currency, maximumFractionDigits: 0 }).format(n);
 }
 
@@ -41,4 +74,14 @@ export function defaultDate(): string {
   const d = new Date();
   d.setDate(d.getDate() + 11);
   return d.toISOString().slice(0, 10);
+}
+
+export function kt(ms: number | null): string {
+  if (ms == null) return '—';
+  return `${Math.round(ms * 1.94384)} kt`;
+}
+
+export function fl(meters: number | null): string {
+  if (meters == null) return '—';
+  return `FL${String(Math.round((meters * 3.28084) / 100)).padStart(3, '0')}`;
 }

@@ -1,26 +1,81 @@
 export type Cabin = 'ECONOMY' | 'PREMIUM_ECONOMY' | 'BUSINESS' | 'FIRST';
 export type ItineraryKind = 'nonstop' | 'connecting' | 'nearby' | 'hidden-city';
 
+export interface Country {
+  iso2: string;
+  iso3?: string | null;
+  name: string;
+  continent: string;
+  continent_name: string;
+  capital: string;
+  currency_code: string;
+  currency_name: string;
+  tld: string;
+  phone: string;
+  languages: string;
+  population: number | null;
+  area_km2: number | null;
+  wikipedia?: string | null;
+  airport_count: number;
+  sources: string;
+}
+
+export interface Region {
+  code: string;
+  local_code: string;
+  name: string;
+  iso_country: string;
+  country_name: string;
+  continent: string;
+}
+
+export interface Runway {
+  id: number;
+  length_ft: number | null;
+  width_ft: number | null;
+  surface: string;
+  lighted: boolean;
+  closed: boolean;
+  le_ident: string;
+  he_ident: string;
+}
+
 export interface Airport {
   iata: string;
+  icao?: string | null;
+  ident?: string | null;
   name: string;
   city: string;
   country: string;
+  country_name?: string;
+  region_code?: string;
+  region_name?: string;
+  continent?: string;
+  continent_name?: string;
+  currency_code?: string;
   lat: number;
   lon: number;
   metro: string;
+  type?: string;
+  scheduled_service?: boolean;
+  elevation_ft?: number | null;
+  wikipedia?: string | null;
+  source?: string;
   hub_carriers: string[];
+  runways?: Runway[];
 }
 
 export interface Segment {
   origin: string;
   dest: string;
   carrier: string;
+  operating_carrier?: string | null;
   flight_number: string;
   dep: string;
   arr: string;
   duration_min: number;
   rbd: string;
+  fare_basis?: string | null;
   aircraft: string;
 }
 
@@ -29,18 +84,24 @@ export interface Offer {
   kind: ItineraryKind;
   channel: string;
   source: string;
+  layer: string;
   segments: Segment[];
-  price: number;
+  price: number | null;
+  base_price?: number | null;
+  taxes?: number | null;
   currency: string;
   cabin: Cabin;
   fare_basis: string;
-  seats: number;
-  refundable: boolean;
+  seats: number | null;
+  last_ticketing_date?: string | null;
+  validating_airline?: string | null;
+  note?: string | null;
   bags_included: number;
   carrier: string;
   duration_min: number;
   stops: number;
   first_flight: string;
+  retrieved_at?: string | null;
 }
 
 export interface RiskItem {
@@ -62,6 +123,23 @@ export interface RiskAssessment {
   expected_enforcement_cost: number;
 }
 
+export interface BookerLink {
+  id: string;
+  name: string;
+  layer: string;
+  role: string;
+  url: string;
+  issues_ticket: boolean;
+}
+
+export interface TrackerLink {
+  id: string;
+  name: string;
+  layer: string;
+  role: string;
+  url: string;
+}
+
 export interface HiddenCityMatch {
   id: string;
   hidden_city: string;
@@ -73,6 +151,7 @@ export interface HiddenCityMatch {
   saving_pct: number;
   currency: string;
   risk: RiskAssessment;
+  bookers: BookerLink[];
 }
 
 export interface ChannelGroup {
@@ -80,6 +159,66 @@ export interface ChannelGroup {
   label: string;
   blurb: string;
   offers: Offer[];
+}
+
+export interface TrackedAircraft {
+  icao24: string;
+  callsign: string | null;
+  origin_country: string | null;
+  lat: number | null;
+  lon: number | null;
+  baro_altitude_m: number | null;
+  on_ground: boolean;
+  velocity_ms: number | null;
+  true_track: number | null;
+  position_source_name: string;
+}
+
+export interface LiveTraffic {
+  airport: string;
+  source: string;
+  layer: string;
+  api_time: number | null;
+  note: string;
+  aircraft: TrackedAircraft[];
+  trackers: TrackerLink[];
+}
+
+export interface BoardFlight {
+  flight_number: string;
+  carrier: string | null;
+  origin: string | null;
+  dest: string | null;
+  scheduled: string | null;
+  estimated: string | null;
+  status: string | null;
+  terminal: string | null;
+  gate: string | null;
+  source: string;
+  layer: string;
+}
+
+export interface ConnectionHint {
+  dest: string;
+  dest_name: string;
+  evidence: string;
+  source: string;
+  layer: string;
+  note: string;
+}
+
+export interface SourceDef {
+  id: string;
+  name: string;
+  layer: string;
+  role: string;
+  is_not: string;
+  freshness: string;
+  url: string;
+  can_price: boolean;
+  can_book: boolean;
+  can_track: boolean;
+  configured?: boolean;
 }
 
 export interface SearchQuery {
@@ -90,7 +229,7 @@ export interface SearchQuery {
   cabin: Cabin;
   currency: string;
   include_nearby: boolean;
-  live: boolean;
+  allow_synthetic: boolean;
 }
 
 export interface SearchResponse {
@@ -98,10 +237,17 @@ export interface SearchResponse {
   origin: Airport;
   destination: Airport;
   elapsed_ms: number;
+  search_id: number | null;
   sources_used: string[];
+  data_gaps: string[];
   cheapest_local: number | null;
   cheapest_any: number | null;
   channels: ChannelGroup[];
   hidden_city: HiddenCityMatch[];
+  connection_hints: ConnectionHint[];
+  bookers: BookerLink[];
+  traffic_origin: LiveTraffic | null;
+  traffic_destination: LiveTraffic | null;
+  board_origin: BoardFlight[];
   notes: string[];
 }

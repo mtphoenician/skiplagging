@@ -4,12 +4,17 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
+    database_url: str = "postgresql+asyncpg://matthieutohme@127.0.0.1:5432/skiplagging"
     amadeus_client_id: str = ""
     amadeus_client_secret: str = ""
     amadeus_hostname: str = "test"
-    cache_ttl_seconds: int = 300
-    max_hidden_candidates: int = 16
-    max_concurrency: int = 6
+    duffel_token: str = ""
+    rapidapi_key: str = ""
+    opensky_client_id: str = ""
+    opensky_client_secret: str = ""
+    cache_ttl_seconds: int = 180
+    max_hidden_candidates: int = 12
+    max_concurrency: int = 5
     cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
 
     model_config = SettingsConfigDict(
@@ -25,6 +30,14 @@ class Settings(BaseSettings):
     @property
     def amadeus_enabled(self) -> bool:
         return bool(self.amadeus_client_id and self.amadeus_client_secret)
+
+    @property
+    def duffel_enabled(self) -> bool:
+        return bool(self.duffel_token)
+
+    @property
+    def aerodatabox_enabled(self) -> bool:
+        return bool(self.rapidapi_key)
 
     @property
     def amadeus_base(self) -> str:
