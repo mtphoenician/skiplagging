@@ -1,0 +1,37 @@
+from functools import lru_cache
+
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    amadeus_client_id: str = ""
+    amadeus_client_secret: str = ""
+    amadeus_hostname: str = "test"
+    cache_ttl_seconds: int = 300
+    max_hidden_candidates: int = 16
+    max_concurrency: int = 6
+    cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
+
+    model_config = SettingsConfigDict(
+        env_file=("../.env", ".env"),
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
+
+    @property
+    def origin_list(self) -> list[str]:
+        return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
+
+    @property
+    def amadeus_enabled(self) -> bool:
+        return bool(self.amadeus_client_id and self.amadeus_client_secret)
+
+    @property
+    def amadeus_base(self) -> str:
+        host = "api.amadeus.com" if self.amadeus_hostname == "production" else "test.api.amadeus.com"
+        return f"https://{host}"
+
+
+@lru_cache(maxsize=1)
+def get_settings() -> Settings:
+    return Settings()
