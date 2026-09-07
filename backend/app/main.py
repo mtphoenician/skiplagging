@@ -13,7 +13,7 @@ from app.config import get_settings
 from app.db import repo
 from app.db.session import init_db, session_factory
 from app.engines.shop import search_all_ways
-from app.models import Airport, Country, Region, SearchQuery, SearchResponse
+from app.models import Airport, Country, HiddenDeal, Region, SearchQuery, SearchResponse
 from app.providers.aerodatabox import AeroDataBoxProvider
 from app.providers.opensky import OpenSkyProvider
 
@@ -171,6 +171,16 @@ async def board(iata: str) -> dict:
         }
     flights = await AeroDataBoxProvider(s, app.state.http).board(iata.upper(), "Departure")
     return {"airport": iata.upper(), "source": "aerodatabox", "layer": "schedule-status", "flights": flights}
+
+
+@app.get("/deals", response_model=list[HiddenDeal])
+async def deals(
+    limit: int = Query(48, ge=1, le=120),
+    origin: str = Query("", max_length=3),
+    dest: str = Query("", max_length=3),
+) -> list[HiddenDeal]:
+    async with session_factory()() as session:
+        return await repo.list_hidden_deals(session, limit=limit, origin=origin, dest=dest)
 
 
 @app.post("/search", response_model=SearchResponse)

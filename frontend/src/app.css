@@ -964,9 +964,67 @@ h3 {
   box-shadow: 0 16px 36px rgba(70, 48, 18, 0.1);
 }
 
-.offer.pick {
+.offer.pick,
+.offer.selected {
   border-color: #1c1915;
   box-shadow: 0 14px 32px rgba(70, 48, 18, 0.1);
+}
+
+.offer-hit {
+  display: block;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.fare-sheet {
+  margin: 0 0 18px;
+  padding: 16px;
+  border-radius: 16px;
+  background: #fff;
+  border: 1px solid var(--line);
+}
+
+.quote-list {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+}
+
+.quote-list li {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: start;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.quote-list li:last-child {
+  border-bottom: 0;
+}
+
+.quote-list li.best strong {
+  color: var(--green);
+}
+
+.quote-price {
+  text-align: right;
+}
+
+.quote-price b {
+  font-family: var(--serif);
+  font-size: 1.35rem;
+}
+
+.quote-price small {
+  display: block;
+  color: var(--green);
+  font-size: 0.75rem;
 }
 
 .pick-kicker {
@@ -1004,6 +1062,73 @@ h3 {
   font-size: 0.78rem;
   font-weight: 500;
   color: var(--green);
+}
+
+.price-was {
+  display: block;
+  margin-bottom: 4px;
+  font-family: var(--sans);
+  font-size: 0.95rem;
+  font-weight: 600;
+  letter-spacing: 0;
+  color: var(--muted);
+  text-decoration: line-through;
+  text-decoration-thickness: 2px;
+  text-decoration-color: var(--red);
+}
+
+.deal-preview {
+  margin: 36px 0 8px;
+  animation: fadeup 0.7s ease both;
+  animation-delay: 0.12s;
+}
+
+.deal-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: end;
+  gap: 16px;
+  margin-bottom: 12px;
+}
+
+.deal-head h2 {
+  margin: 4px 0 0;
+  font-size: 1.55rem;
+}
+
+.text-link {
+  color: var(--gold-deep);
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.text-link:hover {
+  text-decoration: underline;
+}
+
+.deal-list {
+  display: grid;
+  gap: 12px;
+}
+
+.deal-list.compact {
+  grid-template-columns: 1fr 1fr;
+}
+
+@media (max-width: 800px) {
+  .deal-list.compact {
+    grid-template-columns: 1fr;
+  }
+}
+
+.deal-card .deal-link {
+  color: inherit;
+  text-decoration: none;
+}
+
+.deal-card h3 {
+  margin: 10px 0 6px;
+  font-size: 1.15rem;
 }
 
 .seg {

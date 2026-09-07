@@ -183,7 +183,7 @@ def booker_links(
     ]
     for iata, name in airlines or []:
         iata = iata.upper()
-        if len(iata) < 2:
+        if len(iata) < 2 or iata in {"ZZ", "XX", "YY"}:
             continue
         q = quote(f"flights from {o} to {d} on {date} one way {name}")
         links.append(

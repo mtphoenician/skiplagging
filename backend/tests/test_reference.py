@@ -51,10 +51,11 @@ def test_bookers_have_no_carrier_website_roster():
     src = open(booker_links.__code__.co_filename, encoding="utf-8").read()
     for banned in ("aa.com", "delta.com", "united.com", "lufthansa.com", "emirates.com"):
         assert banned not in src
-    links = booker_links("XXX", "YYY", "2026-11-02", 1, [("ZZ", "Zed Air")])
+    links = booker_links("XXX", "YYY", "2026-11-02", 1, [("ZZ", "Zed Air"), ("BA", "British Airways")])
     hosts = {u.url for u in links}
     assert any("XXX" in u and "YYY" in u and "2026-11-02" in u for u in hosts)
-    assert any("Zed" in u for u in hosts)
+    assert all("Zed" not in u for u in hosts)
+    assert any("British" in u for u in hosts)
     assert any(b.layer == "meta-search" for b in links)
     assert any(b.layer == "ota" and b.issues_ticket for b in links)
     names = {b.name for b in links}

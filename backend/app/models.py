@@ -281,6 +281,27 @@ class SourceDef(BaseModel):
     can_track: bool
 
 
+class HiddenDeal(BaseModel):
+    id: int
+    origin: str
+    origin_city: str
+    dest: str
+    dest_city: str
+    hidden_city: str
+    hidden_city_name: str
+    date: str
+    honest_price: float
+    through_price: float
+    currency: str
+    saving: float
+    saving_pct: float
+    first_flight: str
+    source: str
+    bookers: list[BookerLink] = Field(default_factory=list)
+    local_offer: Offer | None = None
+    through_offer: Offer | None = None
+
+
 class SearchResponse(BaseModel):
     query: SearchQuery
     origin: Airport

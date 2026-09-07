@@ -18,10 +18,11 @@ from app.db.tables import (
     RegionRow,
     RouteRow,
     RunwayRow,
+    HiddenDealRow,
     SearchRow,
     TrackRow,
 )
-from app.models import Airport, Country, Navaid, Region, Runway
+from app.models import Airport, BookerLink, Country, HiddenDeal, HiddenCityMatch, Navaid, Offer, Region, Runway
 
 
 async def continent_names(session: AsyncSession) -> dict[str, str]:
@@ -821,6 +822,7 @@ async def counts(session: AsyncSession) -> dict[str, int]:
         "navaids": await c(NavaidRow),
         "airlines": await c(AirlineRow),
         "routes": await c(RouteRow),
+        "hidden_deals": await c(HiddenDealRow),
     }
 
 
@@ -936,3 +938,136 @@ def _haversine(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     dlon, dlat = rlon2 - rlon1, rlat2 - rlat1
     h = sin(dlat / 2) ** 2 + cos(rlat1) * cos(rlat2) * sin(dlon / 2) ** 2
     return 6371.0 * 2 * asin(sqrt(h))
+
+
+async def persist_hidden_deals(
+    session: AsyncSession,
+    matches: list[HiddenCityMatch],
+    *,
+    origin: str,
+    origin_city: str,
+    dest: str,
+    dest_city: str,
+    date: str,
+) -> int:
+    saved = 0
+    for match in matches:
+        local = match.local_offer
+        through = match.through_offer
+        if local.price is None or through.price is None or through.price >= local.price:
+            continue
+        first = through.first_flight or ""
+        existing = (
+            await session.execute(
+                select(HiddenDealRow).where(
+                    HiddenDealRow.origin == origin,
+                    HiddenDealRow.destination == dest,
+                    HiddenDealRow.hidden_city == match.hidden_city,
+                    HiddenDealRow.date == date,
+                    HiddenDealRow.first_flight == first,
+                )
+            )
+        ).scalar_one_or_none()
+        fields = dict(
+            origin_city=origin_city,
+            dest_city=dest_city,
+            hidden_city_name=match.hidden_city_name,
+            honest_price=float(local.price),
+            through_price=float(through.price),
+            currency=match.currency,
+            saving=float(match.gross_saving),
+            saving_pct=float(match.saving_pct),
+            source=through.source,
+            bookers=[b.model_dump() for b in match.bookers],
+            local_payload=local.model_dump(),
+            through_payload=through.model_dump(),
+        )
+        if existing:
+            for key, value in fields.items():
+                setattr(existing, key, value)
+        else:
+            session.add(
+                HiddenDealRow(
+                    origin=origin,
+                    destination=dest,
+                    hidden_city=match.hidden_city,
+                    date=date,
+                    first_flight=first,
+                    **fields,
+                )
+            )
+        saved += 1
+    if saved:
+        await session.commit()
+    return saved
+
+
+def _deal_from_row(row: HiddenDealRow) -> HiddenDeal:
+    bookers = [BookerLink.model_validate(b) for b in (row.bookers or [])]
+    local = Offer.model_validate(row.local_payload) if row.local_payload else None
+    through = Offer.model_validate(row.through_payload) if row.through_payload else None
+    return HiddenDeal(
+        id=row.id,
+        origin=row.origin,
+        origin_city=row.origin_city,
+        dest=row.destination,
+        dest_city=row.dest_city,
+        hidden_city=row.hidden_city,
+        hidden_city_name=row.hidden_city_name,
+        date=row.date,
+        honest_price=row.honest_price,
+        through_price=row.through_price,
+        currency=row.currency,
+        saving=row.saving,
+        saving_pct=row.saving_pct,
+        first_flight=row.first_flight,
+        source=row.source,
+        bookers=bookers,
+        local_offer=local,
+        through_offer=through,
+    )
+
+
+async def list_hidden_deals(
+    session: AsyncSession,
+    *,
+    limit: int = 48,
+    origin: str = "",
+    dest: str = "",
+) -> list[HiddenDeal]:
+    stmt = select(HiddenDealRow).order_by(HiddenDealRow.saving.desc(), HiddenDealRow.saving_pct.desc())
+    if origin:
+        stmt = stmt.where(HiddenDealRow.origin == origin.upper())
+    if dest:
+        stmt = stmt.where(HiddenDealRow.destination == dest.upper())
+    rows = (await session.execute(stmt.limit(min(limit, 120)))).scalars().all()
+    return [_deal_from_row(r) for r in rows]
+
+
+async def busy_city_pairs(session: AsyncSession, limit: int = 24) -> list[tuple[str, str]]:
+    stmt = (
+        select(RouteRow.origin_iata, RouteRow.dest_iata, func.count())
+        .where(RouteRow.stops == 0)
+        .group_by(RouteRow.origin_iata, RouteRow.dest_iata)
+        .order_by(func.count().desc())
+        .limit(limit * 4)
+    )
+    rows = (await session.execute(stmt)).all()
+    out: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for origin, dest, _n in rows:
+        if (origin, dest) in seen or origin == dest:
+            continue
+        o_ap = await get_airport(session, origin)
+        d_ap = await get_airport(session, dest)
+        if not o_ap or not d_ap or not o_ap.scheduled_service or not d_ap.scheduled_service:
+            continue
+        if (o_ap.type or "") not in {"large_airport", "medium_airport"}:
+            continue
+        if (d_ap.type or "") not in {"large_airport", "medium_airport"}:
+            continue
+        seen.add((origin, dest))
+        out.append((origin, dest))
+        if len(out) >= limit:
+            break
+    return out

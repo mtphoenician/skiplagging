@@ -241,6 +241,27 @@ export interface SearchQuery {
   allow_synthetic: boolean;
 }
 
+export interface HiddenDeal {
+  id: number;
+  origin: string;
+  origin_city: string;
+  dest: string;
+  dest_city: string;
+  hidden_city: string;
+  hidden_city_name: string;
+  date: string;
+  honest_price: number;
+  through_price: number;
+  currency: string;
+  saving: number;
+  saving_pct: number;
+  first_flight: string;
+  source: string;
+  bookers: BookerLink[];
+  local_offer?: Offer | null;
+  through_offer?: Offer | null;
+}
+
 export interface SearchResponse {
   query: SearchQuery;
   origin: Airport;

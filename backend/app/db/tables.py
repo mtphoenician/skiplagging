@@ -179,6 +179,33 @@ class OfferRow(Base):
     retrieved_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+class HiddenDealRow(Base):
+    __tablename__ = "hidden_deals"
+    __table_args__ = (
+        UniqueConstraint("origin", "destination", "hidden_city", "date", "first_flight", name="uq_hidden_deal"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    origin: Mapped[str] = mapped_column(String(3), index=True)
+    destination: Mapped[str] = mapped_column(String(3), index=True)
+    hidden_city: Mapped[str] = mapped_column(String(3), index=True)
+    origin_city: Mapped[str] = mapped_column(Text, default="")
+    dest_city: Mapped[str] = mapped_column(Text, default="")
+    hidden_city_name: Mapped[str] = mapped_column(Text, default="")
+    date: Mapped[str] = mapped_column(String(10), index=True)
+    honest_price: Mapped[float] = mapped_column(Float)
+    through_price: Mapped[float] = mapped_column(Float)
+    currency: Mapped[str] = mapped_column(String(8), default="USD")
+    saving: Mapped[float] = mapped_column(Float, default=0)
+    saving_pct: Mapped[float] = mapped_column(Float, default=0)
+    first_flight: Mapped[str] = mapped_column(String(16), default="")
+    source: Mapped[str] = mapped_column(String(32), default="")
+    bookers: Mapped[list] = mapped_column(JSONB, default=list)
+    local_payload: Mapped[dict] = mapped_column(JSONB, default=dict)
+    through_payload: Mapped[dict] = mapped_column(JSONB, default=dict)
+    retrieved_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 class TrackRow(Base):
     __tablename__ = "track_snapshots"
 

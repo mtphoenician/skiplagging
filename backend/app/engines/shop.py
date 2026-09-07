@@ -112,6 +112,16 @@ async def search_all_ways(
     for match in hidden_matches:
         thru_al = await repo.airlines_by_iata(session, [match.through_offer.carrier])
         match.bookers = booker_links(o_ap.iata, match.hidden_city, query.date, query.adults, thru_al)
+    if hidden_matches:
+        await repo.persist_hidden_deals(
+            session,
+            hidden_matches,
+            origin=o_ap.iata[:3],
+            origin_city=o_ap.city,
+            dest=d_ap.iata[:3],
+            dest_city=d_ap.city,
+            date=query.date,
+        )
 
     channels = [
         ChannelGroup(

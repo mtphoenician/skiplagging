@@ -1,18 +1,19 @@
 <script lang="ts">
   import { page } from '$app/state';
-  import BookerList from '$lib/components/BookerList.svelte';
+  import FareSheet from '$lib/components/FareSheet.svelte';
   import HiddenCityCard from '$lib/components/HiddenCityCard.svelte';
   import OfferCard from '$lib/components/OfferCard.svelte';
   import SearchForm from '$lib/components/SearchForm.svelte';
   import TrafficPanel from '$lib/components/TrafficPanel.svelte';
-  import { money, searchFares } from '$lib/api';
-  import type { Cabin, SearchResponse } from '$lib/types';
+  import { money, sameItinerary, searchFares } from '$lib/api';
+  import type { Cabin, Offer, SearchResponse } from '$lib/types';
 
   const params = $derived(page.url.searchParams);
   let data = $state<SearchResponse | null>(null);
   let error = $state('');
   let loading = $state(true);
-  let tab = $state<'flights' | 'hidden' | 'book' | 'live'>('flights');
+  let tab = $state<'flights' | 'hidden' | 'live'>('flights');
+  let selected = $state<Offer | null>(null);
 
   let origin = $state('');
   let destination = $state('');
@@ -38,6 +39,7 @@
     loading = true;
     error = '';
     data = null;
+    selected = null;
 
     if (!/^(CITY-)?[A-Z]{3}$/.test(o) || !/^(CITY-)?[A-Z]{3}$/.test(d) || !dt) {
       error = 'Choose two airports and a date.';
@@ -78,6 +80,25 @@
   const priced = $derived(data?.channels.filter((c) => c.kind !== 'hidden-city') ?? []);
   const pricedCount = $derived(priced.reduce((n, c) => n + c.offers.length, 0));
   const noShop = $derived(Boolean(data && data.cheapest_any == null && data.data_gaps.length));
+  const allOffers = $derived(
+    data
+      ? [
+          ...data.channels.flatMap((c) => c.offers),
+          ...(data.honest_pick ? [data.honest_pick.offer] : []),
+          ...data.hidden_city.map((m) => m.through_offer)
+        ]
+      : []
+  );
+  const selectedQuotes = $derived(
+    selected
+      ? [...new Map(allOffers.filter((o) => sameItinerary(o, selected)).map((o) => [o.id, o])).values()]
+      : []
+  );
+
+  function pickOffer(offer: Offer) {
+    selected = selected?.id === offer.id ? null : offer;
+    tab = 'flights';
+  }
 </script>
 
 <svelte:head>
@@ -122,22 +143,29 @@
 
     {#if noShop}
       <p class="banner">
-        No fare-shop keys are configured, so this app cannot price a ticket. Google Flights, Kayak, and the others below
-        have the live inventory — open the same trip there.
+        No fare-shop keys are configured, so this app cannot price a ticket. Click a flight after a shop is connected.
       </p>
     {/if}
 
     {#if data.honest_pick}
       <p class="pick-kicker">{data.honest_pick.reason}</p>
-      <OfferCard offer={data.honest_pick.offer} featured />
+      <OfferCard
+        offer={data.honest_pick.offer}
+        featured
+        selected={selected?.id === data.honest_pick.offer.id}
+        onclick={() => data.honest_pick && pickOffer(data.honest_pick.offer)}
+      />
     {/if}
     {#if data.hidden_if_cheaper}
       <p class="pick-kicker">Cheaper hidden-city ticket</p>
       <HiddenCityCard match={data.hidden_if_cheaper} />
     {/if}
 
-    <p class="note" style="margin:14px 0 8px">Compare this trip</p>
-    <BookerList links={data.bookers} compact />
+    {#if selected}
+      <FareSheet offer={selected} quotes={selectedQuotes} bookers={data.bookers} date={data.query.date} />
+    {:else}
+      <p class="note" style="margin:14px 0 8px">Click a flight to see shopped prices for that exact itinerary.</p>
+    {/if}
 
     <div class="tabs">
       <button class:on={tab === 'flights'} type="button" onclick={() => (tab = 'flights')}>
@@ -146,7 +174,6 @@
       <button class:on={tab === 'hidden'} type="button" onclick={() => (tab = 'hidden')}>
         Hidden city {data.hidden_city.length ? `(${data.hidden_city.length})` : ''}
       </button>
-      <button class:on={tab === 'book'} type="button" onclick={() => (tab = 'book')}>Book</button>
       <button class:on={tab === 'live'} type="button" onclick={() => (tab = 'live')}>Live</button>
     </div>
 
@@ -157,7 +184,7 @@
             {ch.kind === 'nonstop' ? 'Nonstop' : ch.kind === 'connecting' ? 'Connecting' : 'Nearby airports'}
           </h2>
           {#each ch.offers.filter((o) => o.id !== data.honest_pick?.offer.id) as offer}
-            <OfferCard {offer} />
+            <OfferCard {offer} selected={selected?.id === offer.id} onclick={() => pickOffer(offer)} />
           {/each}
         {/if}
       {/each}
@@ -165,7 +192,7 @@
         <p class="empty">
           {noShop
             ? 'No priced flights here — this app is not connected to a fare shop.'
-            : 'No priced flights for this search. Use the booking sites above.'}
+            : 'No priced flights for this search. Click Search again or try another date.'}
         </p>
         {#if data.connection_hints.length}
           <h2 class="section-title">Cities historically beyond {data.destination.iata}</h2>
@@ -220,8 +247,6 @@
           </tbody>
         </table>
       {/if}
-    {:else if tab === 'book'}
-      <BookerList links={data.bookers} />
     {:else}
       <TrafficPanel traffic={data.traffic_origin} label={data.origin.city} />
       <TrafficPanel traffic={data.traffic_destination} label={data.destination.city} />

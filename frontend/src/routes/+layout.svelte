@@ -20,6 +20,7 @@
       </a>
       <div class="nav-links">
         <a href="/" class:active={path === '/'}>Search</a>
+        <a href="/hidden" class:active={path.startsWith('/hidden')}>Hidden city</a>
         <a href="/anatomy" class:active={path.startsWith('/anatomy')}>How it works</a>
         <a href="/places" class:active={path.startsWith('/places')}>Places</a>
         <a href="/sources" class:active={path.startsWith('/sources')}>Data</a>

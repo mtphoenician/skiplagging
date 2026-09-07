@@ -28,15 +28,16 @@
       </div>
       {#if match.bookers?.length}
         <div class="book-row" style="margin-top:12px">
-          {#each match.bookers.slice(0, 4) as b}
+          {#each match.bookers.filter((b) => ['google-flights', 'kayak', 'skyscanner', 'booking-com'].includes(b.id)).slice(0, 4) as b}
             <a class="book-btn" href={b.url} target="_blank" rel="noreferrer">{b.name}</a>
           {/each}
         </div>
       {/if}
     </div>
     <div class="price">
+      <span class="price-was">{money(match.local_offer.price, match.currency)}</span>
       {money(t.price, match.currency)}
-      <small>Save {money(match.gross_saving, match.currency)} vs {money(match.local_offer.price, match.currency)}</small>
+      <small>Save {money(match.gross_saving, match.currency)}</small>
     </div>
   </div>
 

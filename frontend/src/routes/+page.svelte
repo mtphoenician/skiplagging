@@ -1,8 +1,9 @@
 <script lang="ts">
+  import DealCard from '$lib/components/DealCard.svelte';
   import FlightArc from '$lib/components/FlightArc.svelte';
   import SearchForm from '$lib/components/SearchForm.svelte';
-  import { defaultDate, fetchDefaults } from '$lib/api';
-  import type { Cabin } from '$lib/types';
+  import { defaultDate, fetchDefaults, fetchDeals } from '$lib/api';
+  import type { Cabin, HiddenDeal } from '$lib/types';
 
   let origin = $state('');
   let destination = $state('');
@@ -10,6 +11,15 @@
   let adults = $state(1);
   let cabin = $state<Cabin>('ECONOMY');
   let include_nearby = $state(true);
+  let preview = $state<HiddenDeal[]>([]);
+
+  $effect(() => {
+    fetchDeals({ limit: 4 })
+      .then((rows) => {
+        preview = rows;
+      })
+      .catch(() => {});
+  });
 
   $effect(() => {
     fetchDefaults()
@@ -34,6 +44,23 @@
   </header>
 
   <SearchForm bind:origin bind:destination bind:date bind:adults bind:cabin bind:include_nearby />
+
+  {#if preview.length}
+    <section class="deal-preview">
+      <div class="deal-head">
+        <div>
+          <p class="eyebrow">Saved inversions</p>
+          <h2>Best hidden-city deals</h2>
+        </div>
+        <a class="text-link" href="/hidden">Browse all</a>
+      </div>
+      <div class="deal-list compact">
+        {#each preview as deal}
+          <DealCard {deal} compact />
+        {/each}
+      </div>
+    </section>
+  {/if}
 
   <section class="how">
     <article>

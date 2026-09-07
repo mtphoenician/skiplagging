@@ -1,4 +1,4 @@
-import type { Airport, Country, SearchQuery, SearchResponse, SourceDef } from './types';
+import type { Airport, Country, HiddenDeal, SearchQuery, SearchResponse, SourceDef } from './types';
 
 const prefix = '/api';
 
@@ -28,6 +28,16 @@ export async function searchFares(query: SearchQuery): Promise<SearchResponse> {
     const body = await r.json().catch(() => ({ detail: r.statusText }));
     throw new Error(body.detail || 'Search failed');
   }
+  return r.json();
+}
+
+export async function fetchDeals(opts: { limit?: number; origin?: string; dest?: string } = {}): Promise<HiddenDeal[]> {
+  const q = new URLSearchParams();
+  if (opts.limit) q.set('limit', String(opts.limit));
+  if (opts.origin) q.set('origin', opts.origin);
+  if (opts.dest) q.set('dest', opts.dest);
+  const r = await fetch(`${prefix}/deals?${q.toString()}`);
+  if (!r.ok) throw new Error('Deals failed');
   return r.json();
 }
 
@@ -68,6 +78,19 @@ export function duration(min: number): string {
   const h = Math.floor(min / 60);
   const m = min % 60;
   return h ? `${h}h ${m}m` : `${m}m`;
+}
+
+export function sameItinerary(
+  a: { segments: { origin: string; dest: string; flight_number: string }[] },
+  b: { segments: { origin: string; dest: string; flight_number: string }[] }
+): boolean {
+  if (a.segments.length !== b.segments.length) return false;
+  return a.segments.every(
+    (s, i) =>
+      s.flight_number === b.segments[i].flight_number &&
+      s.origin === b.segments[i].origin &&
+      s.dest === b.segments[i].dest
+  );
 }
 
 export function layoverMinutes(offer: { segments: { arr: string; dep: string }[] }): number {

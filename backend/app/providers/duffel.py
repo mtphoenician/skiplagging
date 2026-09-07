@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
 from typing import Any
 
@@ -18,32 +19,44 @@ class DuffelProvider:
         self._client = client
 
     async def shop(self, req: ShopRequest) -> list[Offer]:
-        r = await self._client.post(
-            "https://api.duffel.com/air/offer_requests",
-            params={"return_offers": "true"},
-            headers={
-                "Authorization": f"Bearer {self._s.duffel_token}",
-                "Duffel-Version": "v2",
-                "Accept": "application/json",
-                "Content-Type": "application/json",
-            },
-            json={
-                "data": {
-                    "slices": [
-                        {
-                            "origin": req.origin,
-                            "destination": req.dest,
-                            "departure_date": req.date,
-                        }
-                    ],
-                    "passengers": [{"type": "adult"} for _ in range(req.adults)],
-                    "cabin_class": req.cabin.lower().replace("premium_economy", "premium_economy"),
-                    "max_connections": 0 if req.nonstop else 1,
-                }
-            },
-            timeout=40.0,
-        )
-        if r.status_code >= 400:
+        payload = {
+            "data": {
+                "slices": [
+                    {
+                        "origin": req.origin,
+                        "destination": req.dest,
+                        "departure_date": req.date,
+                    }
+                ],
+                "passengers": [{"type": "adult"} for _ in range(req.adults)],
+                "cabin_class": req.cabin.lower().replace("premium_economy", "premium_economy"),
+                "max_connections": 0 if req.nonstop else 1,
+            }
+        }
+        headers = {
+            "Authorization": f"Bearer {self._s.duffel_token}",
+            "Duffel-Version": "v2",
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+        }
+        r = None
+        for attempt in range(4):
+            r = await self._client.post(
+                "https://api.duffel.com/air/offer_requests",
+                params={"return_offers": "true"},
+                headers=headers,
+                json=payload,
+                timeout=40.0,
+            )
+            if r.status_code != 429:
+                break
+            raw = r.headers.get("retry-after") or r.headers.get("ratelimit-reset") or "3"
+            try:
+                wait = float(raw)
+            except ValueError:
+                wait = 3.0
+            await asyncio.sleep(min(max(wait, 1.5), 25.0))
+        if r is None or r.status_code >= 400:
             return []
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
         offers: list[Offer] = []
