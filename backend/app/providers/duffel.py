@@ -98,6 +98,7 @@ def _one(raw: dict[str, Any], req: ShopRequest, now: str) -> Offer | None:
         )
     owner = (raw.get("owner") or {}).get("iata_code") or segments[0].carrier
     live = bool(raw.get("live_mode"))
+    slice_mins = _dur(slices[0].get("duration"))
     return Offer(
         id=f"duffel-{raw.get('id', '')}",
         kind="nonstop" if len(segments) == 1 else "connecting",
@@ -115,7 +116,7 @@ def _one(raw: dict[str, Any], req: ShopRequest, now: str) -> Offer | None:
         validating_airline=owner,
         refundable=False,
         carrier=segments[0].carrier,
-        duration_min=sum(s.duration_min for s in segments),
+        duration_min=slice_mins or sum(s.duration_min for s in segments),
         stops=max(len(segments) - 1, 0),
         first_flight=segments[0].flight_number,
         retrieved_at=now,

@@ -57,8 +57,10 @@ async def search_all_ways(
 
     o_tokens = shop_tokens(o_ap)
     d_tokens = shop_tokens(d_ap)
-    o_airports = set(o_ap.members or [o_ap.iata])
-    d_airports = set(d_ap.members or [d_ap.iata])
+    o_members = list(o_ap.members or [o_ap.iata])
+    d_members = list(d_ap.members or [d_ap.iata])
+    o_airports = set(o_members)
+    d_airports = set(d_members)
     req = ShopRequest(
         origin=o_tokens[0],
         dest=d_tokens[0],
@@ -70,8 +72,12 @@ async def search_all_ways(
     )
 
     local_t = _shop_place(req, o_ap, d_ap, amadeus, duffel)
-    nearby_t = _shop_nearby(req, query, session, amadeus, duffel, o_airports, d_airports) if query.include_nearby else _empty_list()
-    hidden_t = _shop_hidden(req, query, settings, session, amadeus, duffel, o_airports, d_airports)
+    nearby_t = (
+        _shop_nearby(req, query, session, amadeus, duffel, o_members, d_members)
+        if query.include_nearby
+        else _empty_list()
+    )
+    hidden_t = _shop_hidden(req, query, settings, session, amadeus, duffel, o_ap, d_ap)
     hints_t = _connection_hints(session, origin, dest, amadeus, dest_members=list(d_airports))
     traffic_place_o = await repo.get_airport(session, (o_ap.members or [o_ap.iata])[0]) or o_ap
     traffic_place_d = await repo.get_airport(session, (d_ap.members or [d_ap.iata])[0]) or d_ap
@@ -98,13 +104,19 @@ async def search_all_ways(
     priced = [o for o in local_offers if o.price is not None]
     nonstop = [o for o in priced if o.stops == 0]
     connecting = [o for o in priced if o.stops > 0]
-    cheapest_local = min((o.price for o in priced if o.price is not None), default=None)
-    pool = priced + [o for o in nearby_offers if o.price is not None] + [
-        m.through_offer for m in hidden_matches if m.through_offer.price is not None
-    ]
-    cheapest_any = min((o.price for o in pool if o.price is not None), default=None)
     honest_pick = pick_honest(nonstop, connecting)
     hidden_if_cheaper = _hidden_if_cheaper(hidden_matches, honest_pick)
+    compare_ccy = honest_pick.offer.currency if honest_pick else None
+    local_cmp = [o for o in priced if compare_ccy is None or o.currency == compare_ccy]
+    cheapest_local = min((o.price for o in local_cmp if o.price is not None), default=None)
+    pool = local_cmp + [
+        o for o in nearby_offers if o.price is not None and (compare_ccy is None or o.currency == compare_ccy)
+    ] + [
+        m.through_offer
+        for m in hidden_matches
+        if m.through_offer.price is not None and (compare_ccy is None or m.through_offer.currency == compare_ccy)
+    ]
+    cheapest_any = min((o.price for o in pool if o.price is not None), default=None)
 
     carriers = list({o.carrier for o in priced if o.carrier})
     airline_names = await repo.airlines_by_iata(session, carriers[:6])
@@ -134,7 +146,7 @@ async def search_all_ways(
             kind="connecting",
             label="Priced connecting itineraries that end at B",
             blurb="Honest through products ticketed to B. Different from hidden-city A→B→C.",
-            offers=sorted(connecting, key=lambda o: (layover_minutes(o), o.price or 0))[:10],
+            offers=sorted(connecting, key=lambda o: (o.price or 1e12, layover_minutes(o), o.duration_min))[:10],
         ),
         ChannelGroup(
             kind="nearby",
@@ -339,13 +351,15 @@ async def _shop_nearby(
     session: AsyncSession,
     amadeus: AmadeusProvider | None,
     duffel: DuffelProvider | None,
-    origin_airports: set[str] | None = None,
-    dest_airports: set[str] | None = None,
+    origin_members: list[str] | None = None,
+    dest_members: list[str] | None = None,
 ) -> list[Offer]:
-    skip_o = origin_airports or {req.origin}
-    skip_d = dest_airports or {req.dest}
-    near_o = [a for a in await repo.nearby_airports(session, req.origin) if a.iata not in skip_o]
-    near_d = [a for a in await repo.nearby_airports(session, req.dest) if a.iata not in skip_d]
+    skip_o = set(origin_members or [req.origin])
+    skip_d = set(dest_members or [req.dest])
+    anchor_o = (origin_members or [req.origin])[0]
+    anchor_d = (dest_members or [req.dest])[0]
+    near_o = [a for a in await repo.nearby_airports(session, anchor_o) if a.iata not in skip_o]
+    near_d = [a for a in await repo.nearby_airports(session, anchor_d) if a.iata not in skip_d]
     pairs: list[tuple[str, str]] = []
     for o in [req.origin, *[a.iata for a in near_o[:2]]]:
         for d in [req.dest, *[a.iata for a in near_d[:2]]]:
@@ -377,22 +391,27 @@ async def _shop_hidden(
     session: AsyncSession,
     amadeus: AmadeusProvider | None,
     duffel: DuffelProvider | None,
-    origin_airports: set[str] | None = None,
-    dest_airports: set[str] | None = None,
+    origin_place=None,
+    dest_place=None,
 ) -> list[HiddenCityMatch]:
     if not amadeus and not duffel:
         return []
-    origins = origin_airports or {req.origin}
-    dests = dest_airports or {req.dest}
-    local_offers = await _shop_providers(replace(req, nonstop=False, max_offers=15), amadeus, duffel)
+    origin_members = list((origin_place.members if origin_place else None) or [req.origin])
+    dest_members = list((dest_place.members if dest_place else None) or [req.dest])
+    origins = set(origin_members)
+    dests = set(dest_members)
+    if origin_place is not None and dest_place is not None:
+        local_offers = await _shop_place(req, origin_place, dest_place, amadeus, duffel)
+    else:
+        local_offers = await _shop_providers(replace(req, nonstop=False, max_offers=15), amadeus, duffel)
     local_priced = [o for o in local_offers if o.price is not None]
-    local = min((o for o in local_priced if o.stops == 0), key=lambda o: o.price or 1e12, default=None)
-    if local is None:
-        local = min(local_priced, key=lambda o: o.price or 1e12, default=None)
+    local = _best_local_honest(local_priced)
     if local is None:
         return []
 
-    candidates = await _c_candidates(session, req.origin, list(dests), settings.max_hidden_candidates, amadeus)
+    candidates = await _c_candidates(
+        session, origins, dest_members, settings.max_hidden_candidates, amadeus
+    )
     sem = asyncio.Semaphore(settings.max_concurrency)
 
     async def probe(c: str) -> HiddenCityMatch | None:
@@ -407,11 +426,15 @@ async def _shop_hidden(
                 return None
             through = min(via, key=lambda o: o.price or 1e12)
             through.kind = "hidden-city"
-            if through.price is None or local.price is None or through.price >= local.price:
+            if (
+                through.price is None
+                or local.price is None
+                or through.currency != local.currency
+                or through.price >= local.price
+            ):
                 return None
             ap = await repo.get_airport(session, c)
             name = f"{ap.city} ({c})" if ap else c
-            origin_ap = await repo.get_airport(session, req.origin)
             return attach_risk(
                 match_id=f"hc-{through.id}-{c}",
                 hidden_city=c,
@@ -419,7 +442,7 @@ async def _shop_hidden(
                 local=local,
                 through=through,
                 true_dest=req.dest,
-                origin_country=origin_ap.country if origin_ap else "",
+                origin_country=getattr(origin_place, "country", "") or "",
                 hidden_country=ap.country if ap else "",
             )
 
@@ -429,13 +452,14 @@ async def _shop_hidden(
 
 async def _c_candidates(
     session: AsyncSession,
-    origin: str,
+    origin: str | set[str],
     dests: str | list[str],
     limit: int,
     amadeus: AmadeusProvider | None,
 ) -> list[str]:
     dest_list = [dests] if isinstance(dests, str) else list(dests)
-    seen = {origin, *dest_list}
+    origin_codes = {origin} if isinstance(origin, str) else set(origin)
+    seen = {c.upper() for c in origin_codes} | {d.upper() for d in dest_list}
     ranked: list[str] = []
 
     def push(codes: list[str]) -> None:
@@ -453,7 +477,7 @@ async def _c_candidates(
                 pass
     for dest in dest_list[:4]:
         spokes = await repo.destinations_from(session, dest, limit=limit)
-        push([d for d, _, _ in spokes if d != origin])
+        push([d for d, _, _ in spokes if d not in seen])
     return ranked[:limit]
 
 
@@ -509,12 +533,14 @@ async def _connection_hints(
 def _via_b(offer: Offer, origin: str | set[str], dest_b: str | set[str], dest_c: str) -> bool:
     if len(offer.segments) < 2:
         return False
-    origins = {origin} if isinstance(origin, str) else origin
-    dests = {dest_b} if isinstance(dest_b, str) else dest_b
+    origins = {o.upper() for o in ({origin} if isinstance(origin, str) else origin)}
+    dests = {d.upper() for d in ({dest_b} if isinstance(dest_b, str) else dest_b)}
+    first, last = offer.segments[0], offer.segments[-1]
     return (
-        offer.segments[0].origin in origins
-        and offer.segments[0].dest in dests
-        and offer.segments[-1].dest == dest_c
+        first.origin.upper() in origins
+        and first.dest.upper() in dests
+        and last.dest.upper() == dest_c.upper()
+        and last.dest.upper() not in dests
     )
 
 
@@ -541,7 +567,10 @@ def _parse_leg_time(value: str) -> datetime | None:
 
 
 def layover_minutes(offer: Offer) -> int:
+    if len(offer.segments) < 2:
+        return 0
     total = 0
+    parsed = 0
     for first, second in zip(offer.segments, offer.segments[1:]):
         arr = _parse_leg_time(first.arr)
         dep = _parse_leg_time(second.dep)
@@ -554,27 +583,52 @@ def layover_minutes(offer: Offer) -> int:
         gap = int((dep - arr).total_seconds() // 60)
         if gap > 0:
             total += gap
-    return total
+            parsed += 1
+    if parsed:
+        return total
+    air = sum(s.duration_min for s in offer.segments)
+    inferred = offer.duration_min - air
+    if inferred > 0:
+        return inferred
+    return 24 * 60
+
+
+def _priced_in_currency(offers: list[Offer]) -> list[Offer]:
+    priced = [o for o in offers if o.price is not None]
+    if not priced:
+        return []
+    counts: dict[str, int] = {}
+    for offer in priced:
+        counts[offer.currency] = counts.get(offer.currency, 0) + 1
+    preferred = max(counts, key=lambda c: counts[c])
+    return [o for o in priced if o.currency == preferred]
+
+
+def _best_local_honest(offers: list[Offer]) -> Offer | None:
+    priced = _priced_in_currency(offers)
+    if not priced:
+        return None
+    return min(priced, key=lambda o: (o.price or 1e12, layover_minutes(o), o.duration_min))
 
 
 def pick_honest(nonstop: list[Offer], connecting: list[Offer]) -> HonestPick | None:
-    if nonstop:
-        offer = min(nonstop, key=lambda o: (o.price or 1e12, o.duration_min))
+    priced = _priced_in_currency([*nonstop, *connecting])
+    if not priced:
+        return None
+    offer = min(priced, key=lambda o: (o.price or 1e12, layover_minutes(o), o.duration_min))
+    if offer.stops == 0:
         return HonestPick(
             kind="nonstop",
             reason="Cheapest nonstop",
             offer=offer,
             layover_min=0,
         )
-    if connecting:
-        offer = min(connecting, key=lambda o: (layover_minutes(o), o.price or 1e12, o.duration_min))
-        return HonestPick(
-            kind="connecting",
-            reason="No nonstop — shortest layover",
-            offer=offer,
-            layover_min=layover_minutes(offer),
-        )
-    return None
+    return HonestPick(
+        kind="connecting",
+        reason="Cheapest connecting — shortest layover if tied",
+        offer=offer,
+        layover_min=layover_minutes(offer),
+    )
 
 
 def _hidden_if_cheaper(
@@ -585,9 +639,14 @@ def _hidden_if_cheaper(
     if honest is None or honest.offer.price is None:
         return matches[0]
     ceiling = honest.offer.price
+    currency = honest.offer.currency
     for match in matches:
         price = match.through_offer.price
-        if price is not None and price < ceiling:
+        if (
+            price is not None
+            and match.through_offer.currency == currency
+            and price < ceiling
+        ):
             return match
     return None
 

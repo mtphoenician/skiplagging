@@ -167,8 +167,8 @@ def _connect_minutes(offer: Offer) -> int | None:
         b = offer.segments[1].dep
         from datetime import datetime
 
-        t0 = datetime.fromisoformat(a)
-        t1 = datetime.fromisoformat(b)
+        t0 = datetime.fromisoformat(a.replace("Z", "+00:00"))
+        t1 = datetime.fromisoformat(b.replace("Z", "+00:00"))
         return int((t1 - t0).total_seconds() // 60)
     except ValueError:
         return None

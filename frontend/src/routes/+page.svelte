@@ -69,7 +69,7 @@
     </article>
     <article>
       <b><span class="step">2</span> Compare</b>
-      <p>Cheapest nonstop, or the shortest layover if there is no direct. Hidden-city only if it is cheaper.</p>
+      <p>A hidden-city ticket if it is cheaper than the honest fare. Otherwise the cheapest flight, then the shortest layover.</p>
     </article>
     <article>
       <b><span class="step">3</span> Book there</b>

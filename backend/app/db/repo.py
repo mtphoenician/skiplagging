@@ -954,7 +954,12 @@ async def persist_hidden_deals(
     for match in matches:
         local = match.local_offer
         through = match.through_offer
-        if local.price is None or through.price is None or through.price >= local.price:
+        if (
+            local.price is None
+            or through.price is None
+            or through.currency != local.currency
+            or through.price >= local.price
+        ):
             continue
         first = through.first_flight or ""
         existing = (

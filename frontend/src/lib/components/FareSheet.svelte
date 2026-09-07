@@ -19,7 +19,7 @@
 
   const priced = $derived(
     [...quotes]
-      .filter((q) => q.price != null)
+      .filter((q) => q.price != null && q.currency === offer.currency)
       .sort((a, b) => (a.price || 0) - (b.price || 0))
   );
   const best = $derived(priced[0]);

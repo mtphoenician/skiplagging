@@ -130,13 +130,13 @@
         · {data.query.adults} adult{data.query.adults === 1 ? '' : 's'}
       </p>
       <div class="stats">
+        {#if data.hidden_if_cheaper}
+          <span class="stat-pill">Hidden-city is cheaper</span>
+        {/if}
         {#if data.honest_pick}
           <span class="stat-pill">{data.honest_pick.reason}</span>
         {:else if data.cheapest_local != null}
           <span class="stat-pill">From {money(data.cheapest_local)}</span>
-        {/if}
-        {#if data.hidden_if_cheaper}
-          <span class="stat-pill">Hidden-city is cheaper</span>
         {/if}
       </div>
     </header>
@@ -147,18 +147,18 @@
       </p>
     {/if}
 
-    {#if data.honest_pick}
-      <p class="pick-kicker">{data.honest_pick.reason}</p>
-      <OfferCard
-        offer={data.honest_pick.offer}
-        featured
-        selected={selected?.id === data.honest_pick.offer.id}
-        onclick={() => data.honest_pick && pickOffer(data.honest_pick.offer)}
-      />
-    {/if}
     {#if data.hidden_if_cheaper}
       <p class="pick-kicker">Cheaper hidden-city ticket</p>
       <HiddenCityCard match={data.hidden_if_cheaper} />
+    {/if}
+    {#if data.honest_pick}
+      <p class="pick-kicker">{data.hidden_if_cheaper ? 'Honest ticket to compare' : data.honest_pick.reason}</p>
+      <OfferCard
+        offer={data.honest_pick.offer}
+        featured={!data.hidden_if_cheaper}
+        selected={selected?.id === data.honest_pick.offer.id}
+        onclick={() => data.honest_pick && pickOffer(data.honest_pick.offer)}
+      />
     {/if}
 
     {#if selected}

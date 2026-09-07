@@ -10,7 +10,7 @@ from app.config import get_settings
 from app.db import repo
 from app.db.session import init_db, session_factory
 from app.engines.risk import attach_risk
-from app.engines.shop import _shop_providers
+from app.engines.shop import _priced_in_currency, _shop_providers, layover_minutes
 from app.models import Offer
 from app.providers.amadeus import AmadeusProvider
 from app.providers.base import ShopRequest
@@ -27,11 +27,10 @@ def _scan_date() -> str:
 
 def _cheapest_to(offers: list[Offer], dest: str) -> Offer | None:
     priced = [o for o in offers if o.price is not None and o.segments and o.segments[-1].dest == dest]
+    priced = _priced_in_currency(priced)
     if not priced:
         return None
-    nonstop = [o for o in priced if o.stops == 0]
-    pool = nonstop or priced
-    return min(pool, key=lambda o: o.price or 1e12)
+    return min(priced, key=lambda o: (o.price or 1e12, layover_minutes(o), o.duration_min))
 
 
 async def discover_hidden_deals(*, limit: int = 12, day: str | None = None) -> dict:
@@ -90,7 +89,12 @@ async def discover_hidden_deals(*, limit: int = 12, day: str | None = None) -> d
                 if dest_b == dest_c or dest_b == origin:
                     continue
                 local = cheapest_b.get(dest_b)
-                if local is None or local.price is None or offer.price >= local.price:
+                if (
+                    local is None
+                    or local.price is None
+                    or offer.currency != local.currency
+                    or offer.price >= local.price
+                ):
                     continue
                 key = (origin, dest_b, dest_c)
                 if key in seen:
