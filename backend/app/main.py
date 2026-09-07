@@ -138,7 +138,7 @@ async def airports(q: str = Query("", max_length=48)) -> list[Airport]:
 @app.get("/airports/{iata}", response_model=Airport)
 async def airport_detail(iata: str) -> Airport:
     async with session_factory()() as session:
-        ap = await repo.get_airport(session, iata, detail=True)
+        ap = await repo.get_place(session, iata, detail=True)
     if not ap:
         raise HTTPException(status_code=404, detail="Unknown IATA in OurAirports table")
     return ap

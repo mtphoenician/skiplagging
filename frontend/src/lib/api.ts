@@ -70,6 +70,17 @@ export function duration(min: number): string {
   return h ? `${h}h ${m}m` : `${m}m`;
 }
 
+export function layoverMinutes(offer: { segments: { arr: string; dep: string }[] }): number {
+  let total = 0;
+  for (let i = 0; i < offer.segments.length - 1; i++) {
+    const arr = Date.parse(offer.segments[i].arr);
+    const dep = Date.parse(offer.segments[i + 1].dep);
+    if (Number.isNaN(arr) || Number.isNaN(dep) || dep <= arr) continue;
+    total += Math.round((dep - arr) / 60000);
+  }
+  return total;
+}
+
 export function defaultDate(): string {
   const d = new Date();
   d.setDate(d.getDate() + 11);

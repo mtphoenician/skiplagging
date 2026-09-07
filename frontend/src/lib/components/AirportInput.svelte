@@ -18,17 +18,29 @@
   let root: HTMLDivElement | undefined = $state();
   let inputEl: HTMLInputElement | undefined = $state();
 
+  function placeId(a: Airport) {
+    return a.place_id || a.iata;
+  }
+
+  function displayOf(a: Airport) {
+    return a.type === 'city' ? a.city : a.iata;
+  }
+
   $effect(() => {
     if (focused) return;
     const v = value;
+    if (picked && placeId(picked) === v) {
+      draft = displayOf(picked);
+      return;
+    }
     if (v === draft) {
-      if (/^[A-Z]{3}$/.test(v) && (!picked || picked.iata !== v)) void hydrate(v);
+      if (/^(CITY-)?[A-Z]{3}$/.test(v) && (!picked || placeId(picked) !== v)) void hydrate(v);
       return;
     }
     draft = v;
-    if (/^[A-Z]{3}$/.test(v.trim())) {
-      draft = v.trim();
-      if (!picked || picked.iata !== draft) void hydrate(draft);
+    if (/^(CITY-)?[A-Z]{3}$/i.test(v.trim())) {
+      const code = v.trim().toUpperCase();
+      if (!picked || placeId(picked) !== code) void hydrate(code);
     } else if (!v) {
       picked = null;
     }
@@ -37,7 +49,10 @@
   async function hydrate(code: string) {
     try {
       const ap = await fetchAirport(code);
-      if (ap && !focused && value.toUpperCase() === code) picked = ap;
+      if (ap && !focused && value.toUpperCase() === code.toUpperCase()) {
+        picked = ap;
+        draft = displayOf(ap);
+      }
     } catch {
       /* keep the IATA even if the name never loads */
     }
@@ -74,15 +89,15 @@
 
   function pick(a: Airport) {
     picked = a;
-    value = a.iata;
-    draft = a.iata;
+    value = placeId(a);
+    draft = displayOf(a);
     open = false;
     hits = [];
   }
 
   function onFocus() {
     focused = true;
-    if (picked && /^[A-Za-z]{3}$/.test(draft)) {
+    if (picked && picked.type !== 'city' && /^[A-Za-z]{3}$/.test(draft)) {
       queueMicrotask(() => inputEl?.select());
     }
     if (hits.length) open = true;
@@ -143,7 +158,7 @@
       spellcheck="false"
     />
     {#if picked && !focused}
-      <span class="suggest-inline">{picked.city}</span>
+      <span class="suggest-inline">{picked.type === 'city' ? 'All airports' : picked.city}</span>
     {/if}
   </div>
   {#if open && hits.length}
@@ -152,10 +167,11 @@
         <button class:active={i === active} type="button" role="option" aria-selected={i === active} onmousedown={() => pick(a)}>
           <span class="suggest-top">
             <strong>{a.iata}</strong>
-            <span class="suggest-name">{a.name}</span>
+            <span class="suggest-name">{a.type === 'city' ? 'All airports' : a.name}</span>
           </span>
           <span class="suggest-meta">
-            {a.city} · {a.country_name || a.country}
+            {a.type === 'city' && a.members?.length ? a.members.join(', ') : a.city}
+            · {a.country_name || a.country}
             {#if kind(a)}
               · {kind(a)}
             {/if}

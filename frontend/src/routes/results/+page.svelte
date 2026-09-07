@@ -39,7 +39,7 @@
     error = '';
     data = null;
 
-    if (o.length !== 3 || d.length !== 3 || !dt) {
+    if (!/^(CITY-)?[A-Z]{3}$/.test(o) || !/^(CITY-)?[A-Z]{3}$/.test(d) || !dt) {
       error = 'Choose two airports and a date.';
       loading = false;
       return;
@@ -103,15 +103,19 @@
     <header class="results-head">
       <h1>{data.origin.city} → {data.destination.city}</h1>
       <p class="meta">
-        {data.origin.iata}–{data.destination.iata} · {data.query.date}
+        {data.origin.type === 'city' ? `${data.origin.city} (all)` : data.origin.iata}–{data.destination.type === 'city'
+          ? `${data.destination.city} (all)`
+          : data.destination.iata} · {data.query.date}
         · {data.query.adults} adult{data.query.adults === 1 ? '' : 's'}
       </p>
       <div class="stats">
-        {#if data.cheapest_local != null}
+        {#if data.honest_pick}
+          <span class="stat-pill">{data.honest_pick.reason}</span>
+        {:else if data.cheapest_local != null}
           <span class="stat-pill">From {money(data.cheapest_local)}</span>
         {/if}
-        {#if data.hidden_city.length}
-          <span class="stat-pill">{data.hidden_city.length} cheaper through-ticket{data.hidden_city.length === 1 ? '' : 's'}</span>
+        {#if data.hidden_if_cheaper}
+          <span class="stat-pill">Hidden-city is cheaper</span>
         {/if}
       </div>
     </header>
@@ -121,6 +125,15 @@
         No fare-shop keys are configured, so this app cannot price a ticket. Google Flights, Kayak, and the others below
         have the live inventory — open the same trip there.
       </p>
+    {/if}
+
+    {#if data.honest_pick}
+      <p class="pick-kicker">{data.honest_pick.reason}</p>
+      <OfferCard offer={data.honest_pick.offer} featured />
+    {/if}
+    {#if data.hidden_if_cheaper}
+      <p class="pick-kicker">Cheaper hidden-city ticket</p>
+      <HiddenCityCard match={data.hidden_if_cheaper} />
     {/if}
 
     <p class="note" style="margin:14px 0 8px">Compare this trip</p>
@@ -143,7 +156,7 @@
           <h2 class="section-title">
             {ch.kind === 'nonstop' ? 'Nonstop' : ch.kind === 'connecting' ? 'Connecting' : 'Nearby airports'}
           </h2>
-          {#each ch.offers as offer}
+          {#each ch.offers.filter((o) => o.id !== data.honest_pick?.offer.id) as offer}
             <OfferCard {offer} />
           {/each}
         {/if}

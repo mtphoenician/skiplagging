@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 Cabin = Literal["ECONOMY", "PREMIUM_ECONOMY", "BUSINESS", "FIRST"]
 Channel = Literal["gds", "airline-direct", "ota", "ndc", "meta-search", "specialist-meta"]
@@ -23,14 +23,21 @@ DataLayer = Literal[
 
 
 class SearchQuery(BaseModel):
-    origin: str = Field(..., min_length=3, max_length=3)
-    destination: str = Field(..., min_length=3, max_length=3)
+    origin: str = Field(..., min_length=3, max_length=8)
+    destination: str = Field(..., min_length=3, max_length=8)
     date: str = Field(..., pattern=r"^\d{4}-\d{2}-\d{2}$")
     adults: int = Field(1, ge=1, le=9)
     cabin: Cabin = "ECONOMY"
     currency: str = "USD"
     include_nearby: bool = True
     allow_synthetic: bool = False
+
+    @field_validator("origin", "destination")
+    @classmethod
+    def _place_id(cls, v: str) -> str:
+        from app.metros import normalize_place_id
+
+        return normalize_place_id(v)
 
 
 class Country(BaseModel):
@@ -81,6 +88,7 @@ class Navaid(BaseModel):
 
 class Airport(BaseModel):
     iata: str
+    place_id: str = ""
     icao: str | None = None
     ident: str | None = None
     name: str
@@ -101,6 +109,7 @@ class Airport(BaseModel):
     wikipedia: str | None = None
     source: str = "ourairports"
     hub_carriers: list[str] = Field(default_factory=list)
+    members: list[str] = Field(default_factory=list)
     runways: list[Runway] = Field(default_factory=list)
     navaids: list[Navaid] = Field(default_factory=list)
 
@@ -177,6 +186,13 @@ class HiddenCityMatch(BaseModel):
     currency: str
     risk: RiskAssessment
     bookers: list["BookerLink"] = Field(default_factory=list)
+
+
+class HonestPick(BaseModel):
+    kind: Literal["nonstop", "connecting"]
+    reason: str
+    offer: Offer
+    layover_min: int = 0
 
 
 class ChannelGroup(BaseModel):
@@ -275,6 +291,8 @@ class SearchResponse(BaseModel):
     data_gaps: list[str]
     cheapest_local: float | None
     cheapest_any: float | None
+    honest_pick: HonestPick | None = None
+    hidden_if_cheaper: HiddenCityMatch | None = None
     channels: list[ChannelGroup]
     hidden_city: list[HiddenCityMatch]
     connection_hints: list[ConnectionHint]

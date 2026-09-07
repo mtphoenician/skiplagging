@@ -42,7 +42,7 @@
     </article>
     <article>
       <b><span class="step">2</span> Compare</b>
-      <p>Direct, connecting, and cheaper tickets one city further.</p>
+      <p>Cheapest nonstop, or the shortest layover if there is no direct. Hidden-city only if it is cheaper.</p>
     </article>
     <article>
       <b><span class="step">3</span> Book there</b>

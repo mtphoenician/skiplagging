@@ -42,6 +42,7 @@ export interface Runway {
 
 export interface Airport {
   iata: string;
+  place_id?: string;
   icao?: string | null;
   ident?: string | null;
   name: string;
@@ -62,6 +63,7 @@ export interface Airport {
   wikipedia?: string | null;
   source?: string;
   hub_carriers: string[];
+  members?: string[];
   runways?: Runway[];
 }
 
@@ -154,6 +156,13 @@ export interface HiddenCityMatch {
   bookers: BookerLink[];
 }
 
+export interface HonestPick {
+  kind: 'nonstop' | 'connecting';
+  reason: string;
+  offer: Offer;
+  layover_min: number;
+}
+
 export interface ChannelGroup {
   kind: ItineraryKind;
   label: string;
@@ -242,6 +251,8 @@ export interface SearchResponse {
   data_gaps: string[];
   cheapest_local: number | null;
   cheapest_any: number | null;
+  honest_pick: HonestPick | null;
+  hidden_if_cheaper: HiddenCityMatch | null;
   channels: ChannelGroup[];
   hidden_city: HiddenCityMatch[];
   connection_hints: ConnectionHint[];

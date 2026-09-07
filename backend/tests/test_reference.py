@@ -121,16 +121,21 @@ async def test_airport_search_ranks_cities_not_substrings():
         london = await repo.search_airports(session, "london")
         ny = await repo.search_airports(session, "new york")
         stub = await repo.search_airports(session, "par")
-    assert set(a.iata for a in paris[:2]) == {"CDG", "ORY"}
+    assert paris[0].type == "city" and paris[0].iata == "PAR"
+    assert {"CDG", "ORY"} <= {a.iata for a in paris[1:4]}
     assert all("parish" not in (a.region_name or "").lower() or a.city.lower().startswith("paris") for a in paris)
-    assert {a.iata for a in stub[:2]} == {"CDG", "ORY"}
-    assert {a.iata for a in nyc[:3]} >= {"JFK", "LGA", "EWR"}
-    assert {a.iata for a in tokyo[:2]} >= {"HND", "NRT"}
-    assert {a.iata for a in sao[:2]} >= {"GRU", "CGH"}
-    assert rome[0].iata in {"FCO", "CIA"}
-    assert nice[0].iata == "NCE"
-    assert london[0].iata in {"LHR", "LGW", "STN", "LCY", "LTN"}
-    assert {a.iata for a in ny[:3]} >= {"JFK", "LGA"}
+    assert stub[0].type == "city" and stub[0].iata == "PAR"
+    assert nyc[0].type == "city" and nyc[0].iata == "NYC"
+    assert {a.iata for a in nyc[1:4]} >= {"JFK", "LGA", "EWR"}
+    assert tokyo[0].type == "city" and tokyo[0].iata == "TYO"
+    assert {a.iata for a in tokyo[1:3]} >= {"HND", "NRT"}
+    assert sao[0].type == "city" and sao[0].iata == "SAO"
+    assert {a.iata for a in sao[1:3]} >= {"GRU", "CGH"}
+    assert rome[0].type == "city" and rome[0].iata == "ROM"
+    assert nice[0].iata == "NCE" and nice[0].type != "city"
+    assert london[0].type == "city" and london[0].iata == "LON"
+    assert london[0].members and "LHR" in london[0].members
+    assert ny[0].type == "city" and ny[0].iata == "NYC"
 
 
 @pytest.mark.asyncio

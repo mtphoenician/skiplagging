@@ -7,6 +7,7 @@ from math import asin, cos, radians, sin, sqrt
 from sqlalchemy import Select, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.metros import METROS, catalog_code_for_member, normalize_place_id
 from app.db.tables import (
     AirlineRow,
     AirportRow,
@@ -31,6 +32,7 @@ async def continent_names(session: AsyncSession) -> dict[str, str]:
 def _to_airport(row: AirportRow, currency: str = "", continents: dict[str, str] | None = None) -> Airport:
     return Airport(
         iata=row.iata,
+        place_id=row.iata,
         icao=row.icao,
         ident=row.ident,
         name=row.name,
@@ -69,6 +71,125 @@ async def get_airport(session: AsyncSession, iata: str, detail: bool = False) ->
         ap.runways = await list_runways(session, row.iata)
         ap.navaids = await list_navaids(session, row.ident)
     return ap
+
+
+async def get_place(session: AsyncSession, code: str, detail: bool = False) -> Airport | None:
+    pid = normalize_place_id(code)
+    if pid.startswith("CITY-"):
+        return await get_metro(session, pid.split("-", 1)[1])
+    metro = await get_metro(session, pid)
+    if metro and metro.place_id == pid:
+        return metro
+    return await get_airport(session, pid, detail=detail)
+
+
+async def get_metro(session: AsyncSession, code: str) -> Airport | None:
+    code = code.upper()
+    spec = METROS.get(code)
+    names = await continent_names(session)
+    if spec:
+        city, iso2, members, _aliases = spec
+        rows = await _existing_airports(session, members)
+        if len(rows) < 2:
+            return None
+        return _metro_place(code, city, iso2, rows, names, session_country=await session.get(CountryRow, iso2))
+    row = await session.get(AirportRow, code)
+    if not row or not row.scheduled_service:
+        return None
+    cluster = await _city_cluster(session, row)
+    if len(cluster) < 2:
+        return None
+    catalog = catalog_code_for_member(row.iata)
+    if catalog:
+        return await get_metro(session, catalog)
+    return _metro_place(
+        cluster[0].iata,
+        _city_label(cluster[0].municipality, cluster[0].name),
+        cluster[0].iso_country,
+        cluster,
+        names,
+        session_country=await session.get(CountryRow, cluster[0].iso_country),
+        force_city_prefix=True,
+    )
+
+
+async def _existing_airports(session: AsyncSession, codes: tuple[str, ...] | list[str]) -> list[AirportRow]:
+    rows: list[AirportRow] = []
+    for code in codes:
+        row = await session.get(AirportRow, code)
+        if row and row.scheduled_service:
+            rows.append(row)
+    return rows
+
+
+async def _city_cluster(session: AsyncSession, seed: AirportRow) -> list[AirportRow]:
+    city = _fold(_city_label(seed.municipality, seed.name))
+    near = await nearby_airports(session, seed.iata, max_km=80.0)
+    rows = [seed]
+    have = {seed.iata}
+    for ap in near:
+        if ap.iata in have:
+            continue
+        if (ap.type or "") not in {"large_airport", "medium_airport"} or not ap.scheduled_service:
+            continue
+        raw = await session.get(AirportRow, ap.iata)
+        if not raw:
+            continue
+        same_city = _fold(_city_label(raw.municipality, raw.name)) == city and raw.iso_country == seed.iso_country
+        catalog = catalog_code_for_member(seed.iata)
+        in_same_metro = catalog and catalog_code_for_member(raw.iata) == catalog
+        if same_city or in_same_metro:
+            rows.append(raw)
+            have.add(raw.iata)
+    rows.sort(key=lambda r: (0 if r.type == "large_airport" else 1, r.iata))
+    return rows
+
+
+def _metro_place(
+    code: str,
+    city: str,
+    iso2: str,
+    rows: list[AirportRow],
+    continents: dict[str, str],
+    session_country: CountryRow | None = None,
+    force_city_prefix: bool = False,
+) -> Airport:
+    members = [r.iata for r in rows]
+    airport_collision = any(r.iata == code for r in rows)
+    place_id = f"CITY-{code}" if airport_collision or force_city_prefix else code
+    lat = sum(r.lat for r in rows) / len(rows)
+    lon = sum(r.lon for r in rows) / len(rows)
+    return Airport(
+        iata=code,
+        place_id=place_id,
+        name="All airports",
+        city=city,
+        country=iso2,
+        country_name=(session_country.name if session_country else "") or iso2,
+        continent=rows[0].continent,
+        continent_name=continents.get(rows[0].continent, rows[0].continent),
+        currency_code=session_country.currency_code if session_country else "",
+        lat=lat,
+        lon=lon,
+        metro=city,
+        type="city",
+        scheduled_service=True,
+        source="metro",
+        members=members,
+    )
+
+
+def _metro_matches(needle: str, code: str, city: str, aliases: tuple[str, ...]) -> bool:
+    q = _fold(needle)
+    if not q:
+        return False
+    if q == _fold(code) or q == _fold(city):
+        return True
+    if len(q) >= 3 and (_has_phrase(city, needle) or _fold(city).startswith(q)):
+        return True
+    if any(q == _fold(a) for a in aliases):
+        return True
+    return len(q) >= 3 and any(_fold(a).startswith(q) or _has_phrase(a, needle) for a in aliases)
 
 
 _TYPE_W = {
@@ -372,7 +493,47 @@ async def search_airports(session: AsyncSession, q: str, limit: int = 12) -> lis
         scheduled = [(s, r) for s, r in ranked if r.scheduled_service]
         other = [(s, r) for s, r in ranked if not r.scheduled_service]
         ranked = scheduled + other[:2]
-    return [_to_airport(r, continents=names) for _, r in ranked[:limit]]
+    airports = [_to_airport(r, continents=names) for _, r in ranked[:limit]]
+    metros = await _metros_for_query(session, needle, airports)
+    if not metros:
+        return airports
+    if exact_code:
+        return (airports[:1] + metros + airports[1:])[:limit]
+    return (metros + [a for a in airports if a.iata not in {m.place_id for m in metros}])[:limit]
+
+
+async def _metros_for_query(session: AsyncSession, needle: str, hits: list[Airport]) -> list[Airport]:
+    qf = _fold(needle)
+    exact = len(qf) == 3 and any(_fold(h.iata) == qf for h in hits)
+    out: list[Airport] = []
+    seen: set[str] = set()
+
+    async def add(metro: Airport | None) -> None:
+        if metro and metro.place_id not in seen and len(metro.members) >= 2:
+            seen.add(metro.place_id)
+            out.append(metro)
+
+    for code, (city, _iso2, members, aliases) in METROS.items():
+        hit_member = any(h.iata in members for h in hits)
+        if exact and hit_member:
+            await add(await get_metro(session, code))
+            continue
+        if _metro_matches(needle, code, city, aliases):
+            await add(await get_metro(session, code))
+
+    if not out:
+        groups: dict[tuple[str, str], list[Airport]] = {}
+        for h in hits:
+            if h.type == "city" or not h.scheduled_service:
+                continue
+            groups.setdefault((h.country, _fold(h.city)), []).append(h)
+        for (_cc, cityf), group in groups.items():
+            if len(group) < 2:
+                continue
+            if cityf != qf and not (len(qf) >= 3 and cityf.startswith(qf)):
+                continue
+            await add(await get_metro(session, group[0].iata))
+    return out
 
 
 async def nearby_airports(session: AsyncSession, iata: str, max_km: float = 90.0) -> list[Airport]:

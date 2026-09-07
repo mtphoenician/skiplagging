@@ -1,11 +1,12 @@
 <script lang="ts">
-  import { duration, hm, money } from '$lib/api';
+  import { duration, hm, layoverMinutes, money } from '$lib/api';
   import type { Offer } from '$lib/types';
 
-  let { offer }: { offer: Offer } = $props();
+  let { offer, featured = false }: { offer: Offer; featured?: boolean } = $props();
+  const wait = $derived(layoverMinutes(offer));
 </script>
 
-<article class="offer">
+<article class="offer" class:pick={featured}>
   <div class="row">
     <div>
       <div class="seg">
@@ -20,6 +21,9 @@
       <div class="seg" style="margin-top:8px">
         <span>{duration(offer.duration_min)}</span>
         <span>{offer.stops === 0 ? 'Nonstop' : `${offer.stops} stop${offer.stops === 1 ? '' : 's'}`}</span>
+        {#if wait}
+          <span>{duration(wait)} layover</span>
+        {/if}
         <span class="chip">{offer.source}</span>
       </div>
     </div>

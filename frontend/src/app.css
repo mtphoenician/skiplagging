@@ -964,6 +964,19 @@ h3 {
   box-shadow: 0 16px 36px rgba(70, 48, 18, 0.1);
 }
 
+.offer.pick {
+  border-color: #1c1915;
+  box-shadow: 0 14px 32px rgba(70, 48, 18, 0.1);
+}
+
+.pick-kicker {
+  margin: 18px 0 0;
+  font-size: 0.78rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
 .hc {
   background: linear-gradient(180deg, #fffaf0, #fff);
   border-color: #f0dfb2;

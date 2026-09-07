@@ -39,10 +39,11 @@
 
   async function resolveIata(raw: string): Promise<string> {
     const t = raw.trim();
+    if (/^city-[A-Za-z]{3}$/i.test(t)) return `CITY-${t.slice(-3).toUpperCase()}`;
     if (/^[A-Za-z]{3}$/.test(t)) return t.toUpperCase();
     if (t.length < 2) return '';
     const hits = await searchAirports(t);
-    return hits[0]?.iata || '';
+    return hits[0]?.place_id || hits[0]?.iata || '';
   }
 
   async function submit(e: Event) {

@@ -4,6 +4,7 @@ import asyncio
 import time
 from collections.abc import Awaitable
 from dataclasses import replace
+from datetime import datetime
 
 import httpx
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -16,6 +17,7 @@ from app.models import (
     ChannelGroup,
     ConnectionHint,
     HiddenCityMatch,
+    HonestPick,
     LiveTraffic,
     Offer,
     SearchQuery,
@@ -36,16 +38,16 @@ async def search_all_ways(
     session: AsyncSession,
 ) -> SearchResponse:
     t0 = time.perf_counter()
-    origin, dest = query.origin.upper(), query.destination.upper()
+    origin, dest = query.origin, query.destination
     query.origin, query.destination = origin, dest
 
-    o_ap = await repo.get_airport(session, origin)
-    d_ap = await repo.get_airport(session, dest)
+    o_ap = await repo.get_place(session, origin)
+    d_ap = await repo.get_place(session, dest)
     if not o_ap or not d_ap:
         raise ValueError(
             "Unknown IATA in the OurAirports table. Ingest has not been run, or the code is not a scheduled airport."
         )
-    if origin == dest:
+    if _same_place(o_ap, d_ap):
         raise ValueError("Origin and destination must differ.")
 
     amadeus = AmadeusProvider(settings, client) if settings.amadeus_enabled else None
@@ -53,9 +55,13 @@ async def search_all_ways(
     opensky = OpenSkyProvider(settings, client)
     box = AeroDataBoxProvider(settings, client) if settings.aerodatabox_enabled else None
 
+    o_tokens = shop_tokens(o_ap)
+    d_tokens = shop_tokens(d_ap)
+    o_airports = set(o_ap.members or [o_ap.iata])
+    d_airports = set(d_ap.members or [d_ap.iata])
     req = ShopRequest(
-        origin=origin,
-        dest=dest,
+        origin=o_tokens[0],
+        dest=d_tokens[0],
         date=query.date,
         adults=query.adults,
         cabin=query.cabin,
@@ -63,13 +69,15 @@ async def search_all_ways(
         max_offers=20,
     )
 
-    local_t = _shop_providers(req, amadeus, duffel)
-    nearby_t = _shop_nearby(req, query, session, amadeus, duffel) if query.include_nearby else _empty_list()
-    hidden_t = _shop_hidden(req, query, settings, session, amadeus, duffel)
-    hints_t = _connection_hints(session, origin, dest, amadeus)
-    traffic_o_t = opensky.traffic_near(o_ap)
-    traffic_d_t = opensky.traffic_near(d_ap)
-    board_t = box.board(origin, "Departure") if box else _empty_list()
+    local_t = _shop_place(req, o_ap, d_ap, amadeus, duffel)
+    nearby_t = _shop_nearby(req, query, session, amadeus, duffel, o_airports, d_airports) if query.include_nearby else _empty_list()
+    hidden_t = _shop_hidden(req, query, settings, session, amadeus, duffel, o_airports, d_airports)
+    hints_t = _connection_hints(session, origin, dest, amadeus, dest_members=list(d_airports))
+    traffic_place_o = await repo.get_airport(session, (o_ap.members or [o_ap.iata])[0]) or o_ap
+    traffic_place_d = await repo.get_airport(session, (d_ap.members or [d_ap.iata])[0]) or d_ap
+    traffic_o_t = opensky.traffic_near(traffic_place_o)
+    traffic_d_t = opensky.traffic_near(traffic_place_d)
+    board_t = box.board((o_ap.members or [o_ap.iata])[0], "Departure") if box else _empty_list()
 
     gathered = await asyncio.gather(
         local_t, nearby_t, hidden_t, hints_t, traffic_o_t, traffic_d_t, board_t,
@@ -95,13 +103,15 @@ async def search_all_ways(
         m.through_offer for m in hidden_matches if m.through_offer.price is not None
     ]
     cheapest_any = min((o.price for o in pool if o.price is not None), default=None)
+    honest_pick = pick_honest(nonstop, connecting)
+    hidden_if_cheaper = _hidden_if_cheaper(hidden_matches, honest_pick)
 
     carriers = list({o.carrier for o in priced if o.carrier})
     airline_names = await repo.airlines_by_iata(session, carriers[:6])
-    bookers = booker_links(origin, dest, query.date, query.adults, airline_names)
+    bookers = booker_links(o_ap.iata, d_ap.iata, query.date, query.adults, airline_names)
     for match in hidden_matches:
         thru_al = await repo.airlines_by_iata(session, [match.through_offer.carrier])
-        match.bookers = booker_links(origin, match.hidden_city, query.date, query.adults, thru_al)
+        match.bookers = booker_links(o_ap.iata, match.hidden_city, query.date, query.adults, thru_al)
 
     channels = [
         ChannelGroup(
@@ -114,7 +124,7 @@ async def search_all_ways(
             kind="connecting",
             label="Priced connecting itineraries that end at B",
             blurb="Honest through products ticketed to B. Different from hidden-city A→B→C.",
-            offers=sorted(connecting, key=lambda o: o.price or 0)[:10],
+            offers=sorted(connecting, key=lambda o: (layover_minutes(o), o.price or 0))[:10],
         ),
         ChannelGroup(
             kind="nearby",
@@ -189,8 +199,8 @@ async def search_all_ways(
     persist_payload += [m.through_offer.model_dump() for m in hidden_matches[:15]]
     search_id = await repo.persist_search(
         session,
-        origin=origin,
-        destination=dest,
+        origin=o_ap.iata[:3],
+        destination=d_ap.iata[:3],
         date=query.date,
         adults=query.adults,
         cabin=query.cabin,
@@ -202,7 +212,7 @@ async def search_all_ways(
     if traffic_o and traffic_o.aircraft:
         await repo.persist_tracks(
             session,
-            origin,
+            (o_ap.members or [o_ap.iata])[0],
             [a.model_dump() for a in traffic_o.aircraft],
             traffic_o.api_time,
         )
@@ -217,6 +227,8 @@ async def search_all_ways(
         data_gaps=gaps,
         cheapest_local=cheapest_local,
         cheapest_any=cheapest_any,
+        honest_pick=honest_pick,
+        hidden_if_cheaper=hidden_if_cheaper,
         channels=channels,
         hidden_city=hidden_matches[:20],
         connection_hints=hints,
@@ -230,6 +242,65 @@ async def search_all_ways(
 
 async def _empty_list() -> list:
     return []
+
+
+def shop_tokens(place) -> list[str]:
+    members = [m for m in (place.members or []) if m]
+    if getattr(place, "type", "") == "city":
+        if place.iata and place.iata not in members:
+            return [place.iata]
+        return members[:5] or [place.iata]
+    return [place.iata]
+
+
+def _same_place(a, b) -> bool:
+    if (a.place_id or a.iata) == (b.place_id or b.iata):
+        return True
+    am, bm = set(a.members or [a.iata]), set(b.members or [b.iata])
+    if a.type == "city" and b.iata in am:
+        return True
+    if b.type == "city" and a.iata in bm:
+        return True
+    return False
+
+
+async def _shop_place(
+    req: ShopRequest,
+    origin: object,
+    dest: object,
+    amadeus: AmadeusProvider | None,
+    duffel: DuffelProvider | None,
+) -> list[Offer]:
+    offers = await _shop_pairs(req, shop_tokens(origin), shop_tokens(dest), amadeus, duffel)
+    if offers:
+        return offers
+    o_m = list(getattr(origin, "members", None) or [origin.iata])[:4]
+    d_m = list(getattr(dest, "members", None) or [dest.iata])[:4]
+    if o_m != shop_tokens(origin) or d_m != shop_tokens(dest):
+        return await _shop_pairs(req, o_m, d_m, amadeus, duffel)
+    return []
+
+
+async def _shop_pairs(
+    req: ShopRequest,
+    origins: list[str],
+    dests: list[str],
+    amadeus: AmadeusProvider | None,
+    duffel: DuffelProvider | None,
+) -> list[Offer]:
+    pairs = [(o, d) for o in origins for d in dests if o != d][:6]
+    if not pairs:
+        return []
+
+    async def one(o: str, d: str) -> list[Offer]:
+        return await _shop_providers(replace(req, origin=o, dest=d), amadeus, duffel)
+
+    parts = await asyncio.gather(*(one(o, d) for o, d in pairs), return_exceptions=True)
+    out: list[Offer] = []
+    for part in parts:
+        if isinstance(part, list):
+            out.extend(part)
+    return out
 
 
 async def _shop_providers(
@@ -258,9 +329,13 @@ async def _shop_nearby(
     session: AsyncSession,
     amadeus: AmadeusProvider | None,
     duffel: DuffelProvider | None,
+    origin_airports: set[str] | None = None,
+    dest_airports: set[str] | None = None,
 ) -> list[Offer]:
-    near_o = await repo.nearby_airports(session, req.origin)
-    near_d = await repo.nearby_airports(session, req.dest)
+    skip_o = origin_airports or {req.origin}
+    skip_d = dest_airports or {req.dest}
+    near_o = [a for a in await repo.nearby_airports(session, req.origin) if a.iata not in skip_o]
+    near_d = [a for a in await repo.nearby_airports(session, req.dest) if a.iata not in skip_d]
     pairs: list[tuple[str, str]] = []
     for o in [req.origin, *[a.iata for a in near_o[:2]]]:
         for d in [req.dest, *[a.iata for a in near_d[:2]]]:
@@ -292,9 +367,13 @@ async def _shop_hidden(
     session: AsyncSession,
     amadeus: AmadeusProvider | None,
     duffel: DuffelProvider | None,
+    origin_airports: set[str] | None = None,
+    dest_airports: set[str] | None = None,
 ) -> list[HiddenCityMatch]:
     if not amadeus and not duffel:
         return []
+    origins = origin_airports or {req.origin}
+    dests = dest_airports or {req.dest}
     local_offers = await _shop_providers(replace(req, nonstop=False, max_offers=15), amadeus, duffel)
     local_priced = [o for o in local_offers if o.price is not None]
     local = min((o for o in local_priced if o.stops == 0), key=lambda o: o.price or 1e12, default=None)
@@ -303,7 +382,7 @@ async def _shop_hidden(
     if local is None:
         return []
 
-    candidates = await _c_candidates(session, req.origin, req.dest, settings.max_hidden_candidates, amadeus)
+    candidates = await _c_candidates(session, req.origin, list(dests), settings.max_hidden_candidates, amadeus)
     sem = asyncio.Semaphore(settings.max_concurrency)
 
     async def probe(c: str) -> HiddenCityMatch | None:
@@ -313,7 +392,7 @@ async def _shop_hidden(
                 amadeus,
                 duffel,
             )
-            via = [o for o in throughs if _via_b(o, req.origin, req.dest, c) and o.price is not None]
+            via = [o for o in throughs if _via_b(o, origins, dests, c) and o.price is not None]
             if not via:
                 return None
             through = min(via, key=lambda o: o.price or 1e12)
@@ -341,11 +420,12 @@ async def _shop_hidden(
 async def _c_candidates(
     session: AsyncSession,
     origin: str,
-    dest: str,
+    dests: str | list[str],
     limit: int,
     amadeus: AmadeusProvider | None,
 ) -> list[str]:
-    seen = {origin, dest}
+    dest_list = [dests] if isinstance(dests, str) else list(dests)
+    seen = {origin, *dest_list}
     ranked: list[str] = []
 
     def push(codes: list[str]) -> None:
@@ -356,20 +436,29 @@ async def _c_candidates(
                 ranked.append(c)
 
     if amadeus:
-        try:
-            push(await amadeus.direct_destinations(dest))
-        except httpx.HTTPError:
-            pass
-    spokes = await repo.destinations_from(session, dest, limit=limit)
-    push([d for d, _, _ in spokes if d != origin])
+        for dest in dest_list[:3]:
+            try:
+                push(await amadeus.direct_destinations(dest))
+            except httpx.HTTPError:
+                pass
+    for dest in dest_list[:4]:
+        spokes = await repo.destinations_from(session, dest, limit=limit)
+        push([d for d, _, _ in spokes if d != origin])
     return ranked[:limit]
 
 
 async def _connection_hints(
-    session: AsyncSession, origin: str, dest: str, amadeus: AmadeusProvider | None
+    session: AsyncSession,
+    origin: str,
+    dest: str,
+    amadeus: AmadeusProvider | None,
+    dest_members: list[str] | None = None,
 ) -> list[ConnectionHint]:
     hints: list[ConnectionHint] = []
-    spokes = await repo.destinations_from(session, dest, limit=18)
+    hubs = dest_members or [dest]
+    spokes: list[tuple[str, str, int]] = []
+    for hub in hubs[:4]:
+        spokes.extend(await repo.destinations_from(session, hub, limit=18))
     for code, airline, n in spokes:
         if code == origin:
             continue
@@ -407,12 +496,14 @@ async def _connection_hints(
     return hints[:24]
 
 
-def _via_b(offer: Offer, origin: str, dest_b: str, dest_c: str) -> bool:
+def _via_b(offer: Offer, origin: str | set[str], dest_b: str | set[str], dest_c: str) -> bool:
     if len(offer.segments) < 2:
         return False
+    origins = {origin} if isinstance(origin, str) else origin
+    dests = {dest_b} if isinstance(dest_b, str) else dest_b
     return (
-        offer.segments[0].origin == origin
-        and offer.segments[0].dest == dest_b
+        offer.segments[0].origin in origins
+        and offer.segments[0].dest in dests
         and offer.segments[-1].dest == dest_c
     )
 
@@ -427,6 +518,68 @@ def _dedupe(offers: list[Offer]) -> list[Offer]:
         seen.add(key)
         out.append(o)
     return out
+
+
+def _parse_leg_time(value: str) -> datetime | None:
+    if not value:
+        return None
+    raw = value.replace("Z", "+00:00")
+    try:
+        return datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+
+
+def layover_minutes(offer: Offer) -> int:
+    total = 0
+    for first, second in zip(offer.segments, offer.segments[1:]):
+        arr = _parse_leg_time(first.arr)
+        dep = _parse_leg_time(second.dep)
+        if arr is None or dep is None:
+            continue
+        if arr.tzinfo is None and dep.tzinfo is not None:
+            dep = dep.replace(tzinfo=None)
+        elif arr.tzinfo is not None and dep.tzinfo is None:
+            arr = arr.replace(tzinfo=None)
+        gap = int((dep - arr).total_seconds() // 60)
+        if gap > 0:
+            total += gap
+    return total
+
+
+def pick_honest(nonstop: list[Offer], connecting: list[Offer]) -> HonestPick | None:
+    if nonstop:
+        offer = min(nonstop, key=lambda o: (o.price or 1e12, o.duration_min))
+        return HonestPick(
+            kind="nonstop",
+            reason="Cheapest nonstop",
+            offer=offer,
+            layover_min=0,
+        )
+    if connecting:
+        offer = min(connecting, key=lambda o: (layover_minutes(o), o.price or 1e12, o.duration_min))
+        return HonestPick(
+            kind="connecting",
+            reason="No nonstop — shortest layover",
+            offer=offer,
+            layover_min=layover_minutes(offer),
+        )
+    return None
+
+
+def _hidden_if_cheaper(
+    matches: list[HiddenCityMatch], honest: HonestPick | None
+) -> HiddenCityMatch | None:
+    if not matches:
+        return None
+    if honest is None or honest.offer.price is None:
+        return matches[0]
+    ceiling = honest.offer.price
+    for match in matches:
+        price = match.through_offer.price
+        if price is not None and price < ceiling:
+            return match
+    return None
 
 
 def _gaps(
