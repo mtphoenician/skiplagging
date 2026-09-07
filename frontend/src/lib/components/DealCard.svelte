@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { duration, hm, money } from '$lib/api';
+  import { duration, money, timeRange } from '$lib/api';
   import type { HiddenDeal } from '$lib/types';
 
   let { deal, compact = false }: { deal: HiddenDeal; compact?: boolean } = $props();
@@ -22,7 +22,7 @@
         {#if through?.segments?.length && !compact}
           <div class="seg">
             {#each through.segments as s}
-              <span><strong>{s.flight_number}</strong> {s.origin}→{s.dest} {hm(s.dep)}–{hm(s.arr)}</span>
+              <span><strong>{s.flight_number}</strong> {s.origin}→{s.dest} {timeRange(s.dep, s.arr, s.duration_min)}</span>
             {/each}
           </div>
           <div class="seg" style="margin-top:6px">

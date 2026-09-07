@@ -1,31 +1,37 @@
 <script lang="ts">
-  import { duration, hm, layoverMinutes, money } from '$lib/api';
+  import { airlineName, duration, layoverMinutes, money, timeRange } from '$lib/api';
   import type { Offer } from '$lib/types';
 
   let {
     offer,
     featured = false,
     selected = false,
+    names = {},
     onclick
   }: {
     offer: Offer;
     featured?: boolean;
     selected?: boolean;
+    names?: Record<string, string>;
     onclick?: () => void;
   } = $props();
   const wait = $derived(layoverMinutes(offer));
+  const carrier = $derived(airlineName(offer.carrier, names));
 </script>
 
 <article class="offer" class:pick={featured} class:selected>
   <button class="offer-hit" type="button" {onclick}>
     <div class="row">
       <div>
+        {#if carrier}
+          <p class="airline-name">{carrier}</p>
+        {/if}
         <div class="seg">
           {#each offer.segments as s}
             <span>
               <strong>{s.flight_number}</strong>
               {s.origin}→{s.dest}
-              {hm(s.dep)}–{hm(s.arr)}
+              {timeRange(s.dep, s.arr, s.duration_min)}
             </span>
           {/each}
         </div>
@@ -35,7 +41,6 @@
           {#if wait}
             <span>{duration(wait)} layover</span>
           {/if}
-          <span class="chip">{offer.source}</span>
         </div>
       </div>
       <div class="price">{money(offer.price, offer.currency)}</div>

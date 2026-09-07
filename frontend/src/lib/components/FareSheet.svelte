@@ -1,86 +1,81 @@
 <script lang="ts">
-  import { money } from '$lib/api';
-  import type { BookerLink, Offer } from '$lib/types';
+  import { airlineName, itineraryBookers, money } from '$lib/api';
+  import type { Offer } from '$lib/types';
 
-  const CONFIRM = new Set(['google-flights', 'kayak', 'skyscanner', 'booking-com', 'expedia']);
   const SKIP_CARRIER = new Set(['ZZ', 'XX', 'YY']);
 
   let {
     offer,
-    quotes,
-    bookers,
-    date
+    routeOffers = [],
+    names = {},
+    date,
+    adults = 1,
+    onPick
   }: {
     offer: Offer;
-    quotes: Offer[];
-    bookers: BookerLink[];
+    routeOffers?: Offer[];
+    names?: Record<string, string>;
     date: string;
+    adults?: number;
+    onPick?: (offer: Offer) => void;
   } = $props();
 
-  const priced = $derived(
-    [...quotes]
-      .filter((q) => q.price != null && q.currency === offer.currency)
-      .sort((a, b) => (a.price || 0) - (b.price || 0))
+  const origin = $derived(offer.segments[0]?.origin || '');
+  const dest = $derived(offer.segments[offer.segments.length - 1]?.dest || '');
+  const confirms = $derived(itineraryBookers(origin, dest, date, adults, offer.currency));
+  const airlineFares = $derived(
+    [
+      ...routeOffers
+        .filter((o) => o.price != null && o.currency === offer.currency && o.carrier && !SKIP_CARRIER.has(o.carrier))
+        .reduce((map, o) => {
+          const prev = map.get(o.carrier);
+          if (!prev || (o.price ?? 1e12) < (prev.price ?? 1e12)) map.set(o.carrier, o);
+          return map;
+        }, new Map<string, Offer>())
+        .entries()
+    ].sort((a, b) => (a[1].price || 0) - (b[1].price || 0))
   );
-  const best = $derived(priced[0]);
-  const confirms = $derived(
-    bookers.filter((b) => {
-      if (b.id.startsWith('carrier-')) {
-        const code = b.id.slice(8);
-        return !SKIP_CARRIER.has(code);
-      }
-      return CONFIRM.has(b.id);
-    })
-  );
-  const flightQ = $derived(
-    encodeURIComponent(
-      `flights from ${offer.segments[0]?.origin || ''} to ${offer.segments[offer.segments.length - 1]?.dest || ''} on ${date} one way ${offer.first_flight}`
-    )
-  );
-  const precise = $derived(`https://www.google.com/travel/flights?q=${flightQ}&hl=en&gl=us&curr=USD`);
 
-  function label(source: string) {
-    if (source === 'duffel') return 'Duffel (NDC shop)';
-    if (source === 'amadeus') return 'Amadeus (GDS shop)';
-    return source;
+  function stopsLabel(o: Offer) {
+    return o.stops === 0 ? 'Nonstop' : `${o.stops} stop${o.stops === 1 ? '' : 's'}`;
   }
 </script>
 
 <section class="fare-sheet">
-  <p class="pick-kicker">Where this itinerary is priced</p>
-  {#if priced.length}
+  <p class="pick-kicker">Prices by airline</p>
+  <p class="note" style="margin:6px 0 0">
+    The card above is the recommended ticket. Each row below is that airline’s cheapest fare on this route.
+  </p>
+  {#if airlineFares.length}
     <ul class="quote-list">
-      {#each priced as q, i}
-        <li class:best={i === 0}>
-          <div>
-            <strong>{label(q.source)}</strong>
-            <span class="note">{q.validating_airline && !SKIP_CARRIER.has(q.validating_airline) ? q.validating_airline : q.carrier} · {q.channel}</span>
-          </div>
-          <div class="quote-price">
-            {#if best && q.id !== best.id && q.price != null && best.price != null && q.price > best.price}
-              <span class="price-was">{money(q.price, q.currency)}</span>
-            {/if}
-            <b>{money(q.price, q.currency)}</b>
-            {#if i === 0}
-              <small>Lowest shopped fare</small>
-            {/if}
-          </div>
+      {#each airlineFares as [code, o], i}
+        <li class:best={i === 0} class:on={o.id === offer.id || o.carrier === offer.carrier}>
+          <button class="quote-hit" type="button" onclick={() => onPick?.(o)}>
+            <div>
+              <strong>{airlineName(code, names)}</strong>
+              <span class="note">{stopsLabel(o)} · {o.first_flight}</span>
+            </div>
+            <div class="quote-price">
+              <b>{money(o.price, o.currency)}</b>
+              {#if i === 0}
+                <small>Cheapest</small>
+              {/if}
+            </div>
+          </button>
         </li>
       {/each}
     </ul>
   {:else}
-    <p class="note">No licensed shop returned a fare for this exact itinerary.</p>
+    <p class="note">No shopped fares for this route yet.</p>
   {/if}
 
-  {#if confirms.length}
+  {#if confirms.length && origin && dest}
     <p class="note" style="margin:14px 0 8px">
-      Confirm the same flights on a booker. Those sites do not give this app a price feed, so they appear only as a
-      hand-off — not as a number we invented.
+      Confirm {origin}–{dest} on another site. We do not copy prices from those pages.
     </p>
     <div class="book-row">
-      <a class="book-btn" href={precise} target="_blank" rel="noreferrer">Google Flights (this flight)</a>
-      {#each confirms.filter((b) => b.id !== 'google-flights') as b}
-        <a class="book-btn" href={b.url} target="_blank" rel="noreferrer">{b.name}</a>
+      {#each confirms as b}
+        <a class="book-btn" href={b.url} target="_blank" rel="noopener noreferrer">{b.name}</a>
       {/each}
     </div>
   {/if}

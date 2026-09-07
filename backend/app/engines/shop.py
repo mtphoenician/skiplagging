@@ -118,12 +118,24 @@ async def search_all_ways(
     ]
     cheapest_any = min((o.price for o in pool if o.price is not None), default=None)
 
-    carriers = list({o.carrier for o in priced if o.carrier})
-    airline_names = await repo.airlines_by_iata(session, carriers[:6])
-    bookers = booker_links(o_ap.iata, d_ap.iata, query.date, query.adults, airline_names)
+    name_codes = {
+        *(o.carrier for o in priced if o.carrier),
+        *(o.validating_airline for o in priced if o.validating_airline),
+        *(s.carrier for o in priced for s in o.segments if s.carrier),
+        *(m.through_offer.carrier for m in hidden_matches if m.through_offer.carrier),
+        *(o.carrier for o in nearby_offers if o.carrier),
+    }
+    airline_pairs = await repo.airlines_by_iata(session, list(name_codes))
+    airline_names = {code: name for code, name in airline_pairs}
+    book_ccy = compare_ccy or query.currency
+    bookers = booker_links(
+        o_ap.iata, d_ap.iata, query.date, query.adults, airline_pairs[:6], currency=book_ccy
+    )
     for match in hidden_matches:
         thru_al = await repo.airlines_by_iata(session, [match.through_offer.carrier])
-        match.bookers = booker_links(o_ap.iata, match.hidden_city, query.date, query.adults, thru_al)
+        match.bookers = booker_links(
+            o_ap.iata, match.hidden_city, query.date, query.adults, thru_al, currency=book_ccy
+        )
     if hidden_matches:
         await repo.persist_hidden_deals(
             session,
@@ -255,6 +267,7 @@ async def search_all_ways(
         hidden_city=hidden_matches[:20],
         connection_hints=hints,
         bookers=bookers,
+        airline_names=airline_names,
         traffic_origin=traffic_o,
         traffic_destination=traffic_d,
         board_origin=board if isinstance(board, list) else [],

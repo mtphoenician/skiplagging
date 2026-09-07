@@ -74,10 +74,90 @@ export function hm(iso: string): string {
   return t.slice(0, 5);
 }
 
+export function timeRange(dep: string, arr: string, durationMin = 0): string {
+  const a = hm(dep);
+  const b = hm(arr);
+  if (a !== '—' && a === b) {
+    return durationMin > 0 ? `${a} · ${duration(durationMin)}` : a;
+  }
+  return `${a}–${b}`;
+}
+
 export function duration(min: number): string {
   const h = Math.floor(min / 60);
   const m = min % 60;
-  return h ? `${h}h ${m}m` : `${m}m`;
+  return h ? (m ? `${h}h ${m}m` : `${h}h`) : `${m}m`;
+}
+
+const AIRLINES: Record<string, string> = {
+  AA: 'American Airlines',
+  AF: 'Air France',
+  AZ: 'ITA Airways',
+  BA: 'British Airways',
+  D8: 'Norwegian',
+  DE: 'Condor',
+  DL: 'Delta',
+  DY: 'Norwegian',
+  EK: 'Emirates',
+  FR: 'Ryanair',
+  GR: 'Aurigny',
+  HR: 'Hahn Air',
+  IB: 'Iberia',
+  KL: 'KLM',
+  LH: 'Lufthansa',
+  LX: 'Swiss',
+  QR: 'Qatar Airways',
+  TK: 'Turkish Airlines',
+  UA: 'United',
+  U2: 'easyJet',
+  UX: 'Air Europa',
+  VS: 'Virgin Atlantic',
+  WN: 'Southwest'
+};
+
+export function airlineName(code: string | null | undefined, names: Record<string, string> = {}): string {
+  if (!code) return '';
+  const id = code.toUpperCase();
+  return names[id] || AIRLINES[id] || id;
+}
+
+export function googleFlightsUrl(origin: string, dest: string, date: string, currency = 'USD'): string {
+  const o = origin.toUpperCase();
+  const d = dest.toUpperCase();
+  const ccy = (currency || 'USD').toUpperCase();
+  return `https://www.google.com/travel/flights/search?hl=en&curr=${ccy}#flt=${o}.${d}.${date};c:${ccy};e:1;sd:1;t:f`;
+}
+
+export function itineraryBookers(
+  origin: string,
+  dest: string,
+  date: string,
+  adults = 1,
+  currency = 'USD'
+): { id: string; name: string; url: string }[] {
+  const o = origin.toUpperCase();
+  const d = dest.toUpperCase();
+  const yymmdd = date.slice(2).replace(/-/g, '');
+  const us = `${date.slice(5, 7)}/${date.slice(8, 10)}/${date.slice(0, 4)}`;
+  return [
+    { id: 'google-flights', name: 'Google Flights', url: googleFlightsUrl(o, d, date, currency) },
+    { id: 'kayak', name: 'Kayak', url: `https://www.kayak.com/flights/${o}-${d}/${date}?sort=price_a` },
+    {
+      id: 'skyscanner',
+      name: 'Skyscanner',
+      url: `https://www.skyscanner.com/transport/flights/${o.toLowerCase()}/${d.toLowerCase()}/${yymmdd}/?adultsv2=${adults}&cabinclass=economy&rtn=0`
+    },
+    {
+      id: 'booking-com',
+      name: 'Booking.com',
+      url: `https://flights.booking.com/flights/${o}.AIRPORT-${d}.AIRPORT/?type=ONEWAY&adults=${adults}&cabinClass=ECONOMY&depart=${date}&sort=BEST`
+    },
+    {
+      id: 'expedia',
+      name: 'Expedia',
+      url: `https://www.expedia.com/Flights-Search?trip=oneway&leg1=from:${o},to:${d},departure:${us}TANYT&passengers=adults:${adults},children:0,infantinlap:N&mode=search`
+    }
+  ];
 }
 
 export function sameItinerary(

@@ -5,7 +5,7 @@
   import OfferCard from '$lib/components/OfferCard.svelte';
   import SearchForm from '$lib/components/SearchForm.svelte';
   import TrafficPanel from '$lib/components/TrafficPanel.svelte';
-  import { money, sameItinerary, searchFares } from '$lib/api';
+  import { money, searchFares } from '$lib/api';
   import type { Cabin, Offer, SearchResponse } from '$lib/types';
 
   const params = $derived(page.url.searchParams);
@@ -61,6 +61,7 @@
       .then((r) => {
         if (cancelled) return;
         data = r;
+        if (r.honest_pick) selected = r.honest_pick.offer;
         if (r.hidden_city.length && !r.channels.some((c) => c.kind !== 'hidden-city' && c.offers.length)) {
           tab = 'hidden';
         }
@@ -80,23 +81,17 @@
   const priced = $derived(data?.channels.filter((c) => c.kind !== 'hidden-city') ?? []);
   const pricedCount = $derived(priced.reduce((n, c) => n + c.offers.length, 0));
   const noShop = $derived(Boolean(data && data.cheapest_any == null && data.data_gaps.length));
-  const allOffers = $derived(
+  const routeOffers = $derived(
     data
-      ? [
-          ...data.channels.flatMap((c) => c.offers),
-          ...(data.honest_pick ? [data.honest_pick.offer] : []),
-          ...data.hidden_city.map((m) => m.through_offer)
-        ]
-      : []
-  );
-  const selectedQuotes = $derived(
-    selected
-      ? [...new Map(allOffers.filter((o) => sameItinerary(o, selected)).map((o) => [o.id, o])).values()]
+      ? data.channels.filter((c) => c.kind !== 'hidden-city').flatMap((c) => c.offers)
       : []
   );
 
+  const names = $derived(data?.airline_names ?? {});
+  const sheetOffer = $derived(selected || data?.honest_pick?.offer || null);
+
   function pickOffer(offer: Offer) {
-    selected = selected?.id === offer.id ? null : offer;
+    selected = offer;
     tab = 'flights';
   }
 </script>
@@ -149,22 +144,28 @@
 
     {#if data.hidden_if_cheaper}
       <p class="pick-kicker">Cheaper hidden-city ticket</p>
-      <HiddenCityCard match={data.hidden_if_cheaper} />
+      <HiddenCityCard match={data.hidden_if_cheaper} names={names} />
     {/if}
     {#if data.honest_pick}
       <p class="pick-kicker">{data.hidden_if_cheaper ? 'Honest ticket to compare' : data.honest_pick.reason}</p>
       <OfferCard
         offer={data.honest_pick.offer}
         featured={!data.hidden_if_cheaper}
-        selected={selected?.id === data.honest_pick.offer.id}
+        selected={sheetOffer?.id === data.honest_pick.offer.id}
+        names={names}
         onclick={() => data.honest_pick && pickOffer(data.honest_pick.offer)}
       />
     {/if}
 
-    {#if selected}
-      <FareSheet offer={selected} quotes={selectedQuotes} bookers={data.bookers} date={data.query.date} />
-    {:else}
-      <p class="note" style="margin:14px 0 8px">Click a flight to see shopped prices for that exact itinerary.</p>
+    {#if sheetOffer && routeOffers.length}
+      <FareSheet
+        offer={sheetOffer}
+        routeOffers={routeOffers}
+        names={names}
+        date={data.query.date}
+        adults={data.query.adults}
+        onPick={pickOffer}
+      />
     {/if}
 
     <div class="tabs">
@@ -184,7 +185,7 @@
             {ch.kind === 'nonstop' ? 'Nonstop' : ch.kind === 'connecting' ? 'Connecting' : 'Nearby airports'}
           </h2>
           {#each ch.offers.filter((o) => o.id !== data.honest_pick?.offer.id) as offer}
-            <OfferCard {offer} selected={selected?.id === offer.id} onclick={() => pickOffer(offer)} />
+            <OfferCard {offer} selected={sheetOffer?.id === offer.id} names={names} onclick={() => pickOffer(offer)} />
           {/each}
         {/if}
       {/each}
@@ -219,7 +220,7 @@
       <p class="note">A cheaper ticket that continues past {data.destination.iata}. You would get off there. Airlines prohibit this.</p>
       {#if data.hidden_city.length}
         {#each data.hidden_city as match}
-          <HiddenCityCard {match} />
+          <HiddenCityCard {match} names={names} />
         {/each}
       {:else}
         <p class="empty">

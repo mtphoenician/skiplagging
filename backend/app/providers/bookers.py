@@ -2,7 +2,22 @@ from __future__ import annotations
 
 from urllib.parse import quote
 
+from app.metros import METROS
 from app.models import BookerLink
+
+
+def google_flights_url(origin: str, dest: str, date: str, currency: str = "USD") -> str:
+    """Hash deep-link that fills the search form. The old ?q= natural-language URL does not."""
+    o, d, ccy = origin.upper(), dest.upper(), (currency or "USD").upper()
+    return (
+        f"https://www.google.com/travel/flights/search?hl=en&curr={ccy}"
+        f"#flt={o}.{d}.{date};c:{ccy};e:1;sd:1;t:f"
+    )
+
+
+def _booking_point(code: str) -> str:
+    return f"{code}.CITY" if code in METROS else f"{code}.AIRPORT"
+
 
 # Public search URL schemes only. No airline.com roster — those rot.
 # Skipped on purpose: Orbitz/Travelocity/Hotwire (Expedia twins), Opodo/GoVoyages
@@ -14,7 +29,7 @@ _META = (
         "meta-search",
         "Metasearch: compares and hands off. Does not issue the e-ticket.",
         False,
-        "https://www.google.com/travel/flights?q={q}&hl=en&gl=us&curr=USD",
+        "",
     ),
     (
         "kayak",
@@ -70,7 +85,7 @@ _META = (
         "ota",
         "OTA. Flight checkout on Booking.com can issue the ticket if you finish there.",
         True,
-        "https://flights.booking.com/flights/{o}.AIRPORT-{d}.AIRPORT/?type=ONEWAY&adults={adults}&cabinClass=ECONOMY&depart={date}&sort=BEST",
+        "https://flights.booking.com/flights/{ob}-{db}/?type=ONEWAY&adults={adults}&cabinClass=ECONOMY&depart={date}&sort=BEST",
     ),
     (
         "trip-com",
@@ -153,13 +168,17 @@ def booker_links(
     date: str,
     adults: int = 1,
     airlines: list[tuple[str, str]] | None = None,
+    currency: str = "USD",
 ) -> list[BookerLink]:
     o, d = origin.upper(), dest.upper()
+    ccy = (currency or "USD").upper()
     ctx = {
         "o": o,
         "d": d,
         "ol": o.lower(),
         "dl": d.lower(),
+        "ob": _booking_point(o),
+        "db": _booking_point(d),
         "date": date,
         "yymmdd": date[2:].replace("-", ""),
         "ymd": date.replace("-", ""),
@@ -170,29 +189,30 @@ def booker_links(
         "us": _us(date),
         "q": quote(f"flights from {o} to {d} on {date} one way"),
     }
-    links = [
-        BookerLink(
-            id=sid,
-            name=name,
-            layer=layer,  # type: ignore[arg-type]
-            role=role,
-            url=tmpl.format(**ctx),
-            issues_ticket=issues,
+    links: list[BookerLink] = []
+    for sid, name, layer, role, issues, tmpl in _META:
+        url = google_flights_url(o, d, date, ccy) if sid == "google-flights" else tmpl.format(**ctx)
+        links.append(
+            BookerLink(
+                id=sid,
+                name=name,
+                layer=layer,  # type: ignore[arg-type]
+                role=role,
+                url=url,
+                issues_ticket=issues,
+            )
         )
-        for sid, name, layer, role, issues, tmpl in _META
-    ]
     for iata, name in airlines or []:
         iata = iata.upper()
         if len(iata) < 2 or iata in {"ZZ", "XX", "YY"}:
             continue
-        q = quote(f"flights from {o} to {d} on {date} one way {name}")
         links.append(
             BookerLink(
                 id=f"carrier-{iata}",
                 name=f"{name} ({iata})",
                 layer="airline-direct",
                 role="Carrier name comes from the airline table. Link is a metasearch prefilter, not a PNR on the airline host.",
-                url=f"https://www.google.com/travel/flights?q={q}&hl=en&gl=us&curr=USD",
+                url=google_flights_url(o, d, date, ccy),
                 issues_ticket=False,
             )
         )

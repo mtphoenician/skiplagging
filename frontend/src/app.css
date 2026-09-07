@@ -995,13 +995,32 @@ h3 {
   padding: 0;
 }
 
-.quote-list li {
+.airline-name {
+  margin: 0 0 6px;
+  font-size: 0.95rem;
+  font-weight: 650;
+}
+
+.quote-hit {
   display: flex;
   justify-content: space-between;
   gap: 16px;
   align-items: start;
+  width: 100%;
   padding: 12px 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.quote-list li {
   border-bottom: 1px solid var(--line);
+}
+
+.quote-list li.on {
+  background: rgba(28, 25, 21, 0.03);
 }
 
 .quote-list li:last-child {
@@ -1010,6 +1029,15 @@ h3 {
 
 .quote-list li.best strong {
   color: var(--green);
+}
+
+.quote-hit strong,
+.quote-hit .note {
+  display: block;
+}
+
+.quote-hit .note {
+  margin-top: 4px;
 }
 
 .quote-price {

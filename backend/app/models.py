@@ -318,6 +318,7 @@ class SearchResponse(BaseModel):
     hidden_city: list[HiddenCityMatch]
     connection_hints: list[ConnectionHint]
     bookers: list[BookerLink]
+    airline_names: dict[str, str] = Field(default_factory=dict)
     traffic_origin: LiveTraffic | None = None
     traffic_destination: LiveTraffic | None = None
     board_origin: list[BoardFlight] = Field(default_factory=list)

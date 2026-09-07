@@ -278,6 +278,7 @@ export interface SearchResponse {
   hidden_city: HiddenCityMatch[];
   connection_hints: ConnectionHint[];
   bookers: BookerLink[];
+  airline_names?: Record<string, string>;
   traffic_origin: LiveTraffic | null;
   traffic_destination: LiveTraffic | null;
   board_origin: BoardFlight[];
