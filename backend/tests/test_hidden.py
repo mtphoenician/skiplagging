@@ -1,5 +1,7 @@
 from types import SimpleNamespace
 
+import pytest
+
 from app.engines.candidates import plan_expansion
 from app.engines.index import classify_for_search, observation_meta, ticketed_dests_through
 from app.engines.shop import _cache_state, _needs_city_nonstop
@@ -12,7 +14,7 @@ from app.engines.hidden import (
     refresh_keeps_hidden_city,
 )
 from app.engines.shop import _classify_hidden
-from app.providers.mock import jfk_dfw_den, jfk_dfw_lax, jfk_ord_den, jfk_ord_nonstop, jfk_ord_sea
+from app.providers.mock import MockProvider, jfk_dfw_den, jfk_dfw_lax, jfk_ord_den, jfk_ord_nonstop, jfk_ord_sea
 
 
 def test_hidden_when_intermediate_is_intended():
@@ -41,6 +43,55 @@ def test_refresh_invalid_when_connection_moves():
     mutated = jfk_dfw_den("2026-10-10")
     assert refresh_keeps_hidden_city(original, original, "ORD")
     assert not refresh_keeps_hidden_city(original, mutated, "ORD")
+
+
+@pytest.mark.asyncio
+async def test_mock_refresh_reprices_den_and_rejects_moved_hub():
+    mock = MockProvider()
+    den = jfk_ord_den("2026-10-10")
+    fresh = await mock.refresh_offer(den)
+    assert fresh is not None
+    assert fresh.price == 175.0
+    assert refresh_keeps_hidden_city(den, fresh, "ORD")
+    moved = await mock.refresh_offer(den.model_copy(update={"id": "mock-jfk-ord-den-mutated"}))
+    assert moved is not None
+    assert moved.segments[0].dest == "DFW"
+    assert not refresh_keeps_hidden_city(den, moved, "ORD")
+    live = den.model_copy(update={"id": "duffel-off_1", "source": "duffel"})
+    assert await mock.refresh_offer(live) is None
+
+
+def test_refresh_endpoint_matches_mock_contract():
+    from fastapi.testclient import TestClient
+
+    from app.main import app
+
+    den = jfk_ord_den("2026-10-10")
+    with TestClient(app) as client:
+        ok = client.post(
+            "/offers/refresh",
+            json={"offer": den.model_dump(), "intended_destination": "ORD"},
+        ).json()
+        assert ok["valid"] is True
+        assert ok["offer"]["price"] == 175.0
+        dead = client.post(
+            "/offers/refresh",
+            json={
+                "offer": den.model_copy(update={"id": "mock-jfk-ord-den-mutated"}).model_dump(),
+                "intended_destination": "ORD",
+            },
+        ).json()
+        assert dead["valid"] is False
+        assert "intended city" in dead["reason"]
+        other = client.post(
+            "/offers/refresh",
+            json={
+                "offer": den.model_copy(update={"id": "duffel-x", "source": "duffel"}).model_dump(),
+                "intended_destination": "ORD",
+            },
+        ).json()
+        assert other["valid"] is False
+        assert other["offer"] is None
 
 
 def test_savings_calculation():

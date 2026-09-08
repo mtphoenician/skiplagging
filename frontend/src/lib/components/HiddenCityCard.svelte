@@ -1,11 +1,13 @@
 <script lang="ts">
   import { airlineName, duration, hm, money, refreshOffer, timeRange } from '$lib/api';
-  import type { HiddenCityMatch } from '$lib/types';
+  import type { HiddenCityMatch, Offer } from '$lib/types';
 
   let { match, names = {} }: { match: HiddenCityMatch; names?: Record<string, string> } = $props();
   let open = $state(false);
   let refreshNote = $state('');
-  const t = $derived(match.through_offer);
+  let checking = $state(false);
+  let quoted = $state<Offer | null>(null);
+  const t = $derived(quoted ?? match.through_offer);
   const first = $derived(t.segments[0]);
   const last = $derived(t.segments[t.segments.length - 1]);
   const exitIdx = $derived(match.exit_segment_index ?? 0);
@@ -15,18 +17,32 @@
   const carrier = $derived(airlineName(t.carrier, names));
   const path = $derived(t.segments.map((s) => s.origin).concat(last ? [last.dest] : []).join(' → '));
   const warnings = $derived(match.warnings?.length ? match.warnings : []);
+  const shownPrice = $derived(t.price);
+  const shownSaving = $derived(
+    match.local_offer.price != null && shownPrice != null
+      ? match.local_offer.price - shownPrice
+      : match.gross_saving
+  );
 
   async function onRefresh() {
-    refreshNote = 'Checking…';
+    checking = true;
+    refreshNote = 'Checking whether this ticket still stops at ' + getOff + '…';
     try {
-      const r = await refreshOffer(t, getOff);
+      const r = await refreshOffer(match.through_offer, getOff);
       if (!r.valid) {
+        quoted = null;
         refreshNote = r.reason || 'This hidden-city result is no longer valid.';
         return;
       }
-      refreshNote = r.offer?.price != null ? `Fresh price ${r.offer.price} ${r.offer.currency}` : 'Still available.';
+      if (r.offer) quoted = r.offer;
+      refreshNote =
+        r.offer?.price != null
+          ? `Still a hidden-city ticket via ${getOff}. Fresh price ${r.offer.price} ${r.offer.currency}.`
+          : 'Still available.';
     } catch (e) {
       refreshNote = e instanceof Error ? e.message : 'Refresh failed';
+    } finally {
+      checking = false;
     }
   }
 </script>
@@ -67,17 +83,19 @@
           {#each match.bookers.filter((b) => ['google-flights', 'kayak', 'skyscanner', 'booking-com', 'expedia'].includes(b.id)).slice(0, 5) as b}
             <a class="book-btn" href={b.url} target="_blank" rel="noreferrer">{b.name}</a>
           {/each}
-          <button class="book-btn" type="button" onclick={onRefresh}>Refresh price</button>
         </div>
-      {/if}
-      {#if refreshNote}
-        <p class="note">{refreshNote}</p>
       {/if}
     </div>
     <div class="price">
       <span class="price-was">{money(match.local_offer.price, match.currency)}</span>
-      {money(t.price, match.currency)}
-      <small>Save {money(match.gross_saving, match.currency)}</small>
+      {money(shownPrice, match.currency)}
+      <small>Save {money(shownSaving, match.currency)}</small>
+      <button class="ghost recheck" type="button" onclick={onRefresh} disabled={checking}>
+        {checking ? 'Checking…' : 'Recheck this ticket'}
+      </button>
+      {#if refreshNote}
+        <p class="note recheck-note">{refreshNote}</p>
+      {/if}
     </div>
   </div>
 
@@ -116,5 +134,14 @@
     padding-left: 18px;
     color: var(--muted);
     font-size: 0.85rem;
+  }
+  .recheck {
+    margin-top: 10px;
+    font-size: 0.8rem;
+  }
+  .recheck-note {
+    margin: 6px 0 0;
+    max-width: 12rem;
+    text-align: right;
   }
 </style>
