@@ -2,7 +2,7 @@
   import DealCard from '$lib/components/DealCard.svelte';
   import FlightArc from '$lib/components/FlightArc.svelte';
   import SearchForm from '$lib/components/SearchForm.svelte';
-  import { defaultDate, fetchDefaults, fetchDeals } from '$lib/api';
+  import { defaultDate, fetchDeals } from '$lib/api';
   import type { Cabin, HiddenDeal } from '$lib/types';
 
   let origin = $state('');
@@ -17,15 +17,6 @@
     fetchDeals({ limit: 4 })
       .then((rows) => {
         preview = rows;
-      })
-      .catch(() => {});
-  });
-
-  $effect(() => {
-    fetchDefaults()
-      .then((d) => {
-        if (!origin) origin = d.origin.iata;
-        if (!destination) destination = d.destination.iata;
       })
       .catch(() => {});
   });
