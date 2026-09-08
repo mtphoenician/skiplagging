@@ -852,7 +852,7 @@ async def _probe_candidates(
     async def probe(c: str) -> tuple[list[HiddenCityMatch], list[Offer]]:
         async with sem:
             throughs = await _shop_providers(
-                replace(req, dest=c, nonstop=False, max_offers=10),
+                replace(req, dest=c, nonstop=False, max_offers=20),
                 amadeus,
                 duffel,
                 mock=mock,
@@ -915,17 +915,16 @@ def _classify_hidden(
 
 
 def _via_b(offer: Offer, origin: str | set[str], dest_b: str | set[str], dest_c: str) -> bool:
-    if len(offer.segments) < 2:
+    """True when a complete A→…→C ticket exits at B. B may be any intermediate stop."""
+    if not offer.segments:
         return False
     origins = {o.upper() for o in ({origin} if isinstance(origin, str) else origin)}
     dests = {d.upper() for d in ({dest_b} if isinstance(dest_b, str) else dest_b)}
-    first, last = offer.segments[0], offer.segments[-1]
-    return (
-        first.origin.upper() in origins
-        and first.dest.upper() in dests
-        and last.dest.upper() == dest_c.upper()
-        and last.dest.upper() not in dests
-    )
+    if offer.segments[0].origin.upper() not in origins:
+        return False
+    if ticketed_destination(offer) != dest_c.upper() or dest_c.upper() in dests:
+        return False
+    return detect_hidden_city(offer, dests) is not None
 
 
 TEST_CARRIERS = {"ZZ", "XX", "YY"}

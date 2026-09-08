@@ -14,7 +14,7 @@ Hidden-city fare discovery with a **PostgreSQL** airport/route database and laye
 
 Hidden-city rows are **complete priced tickets** that continue past the intended city (ticketed `C`, intended stop `B`). The engine never rewrites `A→B→C` into a fake `A→B` fare, and never prices a hidden-city trip by adding `P(A,B)+P(B,C)`.
 
-Offers are stored and indexed by **ticketed destination and connection airports**. A later search for A→B can reuse a previously shopped A→B→C ticket and skip shopping C again. Fresh A→B results in the offer index skip a live shop; cheaper hidden-city already on hand skips destination expansion. Live traffic never blocks priced results. Sources are partner adapters only (mock, Duffel, Amadeus) — this app does not collect airline websites. OpenFlights spokes are **connection hints**, not savings.
+Offers are stored and indexed by **ticketed destination and connection airports**. A later search for A→B can reuse a previously shopped A→B→C ticket and skip shopping C again. Fresh A→B results in the offer index skip a live shop; cheaper hidden-city already on hand skips destination expansion. Live traffic never blocks priced results. Sources are partner adapters only (mock, Duffel, Amadeus) — this app does not collect airline websites. OpenFlights spokes are **connection hints**, not savings. Duffel is asked for up to **2 connections** (the most their API accepts). We never drop a longer ticket if Amadeus returns one; hidden-city is “ticketed C, get off at B”, not “exactly one stop”.
 
 ## Buy the fares, build the search
 

@@ -33,6 +33,98 @@ def test_standard_when_ticketed_is_intended():
     assert is_standard_to(jfk_ord_nonstop("2026-10-10"), "ORD")
 
 
+def test_hidden_when_intended_is_the_second_stop():
+    """Honest A→B can itself be two connections; A→X→B→C is still hidden-city at B."""
+    from app.models import Offer, Segment
+
+    def seg(o: str, d: str, flight: str) -> Segment:
+        return Segment(
+            origin=o,
+            dest=d,
+            carrier="UA",
+            flight_number=flight,
+            dep="2026-11-19T08:00",
+            arr="2026-11-19T10:00",
+            duration_min=120,
+            rbd="Y",
+        )
+
+    through = Offer(
+        id="two-stop-exit-b",
+        kind="connecting",
+        channel="ndc",
+        source="duffel",
+        segments=[
+            seg("JFK", "CLT", "UA1"),
+            seg("CLT", "ORD", "UA2"),
+            seg("ORD", "DEN", "UA3"),
+        ],
+        price=180,
+        currency="USD",
+        cabin="ECONOMY",
+        fare_basis="Y",
+        carrier="UA",
+        duration_min=480,
+        stops=2,
+        first_flight="UA1",
+        live=True,
+    )
+    hit = detect_hidden_city(through, "ORD")
+    assert hit is not None
+    assert hit.exit_airport == "ORD"
+    assert hit.exit_segment_index == 1
+    assert [s.dest for s in hit.unused_segments] == ["DEN"]
+    honest = jfk_ord_nonstop("2026-11-19")
+    matches, _ = _classify_hidden([through], {"ORD"}, honest, None, 20)
+    assert matches and matches[0].through_offer.id == "two-stop-exit-b"
+    assert matches[0].exit_segment_index == 1
+
+
+def test_hidden_when_intended_is_the_third_stop():
+    from app.models import Offer, Segment
+
+    def seg(o: str, d: str, flight: str) -> Segment:
+        return Segment(
+            origin=o,
+            dest=d,
+            carrier="UA",
+            flight_number=flight,
+            dep="2026-11-19T08:00",
+            arr="2026-11-19T10:00",
+            duration_min=90,
+            rbd="Y",
+        )
+
+    through = Offer(
+        id="three-stop-exit-b",
+        kind="connecting",
+        channel="gds",
+        source="amadeus",
+        segments=[
+            seg("JFK", "CLT", "UA1"),
+            seg("CLT", "ATL", "UA2"),
+            seg("ATL", "ORD", "UA3"),
+            seg("ORD", "DEN", "UA4"),
+        ],
+        price=160,
+        currency="USD",
+        cabin="ECONOMY",
+        fare_basis="Y",
+        carrier="UA",
+        duration_min=600,
+        stops=3,
+        first_flight="UA1",
+        live=True,
+    )
+    hit = detect_hidden_city(through, {"ORD", "MDW"})
+    assert hit is not None
+    assert hit.exit_airport == "ORD"
+    assert hit.exit_segment_index == 2
+    honest = jfk_ord_nonstop("2026-11-19")
+    matches, _ = _classify_hidden([through], {"ORD", "MDW"}, honest, None, 20)
+    assert [m.through_offer.id for m in matches] == ["three-stop-exit-b"]
+
+
 def test_rejected_when_path_misses_intended():
     assert detect_hidden_city(jfk_dfw_lax("2026-10-10"), "ORD") is None
     assert not is_standard_to(jfk_dfw_lax("2026-10-10"), "ORD")

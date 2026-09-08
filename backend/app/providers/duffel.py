@@ -10,6 +10,29 @@ from app.config import Settings
 from app.models import Offer, Segment
 from app.providers.base import ShopRequest
 
+# Duffel's documented ceiling is 2. Omitting the field defaults to 1, which
+# never returns two-stop tickets. We do not apply a tighter product cap;
+# if Amadeus (or anyone) returns three connections, we still classify them.
+DUFFEL_MAX_CONNECTIONS = 2
+
+
+def offer_request_body(req: ShopRequest) -> dict:
+    connections = 0 if req.nonstop else DUFFEL_MAX_CONNECTIONS
+    return {
+        "data": {
+            "slices": [
+                {
+                    "origin": req.origin,
+                    "destination": req.dest,
+                    "departure_date": req.date,
+                }
+            ],
+            "passengers": [{"type": "adult"} for _ in range(req.adults)],
+            "cabin_class": req.cabin.lower().replace("premium_economy", "premium_economy"),
+            "max_connections": connections,
+        }
+    }
+
 
 class DuffelProvider:
     name = "duffel"
@@ -19,20 +42,7 @@ class DuffelProvider:
         self._client = client
 
     async def shop(self, req: ShopRequest) -> list[Offer]:
-        payload = {
-            "data": {
-                "slices": [
-                    {
-                        "origin": req.origin,
-                        "destination": req.dest,
-                        "departure_date": req.date,
-                    }
-                ],
-                "passengers": [{"type": "adult"} for _ in range(req.adults)],
-                "cabin_class": req.cabin.lower().replace("premium_economy", "premium_economy"),
-                "max_connections": 0 if req.nonstop else 1,
-            }
-        }
+        payload = offer_request_body(req)
         headers = {
             "Authorization": f"Bearer {self._s.duffel_token}",
             "Duffel-Version": "v2",

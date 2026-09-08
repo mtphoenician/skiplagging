@@ -232,7 +232,7 @@ def test_hidden_not_shown_when_currency_differs():
     assert _hidden_if_cheaper([_match("m1", gbp_through, honest.offer, 220)], honest) is None
 
 
-def test_via_b_requires_first_sector_to_true_dest():
+def test_via_b_allows_any_intermediate_stop():
     through = _offer(
         "h1",
         220,
@@ -245,7 +245,20 @@ def test_via_b_requires_first_sector_to_true_dest():
     assert _via_b(through, "LHR", "BOS", "JFK")
     assert _via_b(through, {"LHR", "LGW"}, {"BOS", "BDL"}, "JFK")
     assert not _via_b(through, "LHR", "JFK", "BOS")
-    assert not _via_b(through, "LGW", "BOS", "JFK")
+    assert _via_b(through, "LGW", "BOS", "JFK") is False
+    two_stop = _offer(
+        "h2",
+        190,
+        [
+            _seg("LHR", "DUB", "2026-10-22T08:00", "2026-10-22T09:00", "BA1"),
+            _seg("DUB", "BOS", "2026-10-22T10:00", "2026-10-22T13:00", "BA2"),
+            _seg("BOS", "JFK", "2026-10-22T14:00", "2026-10-22T15:00", "BA3"),
+        ],
+        2,
+    )
+    assert _via_b(two_stop, "LHR", "BOS", "JFK")
+    assert not _via_b(two_stop, "LHR", "DUB", "BOS")
+
     nonstop = _offer("n1", 300, [_seg("LHR", "JFK", "2026-10-22T08:00", "2026-10-22T11:00")], 0)
     assert not _via_b(nonstop, "LHR", "BOS", "JFK")
 
@@ -283,6 +296,19 @@ def test_prefer_real_carriers_skips_duffel_airways():
     ba = _offer("ba", 110, [_seg("CDG", "LHR", "2026-09-19T10:00", "2026-09-19T11:00", "BA1")], 0)
     kept = _prefer_real_carriers([zz, ba])
     assert [o.id for o in kept] == ["ba"]
+
+
+def test_duffel_offer_request_uses_supplier_max_connections():
+    from app.providers.base import ShopRequest
+    from app.providers.duffel import DUFFEL_MAX_CONNECTIONS, offer_request_body
+
+    connecting = offer_request_body(ShopRequest(origin="JFK", dest="DEN", date="2026-11-19"))
+    assert connecting["data"]["max_connections"] == DUFFEL_MAX_CONNECTIONS == 2
+    assert "max_connections" not in connecting["data"]["slices"][0]
+    nonstop = offer_request_body(
+        ShopRequest(origin="JFK", dest="ORD", date="2026-11-19", nonstop=True)
+    )
+    assert nonstop["data"]["max_connections"] == 0
 
 
 def test_duffel_duration_parses_overnight():
