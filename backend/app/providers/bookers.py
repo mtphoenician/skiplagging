@@ -1,18 +1,90 @@
 from __future__ import annotations
 
+import base64
 from urllib.parse import quote
 
 from app.metros import METROS
 from app.models import BookerLink
 
 
-def google_flights_url(origin: str, dest: str, date: str, currency: str = "USD") -> str:
-    """Hash deep-link that fills the search form. The old ?q= natural-language URL does not."""
+def _varint(n: int) -> bytes:
+    if n < 0:
+        n += 1 << 64
+    out = bytearray()
+    while True:
+        bit = n & 0x7F
+        n >>= 7
+        if n:
+            out.append(bit | 0x80)
+        else:
+            out.append(bit)
+            break
+    return bytes(out)
+
+
+def _key(field: int, wire: int) -> bytes:
+    return _varint((field << 3) | wire)
+
+
+def _ld(field: int, payload: bytes) -> bytes:
+    return _key(field, 2) + _varint(len(payload)) + payload
+
+
+def _var(field: int, n: int) -> bytes:
+    return _key(field, 0) + _varint(n)
+
+
+def _str(field: int, value: str) -> bytes:
+    raw = value.encode()
+    return _ld(field, raw)
+
+
+def _place(code: str) -> bytes:
+    return _var(1, 1) + _str(2, code.upper())
+
+
+def google_tfs(
+    origin: str,
+    dest: str,
+    date: str,
+    adults: int = 1,
+    cabin: int = 1,
+) -> str:
+    """URL-safe protobuf `tfs` for a one-way Google Flights search."""
+    leg = _str(2, date) + _ld(13, _place(origin)) + _ld(14, _place(dest))
+    body = bytearray()
+    body += _var(1, 28)
+    body += _var(2, 2)
+    body += _ld(3, leg)
+    for _ in range(max(1, min(adults, 9))):
+        body += _var(8, 1)
+    body += _var(9, cabin)
+    body += _var(14, 1)
+    body += _ld(16, _var(1, -1))
+    body += _var(19, 2)
+    return base64.urlsafe_b64encode(bytes(body)).decode().rstrip("=")
+
+
+def google_flights_url(
+    origin: str,
+    dest: str,
+    date: str,
+    currency: str = "USD",
+    adults: int = 1,
+    cabin: str = "ECONOMY",
+) -> str:
     o, d, ccy = origin.upper(), dest.upper(), (currency or "USD").upper()
-    return (
-        f"https://www.google.com/travel/flights/search?hl=en&curr={ccy}"
-        f"#flt={o}.{d}.{date};c:{ccy};e:1;sd:1;t:f"
-    )
+    tfs = google_tfs(o, d, date, adults, _google_cabin(cabin))
+    return f"https://www.google.com/travel/flights/search?tfs={tfs}&hl=en&curr={ccy}"
+
+
+def _google_cabin(cabin: str) -> int:
+    return {
+        "ECONOMY": 1,
+        "PREMIUM_ECONOMY": 2,
+        "BUSINESS": 3,
+        "FIRST": 4,
+    }.get((cabin or "ECONOMY").upper(), 1)
 
 
 def _booking_point(code: str) -> str:
@@ -37,7 +109,7 @@ _META = (
         "meta-search",
         "Metasearch. Booking completes on an airline or OTA, not on this link alone.",
         False,
-        "https://www.kayak.com/flights/{o}-{d}/{date}?sort=price_a",
+        "https://www.kayak.com/flights/{o}-{d}/{date}{kayak_adults}?sort=bestflight_a",
     ),
     (
         "skyscanner",
@@ -45,7 +117,7 @@ _META = (
         "meta-search",
         "Metasearch. Date path is YYMMDD. Not the validating carrier.",
         False,
-        "https://www.skyscanner.com/transport/flights/{ol}/{dl}/{yymmdd}/?adultsv2={adults}&cabinclass=economy&rtn=0",
+        "https://www.skyscanner.com/transport/flights/{ol}/{dl}/{yymmdd}/?adultsv2={adults}&cabinclass={sky_cabin}&rtn=0&preferdirects=false",
     ),
     (
         "momondo",
@@ -53,7 +125,7 @@ _META = (
         "meta-search",
         "Kayak-family metasearch. Often wider international OTA coverage.",
         False,
-        "https://www.momondo.com/flight-search/{o}-{d}/{date}?sort=price_a",
+        "https://www.momondo.com/flight-search/{o}-{d}/{date}{kayak_adults}?sort=bestflight_a",
     ),
     (
         "cheapflights",
@@ -61,7 +133,7 @@ _META = (
         "meta-search",
         "Kayak-family metasearch. US-facing comparison.",
         False,
-        "https://www.cheapflights.com/flight-search/{o}-{d}/{date}?sort=price_a",
+        "https://www.cheapflights.com/flight-search/{o}-{d}/{date}{kayak_adults}?sort=bestflight_a",
     ),
     (
         "wego",
@@ -77,7 +149,7 @@ _META = (
         "ota",
         "OTA. Typically issues via GDS as merchant of record if you finish checkout there.",
         True,
-        "https://www.expedia.com/Flights-Search?trip=oneway&leg1=from:{o},to:{d},departure:{us}TANYT&passengers=adults:{adults},children:0,infantinlap:N&mode=search",
+        "https://www.expedia.com/Flights-Search?flight-type=on&mode=search&trip=oneway&leg1=from:{o},to:{d},departure:{us}TANYT&passengers=adults:{adults},children:0,infantinlap:N",
     ),
     (
         "booking-com",
@@ -85,7 +157,7 @@ _META = (
         "ota",
         "OTA. Flight checkout on Booking.com can issue the ticket if you finish there.",
         True,
-        "https://flights.booking.com/flights/{ob}-{db}/?type=ONEWAY&adults={adults}&cabinClass=ECONOMY&depart={date}&sort=BEST",
+        "https://flights.booking.com/flights/{ob}-{db}/?type=ONEWAY&adults={adults}&cabinClass={book_cabin}&depart={date}&from={o}&to={d}&sort=BEST",
     ),
     (
         "trip-com",
@@ -109,7 +181,7 @@ _META = (
         "ota",
         "OTA. Virtual interlining / self-transfer specialist. Issues if you finish there.",
         True,
-        "https://www.kiwi.com/en/search/results/{o}/{d}/{date}/no-return",
+        "https://www.kiwi.com/en/search/results/{ol}/{dl}/{date}/no-return?adults={adults}",
     ),
     (
         "cheapoair",
@@ -125,7 +197,7 @@ _META = (
         "ota",
         "European OTA. Can issue if you finish checkout there.",
         True,
-        "https://www.edreams.com/travel/#results/type=O;from={o};to={d};dep={date};adults={adults};class=TURIST",
+        "https://www.edreams.com/flights/{ol}-{dl}/{date}/{adults}-0-0/",
     ),
     (
         "traveloka",
@@ -169,9 +241,11 @@ def booker_links(
     adults: int = 1,
     airlines: list[tuple[str, str]] | None = None,
     currency: str = "USD",
+    cabin: str = "ECONOMY",
 ) -> list[BookerLink]:
     o, d = origin.upper(), dest.upper()
     ccy = (currency or "USD").upper()
+    cabin_u = (cabin or "ECONOMY").upper()
     ctx = {
         "o": o,
         "d": d,
@@ -186,12 +260,24 @@ def booker_links(
         "mmt": _mmt(date),
         "tvldt": _tvldt(date),
         "adults": adults,
+        "kayak_adults": "" if adults <= 1 else f"/{adults}adults",
+        "sky_cabin": {
+            "ECONOMY": "economy",
+            "PREMIUM_ECONOMY": "premiumeconomy",
+            "BUSINESS": "business",
+            "FIRST": "first",
+        }.get(cabin_u, "economy"),
+        "book_cabin": cabin_u,
         "us": _us(date),
-        "q": quote(f"flights from {o} to {d} on {date} one way"),
+        "q": quote(f"one way flights from {o} to {d} on {date}"),
     }
     links: list[BookerLink] = []
     for sid, name, layer, role, issues, tmpl in _META:
-        url = google_flights_url(o, d, date, ccy) if sid == "google-flights" else tmpl.format(**ctx)
+        url = (
+            google_flights_url(o, d, date, ccy, adults, cabin_u)
+            if sid == "google-flights"
+            else tmpl.format(**ctx)
+        )
         links.append(
             BookerLink(
                 id=sid,
@@ -202,6 +288,7 @@ def booker_links(
                 issues_ticket=issues,
             )
         )
+    google = google_flights_url(o, d, date, ccy, adults, cabin_u)
     for iata, name in airlines or []:
         iata = iata.upper()
         if len(iata) < 2 or iata in {"ZZ", "XX", "YY"}:
@@ -212,7 +299,7 @@ def booker_links(
                 name=f"{name} ({iata})",
                 layer="airline-direct",
                 role="Carrier name comes from the airline table. Link is a metasearch prefilter, not a PNR on the airline host.",
-                url=google_flights_url(o, d, date, ccy),
+                url=google,
                 issues_ticket=False,
             )
         )

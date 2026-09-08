@@ -64,7 +64,7 @@
       </div>
       {#if match.bookers?.length}
         <div class="book-row" style="margin-top:12px">
-          {#each match.bookers.filter((b) => ['google-flights', 'kayak', 'skyscanner', 'booking-com'].includes(b.id)).slice(0, 4) as b}
+          {#each match.bookers.filter((b) => ['google-flights', 'kayak', 'skyscanner', 'booking-com', 'expedia'].includes(b.id)).slice(0, 5) as b}
             <a class="book-btn" href={b.url} target="_blank" rel="noreferrer">{b.name}</a>
           {/each}
           <button class="book-btn" type="button" onclick={onRefresh}>Refresh price</button>

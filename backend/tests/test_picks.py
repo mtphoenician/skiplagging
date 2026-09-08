@@ -99,7 +99,7 @@ def test_pick_prefers_cheapest_nonstop_over_dearer_connecting():
     assert pick is not None
     assert pick.kind == "nonstop"
     assert pick.offer.id == "n1"
-    assert pick.reason == "Cheapest — nonstop"
+    assert pick.reason == "Best — cheapest nonstop"
 
 
 def test_pick_prefers_cheaper_connecting_over_nonstop():
@@ -179,6 +179,15 @@ def test_pick_ignores_other_currency_amounts():
     assert pick is not None
     assert pick.offer.currency == "USD"
     assert pick.offer.id == "n1"
+
+
+def test_pick_uses_requested_currency_when_present():
+    usd = _offer("n1", 400, [_seg("LHR", "JFK", "2026-10-22T08:00", "2026-10-22T11:00")], 0)
+    gbp = _offer("n2", 80, [_seg("LHR", "JFK", "2026-10-22T09:00", "2026-10-22T12:00")], 0, currency="GBP")
+    pick = pick_honest([usd, gbp], [], preferred="USD")
+    assert pick is not None
+    assert pick.offer.id == "n1"
+    assert pick.offer.currency == "USD"
 
 
 def test_hidden_only_when_cheaper_than_honest_pick():
@@ -298,15 +307,12 @@ def test_best_omitted_when_cheapest_is_already_the_nonstop():
     assert pick_best([cheap_ns, dear_ns], [], cheap) is None
 
 
-def test_best_prefers_faster_nonstop_near_cheapest():
+def test_best_stays_cheapest_nonstop_not_faster_dearer():
     slow = _offer("n1", 200, [_seg("LHR", "JFK", "2026-10-22T08:00", "2026-10-22T16:00")], 0, duration_min=480)
     fast = _offer("n2", 220, [_seg("LHR", "JFK", "2026-10-22T09:00", "2026-10-22T15:00")], 0, duration_min=360)
     cheap = pick_honest([slow, fast], [])
-    best = pick_best([slow, fast], [], cheap)
     assert cheap is not None and cheap.offer.id == "n1"
-    assert best is not None
-    assert best.offer.id == "n2"
-    assert best.reason == "Best — shortest nonstop"
+    assert pick_best([slow, fast], [], cheap) is None
 
 
 def test_city_shop_tokens_include_member_airports():
@@ -323,29 +329,31 @@ def test_city_shop_tokens_include_member_airports():
     assert all(o != "PAR" or d != "LON" for o, d in pairs[1:])
 
 
-def test_best_is_shorter_connecting_within_price_band():
-    long_trip = _offer(
-        "c1",
-        180,
+def test_best_is_fewest_stops_when_cheapest_connects_more():
+    two_stop = _offer(
+        "c2",
+        150,
         [
             _seg("LHR", "DUB", "2026-10-22T08:00", "2026-10-22T09:00", "BA2"),
-            _seg("DUB", "JFK", "2026-10-22T14:00", "2026-10-22T20:00", "BA3"),
+            _seg("DUB", "BOS", "2026-10-22T10:00", "2026-10-22T13:00", "BA3"),
+            _seg("BOS", "JFK", "2026-10-22T14:00", "2026-10-22T15:00", "BA6"),
         ],
-        1,
-        duration_min=720,
+        2,
+        duration_min=420,
     )
-    short_trip = _offer(
-        "c2",
+    one_stop = _offer(
+        "c1",
         200,
         [
             _seg("LHR", "AMS", "2026-10-22T08:00", "2026-10-22T09:00", "BA4"),
             _seg("AMS", "JFK", "2026-10-22T10:00", "2026-10-22T13:00", "BA5"),
         ],
         1,
-        duration_min=420,
+        duration_min=300,
     )
-    cheap = pick_honest([], [long_trip, short_trip])
-    best = pick_best([], [long_trip, short_trip], cheap)
-    assert cheap is not None and cheap.offer.id == "c1"
+    cheap = pick_honest([], [two_stop, one_stop])
+    best = pick_best([], [two_stop, one_stop], cheap)
+    assert cheap is not None and cheap.offer.id == "c2"
     assert best is not None
-    assert best.offer.id == "c2"
+    assert best.offer.id == "c1"
+    assert best.reason == "Best — cheapest one stop"

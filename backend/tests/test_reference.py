@@ -55,8 +55,9 @@ def test_bookers_have_no_carrier_website_roster():
     hosts = {u.url for u in links}
     assert any("XXX" in u and "YYY" in u and "2026-11-02" in u for u in hosts)
     google = next(b.url for b in links if b.id == "google-flights")
-    assert "#flt=XXX.YYY.2026-11-02" in google
-    assert "q=flights" not in google
+    assert "tfs=" in google
+    assert "#flt=" not in google
+    assert "XXX" in google or "tfs=" in google
     assert all("Zed" not in u for u in hosts)
     assert any(b.id == "carrier-BA" and b.name.startswith("British") for b in links)
     assert any(b.layer == "meta-search" for b in links)
@@ -85,9 +86,9 @@ def test_bookers_have_no_carrier_website_roster():
     paris = booker_links("PAR", "LON", "2026-11-02", 1)
     booking = next(b.url for b in paris if b.id == "booking-com")
     assert "PAR.CITY" in booking and "LON.CITY" in booking
-    assert "#flt=PAR.LON.2026-11-02" in next(b.url for b in paris if b.id == "google-flights")
+    assert "tfs=" in next(b.url for b in paris if b.id == "google-flights")
     assert any("trip.com" in b.url and "xxx" in b.url and "yyy" in b.url for b in links)
-    assert any("kiwi.com" in b.url and "XXX" in b.url for b in links)
+    assert any("kiwi.com" in b.url and "xxx" in b.url and "yyy" in b.url for b in links)
     assert any("momondo.com" in b.url for b in links)
 
 

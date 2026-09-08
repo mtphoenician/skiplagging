@@ -135,11 +135,75 @@ export function airlineName(code: string | null | undefined, names: Record<strin
   return names[id] || AIRLINES[id] || id;
 }
 
-export function googleFlightsUrl(origin: string, dest: string, date: string, currency = 'USD'): string {
-  const o = origin.toUpperCase();
-  const d = dest.toUpperCase();
+function varint(n: number | bigint): number[] {
+  let x = BigInt(n);
+  if (x < 0n) x += 1n << 64n;
+  const out: number[] = [];
+  while (true) {
+    const bit = Number(x & 0x7fn);
+    x >>= 7n;
+    if (x) out.push(bit | 0x80);
+    else {
+      out.push(bit);
+      break;
+    }
+  }
+  return out;
+}
+
+function key(field: number, wire: number): number[] {
+  return varint((field << 3) | wire);
+}
+
+function ld(field: number, payload: number[]): number[] {
+  return [...key(field, 2), ...varint(payload.length), ...payload];
+}
+
+function vint(field: number, n: number | bigint): number[] {
+  return [...key(field, 0), ...varint(n)];
+}
+
+function pstr(field: number, value: string): number[] {
+  return ld(field, [...new TextEncoder().encode(value)]);
+}
+
+function place(code: string): number[] {
+  return [...vint(1, 1), ...pstr(2, code.toUpperCase())];
+}
+
+const GOOGLE_CABIN: Record<string, number> = {
+  ECONOMY: 1,
+  PREMIUM_ECONOMY: 2,
+  BUSINESS: 3,
+  FIRST: 4
+};
+
+export function googleTfs(
+  origin: string,
+  dest: string,
+  date: string,
+  adults = 1,
+  cabin = 'ECONOMY'
+): string {
+  const leg = [...pstr(2, date), ...ld(13, place(origin)), ...ld(14, place(dest))];
+  const body: number[] = [...vint(1, 28), ...vint(2, 2), ...ld(3, leg)];
+  for (let i = 0; i < Math.max(1, Math.min(adults, 9)); i++) body.push(...vint(8, 1));
+  body.push(...vint(9, GOOGLE_CABIN[cabin] ?? 1), ...vint(14, 1), ...ld(16, vint(1, -1)), ...vint(19, 2));
+  const b64 = btoa(String.fromCharCode(...body));
+  return b64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+}
+
+export function googleFlightsUrl(
+  origin: string,
+  dest: string,
+  date: string,
+  currency = 'USD',
+  adults = 1,
+  cabin = 'ECONOMY'
+): string {
+  const tfs = googleTfs(origin, dest, date, adults, cabin);
   const ccy = (currency || 'USD').toUpperCase();
-  return `https://www.google.com/travel/flights/search?hl=en&curr=${ccy}#flt=${o}.${d}.${date};c:${ccy};e:1;sd:1;t:f`;
+  return `https://www.google.com/travel/flights/search?tfs=${tfs}&hl=en&curr=${ccy}`;
 }
 
 export function itineraryBookers(
@@ -147,29 +211,43 @@ export function itineraryBookers(
   dest: string,
   date: string,
   adults = 1,
-  currency = 'USD'
+  currency = 'USD',
+  cabin = 'ECONOMY'
 ): { id: string; name: string; url: string }[] {
   const o = origin.toUpperCase();
   const d = dest.toUpperCase();
   const yymmdd = date.slice(2).replace(/-/g, '');
   const us = `${date.slice(5, 7)}/${date.slice(8, 10)}/${date.slice(0, 4)}`;
+  const adultsPath = adults > 1 ? `/${adults}adults` : '';
+  const skyCabin =
+    cabin === 'PREMIUM_ECONOMY'
+      ? 'premiumeconomy'
+      : cabin === 'BUSINESS'
+        ? 'business'
+        : cabin === 'FIRST'
+          ? 'first'
+          : 'economy';
   return [
-    { id: 'google-flights', name: 'Google Flights', url: googleFlightsUrl(o, d, date, currency) },
-    { id: 'kayak', name: 'Kayak', url: `https://www.kayak.com/flights/${o}-${d}/${date}?sort=price_a` },
+    { id: 'google-flights', name: 'Google Flights', url: googleFlightsUrl(o, d, date, currency, adults, cabin) },
+    {
+      id: 'kayak',
+      name: 'Kayak',
+      url: `https://www.kayak.com/flights/${o}-${d}/${date}${adultsPath}?sort=bestflight_a`
+    },
     {
       id: 'skyscanner',
       name: 'Skyscanner',
-      url: `https://www.skyscanner.com/transport/flights/${o.toLowerCase()}/${d.toLowerCase()}/${yymmdd}/?adultsv2=${adults}&cabinclass=economy&rtn=0`
+      url: `https://www.skyscanner.com/transport/flights/${o.toLowerCase()}/${d.toLowerCase()}/${yymmdd}/?adultsv2=${adults}&cabinclass=${skyCabin}&rtn=0&preferdirects=false`
     },
     {
       id: 'booking-com',
       name: 'Booking.com',
-      url: `https://flights.booking.com/flights/${o}.AIRPORT-${d}.AIRPORT/?type=ONEWAY&adults=${adults}&cabinClass=ECONOMY&depart=${date}&sort=BEST`
+      url: `https://flights.booking.com/flights/${o}.AIRPORT-${d}.AIRPORT/?type=ONEWAY&adults=${adults}&cabinClass=${cabin}&depart=${date}&from=${o}&to=${d}&sort=BEST`
     },
     {
       id: 'expedia',
       name: 'Expedia',
-      url: `https://www.expedia.com/Flights-Search?trip=oneway&leg1=from:${o},to:${d},departure:${us}TANYT&passengers=adults:${adults},children:0,infantinlap:N&mode=search`
+      url: `https://www.expedia.com/Flights-Search?flight-type=on&mode=search&trip=oneway&leg1=from:${o},to:${d},departure:${us}TANYT&passengers=adults:${adults},children:0,infantinlap:N`
     }
   ];
 }

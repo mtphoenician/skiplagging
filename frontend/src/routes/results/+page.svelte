@@ -74,22 +74,36 @@
   const names = $derived(data?.airline_names ?? {});
   const noShop = $derived(Boolean(data && data.cheapest_any == null && data.data_gaps.length));
   const lists = $derived(data?.channels.filter((c) => c.kind !== 'hidden-city') ?? []);
-  const featuredIds = $derived(
-    new Set([data?.honest_pick?.offer.id, data?.best_pick?.offer.id].filter(Boolean) as string[])
+  const listedCount = $derived(lists.reduce((n, c) => n + c.offers.length, 0));
+  const hiddenList = $derived(data?.hidden_city ?? []);
+  const showHonest = $derived(
+    Boolean(
+      data?.honest_pick &&
+        data.best_pick &&
+        data.honest_pick.offer.id !== data.best_pick.offer.id
+    )
   );
-  const restLists = $derived(
-    lists.map((c) => ({ ...c, offers: c.offers.filter((o) => !featuredIds.has(o.id)) }))
+  const pick = $derived(
+    data?.hidden_if_cheaper?.through_offer ?? data?.best_pick?.offer ?? data?.honest_pick?.offer ?? null
   );
-  const listedCount = $derived(restLists.reduce((n, c) => n + c.offers.length, 0));
-  const moreHidden = $derived(
-    (data?.hidden_city ?? []).filter((m) => m.id !== data?.hidden_if_cheaper?.id)
-  );
-  const pick = $derived(data?.honest_pick?.offer ?? data?.best_pick?.offer ?? null);
+  const confirmIds = ['google-flights', 'kayak', 'skyscanner', 'booking-com', 'expedia'];
   const confirms = $derived.by(() => {
-    if (!pick || !data) return [];
-    const o = pick.segments[0]?.origin || '';
-    const d = pick.segments[pick.segments.length - 1]?.dest || '';
-    return itineraryBookers(o, d, data.query.date, data.query.adults, pick.currency);
+    if (!data) return [];
+    const source = data.hidden_if_cheaper?.bookers?.length
+      ? data.hidden_if_cheaper.bookers
+      : (data.bookers ?? []);
+    const fromApi = source.filter((b) => confirmIds.includes(b.id));
+    if (fromApi.length) return fromApi;
+    const o = pick?.segments[0]?.origin || data.origin.iata;
+    const d = pick?.segments[pick.segments.length - 1]?.dest || data.destination.iata;
+    return itineraryBookers(
+      o,
+      d,
+      data.query.date,
+      data.query.adults,
+      pick?.currency || data.query.currency,
+      data.query.cabin
+    );
   });
 </script>
 
@@ -130,24 +144,31 @@
     {/if}
 
     {#if data.hidden_if_cheaper}
-      <p class="pick-kicker">Cheaper hidden-city ticket</p>
+      <p class="pick-kicker">Best — cheapest hidden-city</p>
       <HiddenCityCard match={data.hidden_if_cheaper} names={names} />
     {/if}
 
-    {#if data.honest_pick || data.best_pick}
+    {#if data.best_pick || showHonest}
       <div class="picks-row">
-        {#if data.honest_pick}
-          <div>
-            <p class="pick-kicker">{data.honest_pick.reason}</p>
-            <OfferCard offer={data.honest_pick.offer} featured names={names} />
-          </div>
-        {/if}
         {#if data.best_pick}
           <div>
             <p class="pick-kicker">{data.best_pick.reason}</p>
-            <OfferCard offer={data.best_pick.offer} names={names} />
+            <OfferCard offer={data.best_pick.offer} featured names={names} />
           </div>
         {/if}
+        {#if showHonest && data.honest_pick}
+          <div>
+            <p class="pick-kicker">{data.honest_pick.reason}</p>
+            <OfferCard offer={data.honest_pick.offer} names={names} />
+          </div>
+        {/if}
+      </div>
+    {:else if data.honest_pick}
+      <div class="picks-row">
+        <div>
+          <p class="pick-kicker">{data.honest_pick.reason}</p>
+          <OfferCard offer={data.honest_pick.offer} featured names={names} />
+        </div>
       </div>
     {/if}
 
@@ -173,7 +194,7 @@
         All flights {listedCount ? `(${listedCount})` : ''}
       </button>
       <button class:on={tab === 'hidden'} type="button" onclick={() => (tab = 'hidden')}>
-        Hidden city {data.hidden_city.length ? `(${data.hidden_city.length})` : ''}
+        Hidden city {hiddenList.length ? `(${hiddenList.length})` : ''}
       </button>
       <button class:on={tab === 'live'} type="button" onclick={() => (tab = 'live')}>Live</button>
       <button class:on={tab === 'debug'} type="button" onclick={() => (tab = 'debug')}>Debug</button>
@@ -181,7 +202,7 @@
 
     {#if tab === 'flights'}
       {#if listedCount}
-        {#each restLists as ch}
+        {#each lists as ch}
           {#if ch.offers.length}
             <h2 class="section-title">
               {ch.kind === 'nonstop' ? 'Nonstop' : ch.kind === 'connecting' ? 'Connecting' : 'Nearby airports'}
@@ -192,18 +213,16 @@
           {/if}
         {/each}
       {:else}
-        <p class="empty">No other priced flights beyond the one above.</p>
+        <p class="empty">No priced flights on this city pair for that date.</p>
       {/if}
     {:else if tab === 'hidden'}
       <p class="note">
         A cheaper ticket that continues past your city. You would get off at your stop. Airlines prohibit this.
       </p>
-      {#if moreHidden.length}
-        {#each moreHidden as match}
+      {#if hiddenList.length}
+        {#each hiddenList as match}
           <HiddenCityCard {match} names={names} />
         {/each}
-      {:else if data.hidden_if_cheaper}
-        <p class="empty">The cheaper hidden-city ticket is above. No other inversion on this date.</p>
       {:else}
         <p class="empty">No through-ticket cheaper than the cheapest honest fare on this date.</p>
       {/if}
