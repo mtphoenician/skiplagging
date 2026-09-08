@@ -56,7 +56,7 @@ def test_stale_deal_google_hash_is_replaced_on_read():
         saving=70,
         saving_pct=29,
         first_flight="AA123",
-        source="mock",
+        source="amadeus",
         bookers=[
             {
                 "id": "google-flights",

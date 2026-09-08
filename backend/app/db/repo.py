@@ -4,7 +4,7 @@ import re
 import unicodedata
 from math import asin, cos, radians, sin, sqrt
 
-from sqlalchemy import Select, and_, case, func, or_, select, text
+from sqlalchemy import Select, and_, case, delete, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.metros import METROS, catalog_code_for_member, normalize_place_id
@@ -29,9 +29,11 @@ from app.db.tables import (
     SearchRow,
     TrackRow,
 )
+from app.engines.hidden import hidden_city_savings, meaningful_saving
 from app.fx import offer_in_usd, offers_in_usd, to_usd
 from app.models import Airport, Country, HiddenDeal, HiddenCityMatch, Navaid, Offer, Region, Runway
 from app.providers.bookers import booker_links
+from app.providers.sandbox import is_live_fare
 
 
 _CONTINENTS: dict[str, str] | None = None
@@ -1174,15 +1176,22 @@ async def persist_hidden_deals(
 ) -> int:
     saved = 0
     for match in matches:
-        local = match.local_offer
-        through = match.through_offer
+        if not is_live_fare(match.local_offer) or not is_live_fare(match.through_offer):
+            continue
+        local = offer_in_usd(match.local_offer)
+        through = offer_in_usd(match.through_offer)
         if (
-            local.price is None
+            local is None
+            or through is None
+            or local.price is None
             or through.price is None
-            or through.currency != local.currency
             or through.price >= local.price
         ):
             continue
+        saving = hidden_city_savings(local.price, through.price)
+        if not meaningful_saving(saving):
+            continue
+        pct = round(100.0 * saving / local.price, 2) if local.price else 0.0
         first = through.first_flight or ""
         existing = (
             await session.execute(
@@ -1201,11 +1210,17 @@ async def persist_hidden_deals(
             hidden_city_name=match.hidden_city_name,
             honest_price=float(local.price),
             through_price=float(through.price),
-            currency=match.currency,
-            saving=float(match.gross_saving),
-            saving_pct=float(match.saving_pct),
+            currency="USD",
+            saving=float(saving),
+            saving_pct=pct,
             source=through.source,
-            bookers=[b.model_dump() for b in match.bookers],
+            bookers=[
+                b.model_dump()
+                for b in (
+                    match.bookers
+                    or booker_links(origin, match.hidden_city, date, 1, currency="USD")
+                )
+            ],
             local_payload=local.model_dump(),
             through_payload=through.model_dump(),
         )
@@ -1229,28 +1244,37 @@ async def persist_hidden_deals(
     return saved
 
 
+def _payload_offer(payload: dict | None) -> Offer | None:
+    if not payload:
+        return None
+    try:
+        return Offer.model_validate(payload)
+    except (TypeError, ValueError, KeyError):
+        return None
+
+
 def _deal_from_row(row: HiddenDealRow) -> HiddenDeal | None:
     # Always rebuild booker URLs so saved deals never keep a dead Google `#flt=` link.
+    raw_through = _payload_offer(row.through_payload)
+    raw_local = _payload_offer(row.local_payload)
+    if raw_through is not None and not is_live_fare(raw_through):
+        return None
+    if raw_local is not None and not is_live_fare(raw_local):
+        return None
+    if raw_through is None and (row.source or "").lower() in {"mock", "duffel"}:
+        return None
     ccy = row.currency or "USD"
     honest = to_usd(row.honest_price, ccy)
     through = to_usd(row.through_price, ccy)
     if honest is None or through is None:
         return None
     saving = round(honest - through, 2)
+    if not meaningful_saving(saving):
+        return None
     pct = round(100.0 * saving / honest, 2) if honest else row.saving_pct
     bookers = booker_links(row.origin, row.hidden_city, row.date, 1, currency="USD")
-    local = None
-    if row.local_payload:
-        try:
-            local = offer_in_usd(Offer.model_validate(row.local_payload))
-        except (TypeError, ValueError, KeyError):
-            local = None
-    through_offer = None
-    if row.through_payload:
-        try:
-            through_offer = offer_in_usd(Offer.model_validate(row.through_payload))
-        except (TypeError, ValueError, KeyError):
-            through_offer = None
+    local = offer_in_usd(raw_local) if raw_local is not None else None
+    through_offer = offer_in_usd(raw_through) if raw_through is not None else None
     return HiddenDeal(
         id=row.id,
         origin=row.origin,
@@ -1280,13 +1304,21 @@ async def list_hidden_deals(
     origin: str = "",
     dest: str = "",
 ) -> list[HiddenDeal]:
-    stmt = select(HiddenDealRow).order_by(HiddenDealRow.saving.desc(), HiddenDealRow.saving_pct.desc())
+    stmt = select(HiddenDealRow)
     if origin:
         stmt = stmt.where(HiddenDealRow.origin == origin.upper())
     if dest:
         stmt = stmt.where(HiddenDealRow.destination == dest.upper())
-    rows = (await session.execute(stmt.limit(min(limit, 120)))).scalars().all()
-    return [d for r in rows if (d := _deal_from_row(r)) is not None]
+    rows = (await session.execute(stmt)).scalars().all()
+    deals = [d for r in rows if (d := _deal_from_row(r)) is not None]
+    deals.sort(key=lambda d: (-d.saving, -d.saving_pct, d.through_price))
+    return deals[: min(limit, 120)]
+
+
+async def clear_hidden_deals(session: AsyncSession) -> int:
+    result = await session.execute(delete(HiddenDealRow))
+    await session.commit()
+    return int(result.rowcount or 0)
 
 
 # ── learned search intelligence ────────────────────────────────────────────────

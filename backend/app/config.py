@@ -49,6 +49,19 @@ class Settings(BaseSettings):
         return bool(self.duffel_token)
 
     @property
+    def duffel_live(self) -> bool:
+        return self.duffel_token.startswith("duffel_live_")
+
+    @property
+    def amadeus_live(self) -> bool:
+        return self.amadeus_enabled and self.amadeus_hostname == "production"
+
+    @property
+    def publish_deals(self) -> bool:
+        """Homepage /deals is live inventory only — not Duffel test or Amadeus test."""
+        return self.duffel_live or self.amadeus_live
+
+    @property
     def aerodatabox_enabled(self) -> bool:
         return bool(self.rapidapi_key)
 

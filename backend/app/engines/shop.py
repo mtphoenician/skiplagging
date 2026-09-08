@@ -59,7 +59,7 @@ from app.providers.bookers import booker_links
 from app.providers.duffel import DuffelProvider
 from app.providers.mock import MockProvider
 from app.providers.opensky import OpenSkyProvider, tracker_links
-from app.providers.sandbox import TEST_CARRIERS
+from app.providers.sandbox import TEST_CARRIERS, is_sandbox_offer
 
 SIDE_TIMEOUT = 1.2
 
@@ -1086,10 +1086,7 @@ def _via_b(offer: Offer, origin: str | set[str], dest_b: str | set[str], dest_c:
 
 
 def _is_sandbox(offer: Offer) -> bool:
-    if offer.live is False:
-        return True
-    note = offer.note or ""
-    return offer.source == "duffel" and "live_mode=False" in note
+    return is_sandbox_offer(offer)
 
 
 def _is_self_transfer(offer: Offer) -> bool:

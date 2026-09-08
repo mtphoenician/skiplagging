@@ -44,8 +44,9 @@
     <p class="empty">{error}</p>
   {:else if !deals.length}
     <p class="empty">
-      No saved inversions yet. Search a trip with a shop key, or run
-      <code>python -m app.engines.discover</code> from the API folder.
+      No published inversions. This list is live shop inventory only — Duffel test tokens and mock
+      fixtures are not shown. Add a <code>duffel_live_…</code> token (or Amadeus production), then run
+      <code>python -m app.engines.discover --wipe</code> from the API folder.
     </p>
   {:else}
     <p class="note">{deals.length} saved deal{deals.length === 1 ? '' : 's'}, highest saving first.</p>

@@ -13,12 +13,13 @@ from app.config import get_settings
 from app.db import repo
 from app.db.session import init_db, session_factory
 from app.engines.risk import attach_risk
-from app.engines.shop import _priced_in_currency, _shop_providers, layover_minutes
+from app.engines.shop import _drop_sandbox, _priced_in_currency, _shop_providers, layover_minutes
 from app.models import Offer
 from app.providers.amadeus import AmadeusProvider
 from app.providers.base import ShopRequest
 from app.providers.bookers import booker_links
 from app.providers.duffel import DuffelProvider
+from app.providers.sandbox import is_live_fare
 
 
 def _scan_dates() -> list[str]:
@@ -52,7 +53,7 @@ async def _shop(
             print(f"  shop error {req.origin}->{req.dest} {req.date}: {exc}", flush=True)
             return []
         await asyncio.sleep(0.35)
-        return offers
+        return _priced_in_currency(_drop_sandbox(offers))
 
 
 async def _dests_for(origin: str, extra: list[str], limit: int, skip: set[str]) -> list[str]:
@@ -82,6 +83,17 @@ async def discover_hidden_deals(
     skip = settings.skip_dests
     if not settings.amadeus_enabled and not settings.duffel_enabled:
         return {"scanned": 0, "found_this_run": 0, "stored": 0, "errors": ["No shop keys"], "dates": days}
+    if not settings.publish_deals:
+        return {
+            "scanned": 0,
+            "found_this_run": 0,
+            "stored": 0,
+            "errors": [
+                "Need a Duffel live token (duffel_live_…) or Amadeus production to publish deals. "
+                "Test inventory is not saved."
+            ],
+            "dates": days,
+        }
 
     found = 0
     scanned = 0
@@ -164,6 +176,8 @@ async def discover_hidden_deals(
                         local = cheapest_b.get(dest_b)
                         if local is None or local.price is None or offer.currency != local.currency:
                             continue
+                        if not is_live_fare(offer) or not is_live_fare(local):
+                            continue
                         compared += 1
                         if offer.price >= local.price:
                             gap = (offer.price / local.price) if local.price else 99
@@ -192,7 +206,7 @@ async def discover_hidden_deals(
                             origin_country=o_ap.country,
                             hidden_country=c_ap.country,
                         )
-                        match.bookers = booker_links(origin, dest_c, date, 1, currency=offer.currency)
+                        match.bookers = booker_links(origin, dest_c, date, 1, currency="USD")
                         await repo.persist_hidden_deals(
                             session,
                             [match],
@@ -238,7 +252,17 @@ async def main() -> None:
     parser.add_argument("--limit", type=int, default=28)
     parser.add_argument("--dests", type=int, default=22)
     parser.add_argument("--date", default="")
+    parser.add_argument(
+        "--wipe",
+        action="store_true",
+        help="Delete stored deals before scanning so test-token junk cannot rank above a live scan.",
+    )
     args = parser.parse_args()
+    if args.wipe:
+        await init_db()
+        async with session_factory()() as session:
+            n = await repo.clear_hidden_deals(session)
+            print(f"wiped {n} stored deal(s)", flush=True)
     await discover_hidden_deals(
         limit=args.limit,
         dests_per_origin=args.dests,

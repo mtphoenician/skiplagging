@@ -71,7 +71,11 @@ async def health() -> dict:
     return {
         "ok": True,
         "database": "postgresql",
-        "shop": {"amadeus": s.amadeus_enabled, "duffel": s.duffel_enabled},
+        "shop": {
+            "amadeus": s.amadeus_enabled,
+            "duffel": s.duffel_enabled,
+            "publish_deals": s.publish_deals,
+        },
         "track": {"opensky": True, "aerodatabox": s.aerodatabox_enabled},
         "tables": db,
     }
@@ -192,6 +196,8 @@ async def deals(
     origin: str = Query("", max_length=3),
     dest: str = Query("", max_length=3),
 ) -> list[HiddenDeal]:
+    if not app.state.settings.publish_deals:
+        return []
     async with session_factory()() as session:
         return await repo.list_hidden_deals(session, limit=limit, origin=origin, dest=dest)
 
