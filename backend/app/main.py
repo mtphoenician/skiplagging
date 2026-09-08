@@ -12,8 +12,20 @@ from app.catalog import sources_payload
 from app.config import get_settings
 from app.db import repo
 from app.db.session import init_db, session_factory
+from app.engines.candidates import graph_snapshot
+from app.engines.hidden import detect_hidden_city, refresh_keeps_hidden_city
 from app.engines.shop import search_all_ways
-from app.models import Airport, Country, HiddenDeal, Region, SearchQuery, SearchResponse
+from app.models import (
+    Airport,
+    Country,
+    HiddenDeal,
+    OfferRefreshRequest,
+    OfferRefreshResponse,
+    Region,
+    SearchQuery,
+    SearchResponse,
+)
+from app.providers.mock import MockProvider
 from app.providers.aerodatabox import AeroDataBoxProvider
 from app.providers.opensky import OpenSkyProvider
 
@@ -197,6 +209,8 @@ async def search(query: SearchQuery) -> SearchResponse:
     )
     cached = app.state.cache.get(key)
     if cached is not None:
+        if cached.search_debug:
+            cached.search_debug.cache = "fresh"
         return cached
     async with session_factory()() as session:
         try:
@@ -205,3 +219,29 @@ async def search(query: SearchQuery) -> SearchResponse:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
     app.state.cache[key] = result
     return result
+
+
+@app.post("/offers/refresh", response_model=OfferRefreshResponse)
+async def refresh_offer(body: OfferRefreshRequest) -> OfferRefreshResponse:
+    mock = MockProvider()
+    fresh = await mock.refresh_offer(body.offer)
+    if fresh is None:
+        return OfferRefreshResponse(
+            offer=None,
+            valid=False,
+            reason="Booking integration not configured for this provider. Confirm the fare on the booker link.",
+        )
+    intended = body.intended_destination
+    if detect_hidden_city(body.offer, intended):
+        if not refresh_keeps_hidden_city(body.offer, fresh, intended):
+            return OfferRefreshResponse(
+                offer=fresh,
+                valid=False,
+                reason="Refreshed itinerary no longer passes through the intended city.",
+            )
+    return OfferRefreshResponse(offer=fresh, valid=True, reason="")
+
+
+@app.get("/debug/route-graph")
+async def debug_route_graph() -> dict:
+    return {"edges": graph_snapshot()}

@@ -186,6 +186,32 @@ class HiddenCityMatch(BaseModel):
     currency: str
     risk: RiskAssessment
     bookers: list["BookerLink"] = Field(default_factory=list)
+    ticketed_destination: str = ""
+    intended_destination: str = ""
+    exit_segment_index: int = 0
+    warnings: list[str] = Field(default_factory=list)
+    result_type: Literal["hidden_city"] = "hidden_city"
+
+
+class OfferRefreshRequest(BaseModel):
+    offer: Offer
+    intended_destination: str
+
+
+class OfferRefreshResponse(BaseModel):
+    offer: Offer | None = None
+    valid: bool
+    reason: str
+
+
+class SearchDebug(BaseModel):
+    providers: list[str] = Field(default_factory=list)
+    standard_query: str = ""
+    expanded_destinations: list[str] = Field(default_factory=list)
+    skipped_expansion: list[str] = Field(default_factory=list)
+    reused_from_index: int = 0
+    rejected: list[str] = Field(default_factory=list)
+    cache: str = "miss"
 
 
 class HonestPick(BaseModel):
@@ -324,3 +350,4 @@ class SearchResponse(BaseModel):
     traffic_destination: LiveTraffic | None = None
     board_origin: list[BoardFlight] = Field(default_factory=list)
     notes: list[str]
+    search_debug: SearchDebug | None = None

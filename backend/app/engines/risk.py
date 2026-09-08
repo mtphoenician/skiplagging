@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from app.engines.hidden import HIDDEN_CITY_WARNINGS, ticketed_destination
 from app.models import HiddenCityMatch, Offer, RiskAssessment, RiskItem
 
 
@@ -135,6 +136,7 @@ def attach_risk(
     true_dest: str,
     origin_country: str = "",
     hidden_country: str = "",
+    exit_segment_index: int = 0,
 ) -> HiddenCityMatch:
     first_match = bool(local.first_flight and local.first_flight == through.first_flight)
     if not first_match and local.segments and through.segments:
@@ -156,6 +158,11 @@ def attach_risk(
         saving_pct=pct,
         currency=through.currency,
         risk=assess(local, through, hidden_city, true_dest, origin_country, hidden_country),
+        ticketed_destination=ticketed_destination(through),
+        intended_destination=true_dest.upper(),
+        exit_segment_index=exit_segment_index,
+        warnings=list(HIDDEN_CITY_WARNINGS),
+        result_type="hidden_city",
     )
 
 

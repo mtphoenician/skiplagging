@@ -55,6 +55,15 @@ async def init_db() -> None:
 
         for stmt in _ALTERS:
             await conn.execute(text(stmt))
+        try:
+            await conn.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS ix_offer_obs_lookup ON offer_observations "
+                    "(origin, date, adults, cabin, observed_at)"
+                )
+            )
+        except Exception:
+            pass
         for ext in ("CREATE EXTENSION IF NOT EXISTS unaccent", "CREATE EXTENSION IF NOT EXISTS pg_trgm"):
             try:
                 await conn.execute(text(ext))

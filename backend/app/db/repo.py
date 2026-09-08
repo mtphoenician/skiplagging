@@ -8,12 +8,15 @@ from sqlalchemy import Select, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.metros import METROS, catalog_code_for_member, normalize_place_id
+from datetime import datetime, timedelta, timezone
+
 from app.db.tables import (
     AirlineRow,
     AirportRow,
     ContinentRow,
     CountryRow,
     NavaidRow,
+    OfferObservationRow,
     OfferRow,
     RegionRow,
     RouteRow,
@@ -25,9 +28,27 @@ from app.db.tables import (
 from app.models import Airport, BookerLink, Country, HiddenDeal, HiddenCityMatch, Navaid, Offer, Region, Runway
 
 
+_CONTINENTS: dict[str, str] | None = None
+
+
 async def continent_names(session: AsyncSession) -> dict[str, str]:
+    global _CONTINENTS
+    if _CONTINENTS is not None:
+        return _CONTINENTS
     rows = (await session.execute(select(ContinentRow))).scalars().all()
-    return {r.code: r.name for r in rows}
+    _CONTINENTS = {r.code: r.name for r in rows}
+    return _CONTINENTS
+
+
+async def airports_by_iata(session: AsyncSession, codes: list[str]) -> dict[str, Airport]:
+    clean = list({c.upper()[:3] for c in codes if c})
+    if not clean:
+        return {}
+    names = await continent_names(session)
+    rows = (
+        await session.execute(select(AirportRow).where(AirportRow.iata.in_(clean)))
+    ).scalars().all()
+    return {r.iata: _to_airport(r, continents=names) for r in rows}
 
 
 def _to_airport(row: AirportRow, currency: str = "", continents: dict[str, str] | None = None) -> Airport:
@@ -562,21 +583,33 @@ async def nearby_airports(session: AsyncSession, iata: str, max_km: float = 90.0
 
 async def destinations_from(session: AsyncSession, origin: str, limit: int = 40) -> list[tuple[str, str, int]]:
     """Historical OpenFlights spokes: (dest, airline, route_count). Not a live schedule."""
+    return await destinations_from_many(session, [origin], per_origin=limit)
+
+
+async def destinations_from_many(
+    session: AsyncSession, origins: list[str], per_origin: int = 18
+) -> list[tuple[str, str, int]]:
+    codes = [o.upper()[:3] for o in origins if o]
+    if not codes:
+        return []
     stmt = (
-        select(RouteRow.dest_iata, RouteRow.airline_iata, func.count())
-        .where(RouteRow.origin_iata == origin.upper(), RouteRow.stops == 0)
-        .group_by(RouteRow.dest_iata, RouteRow.airline_iata)
+        select(RouteRow.origin_iata, RouteRow.dest_iata, RouteRow.airline_iata, func.count())
+        .where(RouteRow.origin_iata.in_(codes), RouteRow.stops == 0)
+        .group_by(RouteRow.origin_iata, RouteRow.dest_iata, RouteRow.airline_iata)
         .order_by(func.count().desc())
-        .limit(limit * 3)
     )
     rows = (await session.execute(stmt)).all()
-    seen: dict[str, tuple[str, int]] = {}
-    for dest, airline, n in rows:
-        if dest not in seen:
-            seen[dest] = (airline, int(n))
-        if len(seen) >= limit:
-            break
-    return [(d, a, n) for d, (a, n) in seen.items()]
+    seen: dict[str, set[str]] = {code: set() for code in codes}
+    counts: dict[str, int] = {code: 0 for code in codes}
+    out: list[tuple[str, str, int]] = []
+    for origin, dest, airline, n in rows:
+        used = seen.get(origin)
+        if used is None or dest in used or counts[origin] >= per_origin:
+            continue
+        used.add(dest)
+        counts[origin] += 1
+        out.append((dest, airline, int(n)))
+    return out
 
 
 async def airline_by_icao(session: AsyncSession, icao: str) -> AirlineRow | None:
@@ -866,6 +899,133 @@ async def persist_search(
         )
     await session.commit()
     return row.id
+
+
+async def remember_offers(
+    session: AsyncSession,
+    offers: list[Offer],
+    *,
+    date: str,
+    adults: int,
+    cabin: str,
+) -> int:
+    from app.engines.index import observation_meta
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+    stored = 0
+    for offer in offers:
+        meta = observation_meta(offer)
+        if meta is None:
+            continue
+        stmt = pg_insert(OfferObservationRow).values(
+            origin=meta["origin"],
+            ticketed=meta["ticketed"],
+            connections=meta["connections"],
+            date=date,
+            adults=adults,
+            cabin=cabin,
+            currency=meta["currency"],
+            source=meta["source"],
+            fingerprint=meta["fingerprint"],
+            price=meta["price"],
+            payload=offer.model_dump(),
+            observed_at=datetime.now(timezone.utc),
+        )
+        stmt = stmt.on_conflict_do_update(
+            constraint="uq_offer_obs",
+            set_={
+                "price": stmt.excluded.price,
+                "payload": stmt.excluded.payload,
+                "connections": stmt.excluded.connections,
+                "observed_at": stmt.excluded.observed_at,
+                "currency": stmt.excluded.currency,
+            },
+        )
+        await session.execute(stmt)
+        stored += 1
+    if stored:
+        await session.commit()
+    return stored
+
+
+async def recall_offers(
+    session: AsyncSession,
+    *,
+    origins: set[str],
+    date: str,
+    adults: int,
+    cabin: str,
+    max_age_seconds: int,
+) -> list[Offer]:
+    if not origins:
+        return []
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=max_age_seconds)
+    codes = [o.upper()[:3] for o in origins]
+    rows = (
+        await session.execute(
+            select(OfferObservationRow)
+            .where(
+                OfferObservationRow.origin.in_(codes),
+                OfferObservationRow.date == date,
+                OfferObservationRow.adults == adults,
+                OfferObservationRow.cabin == cabin,
+                OfferObservationRow.observed_at >= cutoff,
+            )
+            .order_by(OfferObservationRow.observed_at.desc())
+            .limit(80)
+        )
+    ).scalars().all()
+    seen: set[str] = set()
+    out: list[Offer] = []
+    for row in rows:
+        if row.fingerprint in seen:
+            continue
+        seen.add(row.fingerprint)
+        try:
+            out.append(Offer.model_validate(row.payload))
+        except (TypeError, ValueError, KeyError):
+            continue
+    return out
+
+
+async def recall_candidate_dests(
+    session: AsyncSession,
+    *,
+    origins: set[str],
+    intended: set[str],
+    date: str,
+    adults: int,
+    cabin: str,
+    max_age_seconds: int,
+    limit: int,
+) -> list[str]:
+    """Ticketed destinations seen on A→B→C trips, even after the price is stale."""
+    if not origins:
+        return []
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=max_age_seconds)
+    codes = [o.upper()[:3] for o in origins]
+    want = {c.upper() for c in intended}
+    rows = (
+        await session.execute(
+            select(OfferObservationRow.ticketed, OfferObservationRow.connections).where(
+                OfferObservationRow.origin.in_(codes),
+                OfferObservationRow.date == date,
+                OfferObservationRow.adults == adults,
+                OfferObservationRow.cabin == cabin,
+                OfferObservationRow.observed_at >= cutoff,
+            )
+        )
+    ).all()
+    ranked: list[str] = []
+    seen: set[str] = set()
+    for ticketed, connections in rows:
+        hops = {str(c).upper() for c in (connections or [])}
+        if hops & want and ticketed.upper() not in want and ticketed.upper() not in seen:
+            seen.add(ticketed.upper())
+            ranked.append(ticketed.upper())
+        if len(ranked) >= limit:
+            break
+    return ranked
 
 
 async def persist_tracks(session: AsyncSession, airport_iata: str, states: list[dict], api_time: int | None) -> None:

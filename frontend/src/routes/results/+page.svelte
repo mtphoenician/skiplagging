@@ -11,7 +11,7 @@
   let data = $state<SearchResponse | null>(null);
   let error = $state('');
   let loading = $state(true);
-  let tab = $state<'flights' | 'hidden' | 'live'>('flights');
+  let tab = $state<'flights' | 'hidden' | 'live' | 'debug'>('flights');
 
   let origin = $state('');
   let destination = $state('');
@@ -176,6 +176,7 @@
         Hidden city {data.hidden_city.length ? `(${data.hidden_city.length})` : ''}
       </button>
       <button class:on={tab === 'live'} type="button" onclick={() => (tab = 'live')}>Live</button>
+      <button class:on={tab === 'debug'} type="button" onclick={() => (tab = 'debug')}>Debug</button>
     </div>
 
     {#if tab === 'flights'}
@@ -209,6 +210,29 @@
     {:else if tab === 'live'}
       <TrafficPanel traffic={data.traffic_origin} label={data.origin.city} />
       <TrafficPanel traffic={data.traffic_destination} label={data.destination.city} />
+    {:else if tab === 'debug'}
+      <p class="note">
+        Hidden-city means a complete ticket continues past your city. We never turn that ticket into a fake local fare.
+      </p>
+      {#if data.search_debug}
+        <h2 class="section-title">Search planner</h2>
+        <p class="note">
+          Providers: {data.search_debug.providers.join(', ') || 'none'} · Standard query:
+          {data.search_debug.standard_query} · Cache: {data.search_debug.cache}
+          · Reused offers: {data.search_debug.reused_from_index ?? 0}
+        </p>
+        {#if data.search_debug.expanded_destinations.length}
+          <p class="note">Live expansion: {data.search_debug.expanded_destinations.join(', ')}</p>
+        {/if}
+        {#if data.search_debug.skipped_expansion?.length}
+          <p class="note">Skipped (already indexed through your city): {data.search_debug.skipped_expansion.join(', ')}</p>
+        {/if}
+        {#each data.search_debug.rejected as row}
+          <p class="note">{row}</p>
+        {/each}
+      {:else}
+        <p class="empty">No planner trace on this response.</p>
+      {/if}
     {/if}
   {/if}
 </div>

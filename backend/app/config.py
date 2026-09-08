@@ -13,8 +13,12 @@ class Settings(BaseSettings):
     opensky_client_id: str = ""
     opensky_client_secret: str = ""
     cache_ttl_seconds: int = 180
-    max_hidden_candidates: int = 12
-    max_concurrency: int = 5
+    offer_ttl_seconds: int = 900
+    max_hidden_candidates: int = 8
+    max_concurrency: int = 4
+    mock_enabled: bool = True
+    min_hidden_saving: float = 20.0
+    max_provider_calls: int = 12
     cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
 
     model_config = SettingsConfigDict(

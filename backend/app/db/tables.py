@@ -7,6 +7,7 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
@@ -177,6 +178,30 @@ class OfferRow(Base):
     currency: Mapped[str | None] = mapped_column(String(8))
     payload: Mapped[dict] = mapped_column(JSONB, default=dict)
     retrieved_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class OfferObservationRow(Base):
+    """Reusable complete itinerary. Indexed by origin, ticketed dest, and connections."""
+
+    __tablename__ = "offer_observations"
+    __table_args__ = (
+        UniqueConstraint("fingerprint", "date", "adults", "cabin", "source", name="uq_offer_obs"),
+        Index("ix_offer_obs_lookup", "origin", "date", "adults", "cabin", "observed_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    origin: Mapped[str] = mapped_column(String(3), index=True)
+    ticketed: Mapped[str] = mapped_column(String(3), index=True)
+    connections: Mapped[list] = mapped_column(JSONB, default=list)
+    date: Mapped[str] = mapped_column(String(10), index=True)
+    adults: Mapped[int] = mapped_column(Integer, default=1)
+    cabin: Mapped[str] = mapped_column(String(24), default="ECONOMY")
+    currency: Mapped[str] = mapped_column(String(8), default="USD")
+    source: Mapped[str] = mapped_column(String(32), default="")
+    fingerprint: Mapped[str] = mapped_column(String(240), index=True)
+    price: Mapped[float] = mapped_column(Float)
+    payload: Mapped[dict] = mapped_column(JSONB, default=dict)
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 class HiddenDealRow(Base):

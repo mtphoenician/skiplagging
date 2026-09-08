@@ -12,7 +12,9 @@ Hidden-city fare discovery with a **PostgreSQL** airport/route database and laye
 | Booker | Outbound search URL | A reservation this app created | Google Flights, Kayak, Skyscanner (meta); Expedia (OTA); airline.com |
 | Order / PNR | Reservation + coupons | — | **Not implemented.** We never call Create Orders. |
 
-Hidden-city rows exist only when a shop API returns **P(A,B,C) < P(A,B)** and the first sector is A→B. OpenFlights spokes are labeled **connection hints**, not savings.
+Hidden-city rows are **complete priced tickets** that continue past the intended city (ticketed `C`, intended stop `B`). The engine never rewrites `A→B→C` into a fake `A→B` fare, and never prices a hidden-city trip by adding `P(A,B)+P(B,C)`.
+
+Offers are stored and indexed by **ticketed destination and connection airports**. A later search for A→B can reuse a previously shopped A→B→C ticket and skip shopping C again. Fresh A→B results in the offer index skip a live shop; cheaper hidden-city already on hand skips destination expansion. Live traffic never blocks priced results. Sources are partner adapters only (mock, Duffel, Amadeus) — this app does not collect airline websites. OpenFlights spokes are **connection hints**, not savings.
 
 ## Database
 
@@ -47,7 +49,14 @@ cd frontend && npm install && npm run dev
 
 [http://localhost:5173](http://localhost:5173) · [Sources](http://localhost:5173/sources)
 
-Copy `.env.example` to `.env`. Without Amadeus/Duffel keys you still get the real airport table, OpenSky traffic, connection hints, and live booker links. You will **not** get invented prices.
+Copy `.env.example` to `.env`. `MOCK_ENABLED` defaults on. Search **JFK → ORD** to see the fixture:
+
+- Standard JFK→ORD **$240**
+- Hidden city JFK→ORD→DEN **$170** (get off in ORD, ticketed DEN)
+- Hidden city JFK→ORD→SEA **$185**
+- JFK→DFW→LAX is rejected (does not pass through ORD)
+
+Without Amadeus/Duffel keys, other city pairs stay empty except those mock fixtures. Live shops never invent segment-sum prices.
 
 ```
 AMADEUS_CLIENT_ID=
@@ -62,6 +71,8 @@ RAPIDAPI_KEY=
 - `GET /sources` — full capability matrix
 - `GET /airports?q=` — OurAirports
 - `POST /search` — all layers for A, B, date (persisted in `searches` / `offers`)
+- `POST /offers/refresh` — reprice a mock offer; invalidates hidden-city if the path no longer stops at B
+- `GET /debug/route-graph` — observed A→B→C candidate edges
 - `GET /track/{iata}` — OpenSky box + tracker links
 - `GET /board/{iata}` — AeroDataBox FIDS if keyed
 

@@ -154,6 +154,21 @@ export interface HiddenCityMatch {
   currency: string;
   risk: RiskAssessment;
   bookers: BookerLink[];
+  ticketed_destination?: string;
+  intended_destination?: string;
+  exit_segment_index?: number;
+  warnings?: string[];
+  result_type?: 'hidden_city';
+}
+
+export interface SearchDebug {
+  providers: string[];
+  standard_query: string;
+  expanded_destinations: string[];
+  skipped_expansion?: string[];
+  reused_from_index?: number;
+  rejected: string[];
+  cache: string;
 }
 
 export interface HonestPick {
@@ -284,4 +299,5 @@ export interface SearchResponse {
   traffic_destination: LiveTraffic | null;
   board_origin: BoardFlight[];
   notes: string[];
+  search_debug?: SearchDebug | null;
 }

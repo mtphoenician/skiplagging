@@ -1,4 +1,4 @@
-import type { Airport, Country, HiddenDeal, SearchQuery, SearchResponse, SourceDef } from './types';
+import type { Airport, Country, HiddenDeal, Offer, SearchQuery, SearchResponse, SourceDef } from './types';
 
 const prefix = '/api';
 
@@ -38,6 +38,19 @@ export async function fetchDeals(opts: { limit?: number; origin?: string; dest?:
   if (opts.dest) q.set('dest', opts.dest);
   const r = await fetch(`${prefix}/deals?${q.toString()}`);
   if (!r.ok) throw new Error('Deals failed');
+  return r.json();
+}
+
+export async function refreshOffer(
+  offer: Offer,
+  intended_destination: string
+): Promise<{ offer: Offer | null; valid: boolean; reason: string }> {
+  const r = await fetch(`${prefix}/offers/refresh`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ offer, intended_destination })
+  });
+  if (!r.ok) throw new Error('Refresh failed');
   return r.json();
 }
 
