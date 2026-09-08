@@ -46,6 +46,13 @@ def test_round_trip_bookers_use_return_date():
     assert "261017" in by_id["skyscanner"]
     assert "trip=roundtrip" in by_id["expedia"]
     assert "2026-10-17" in by_id["kiwi"]
+    assert "return=2026-10-17" in by_id["booking-com"]
+    assert "flighttype=rt" in by_id["trip-com"]
+    assert "ORD-JFK-20261017" in by_id["priceline"]
+    assert "tripType=ROUNDTRIP" in by_id["cheapoair"]
+    assert "2026-10-17" in by_id["edreams"]
+    assert "roundtrip" in by_id["despegar"]
+    assert "2026-10-17" in by_id["wego"]
 
 
 def test_stale_deal_google_hash_is_replaced_on_read():

@@ -323,3 +323,59 @@ def test_cache_state_labels_index_reuse():
     assert _cache_state([1], []) == "index"
     assert _cache_state([1], [2]) == "index+live"
     assert _cache_state([], [2]) == "miss"
+
+
+def test_discover_via_stops_include_later_connections():
+    from app.engines.discover import _via_stops
+    from app.models import Offer, Segment
+
+    offer = Offer(
+        id="two-stop",
+        kind="connecting",
+        channel="ndc",
+        source="duffel",
+        segments=[
+            Segment(
+                origin="JFK",
+                dest="CLT",
+                carrier="UA",
+                flight_number="UA1",
+                dep="2026-11-19T08:00",
+                arr="2026-11-19T10:00",
+                duration_min=120,
+                rbd="Y",
+            ),
+            Segment(
+                origin="CLT",
+                dest="ORD",
+                carrier="UA",
+                flight_number="UA2",
+                dep="2026-11-19T11:00",
+                arr="2026-11-19T13:00",
+                duration_min=120,
+                rbd="Y",
+            ),
+            Segment(
+                origin="ORD",
+                dest="DEN",
+                carrier="UA",
+                flight_number="UA3",
+                dep="2026-11-19T14:00",
+                arr="2026-11-19T16:00",
+                duration_min=120,
+                rbd="Y",
+            ),
+        ],
+        price=180,
+        currency="USD",
+        cabin="ECONOMY",
+        fare_basis="Y",
+        carrier="UA",
+        duration_min=480,
+        stops=2,
+        first_flight="UA1",
+        live=True,
+    )
+    ticketed, vias = _via_stops(offer, "JFK")
+    assert ticketed == "DEN"
+    assert vias == [(0, "CLT"), (1, "ORD")]

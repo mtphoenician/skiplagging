@@ -88,7 +88,7 @@ def assess(
     gross = max((local.price or 0) - (through.price or 0), 0.0)
     extra_fees = 18.0 if through.bags_included == 0 else 0.0
     # Fragility rises when C is international, when connect is tight, when near departure.
-    disruption = round(min(gross * 0.22, local.price * 0.18), 2)
+    disruption = round(min(gross * 0.22, (local.price or 0) * 0.18), 2)
     enforcement = round(min(gross * 0.12, 80.0), 2)
     if international:
         disruption += 25
@@ -177,5 +177,5 @@ def _connect_minutes(offer: Offer) -> int | None:
         t0 = datetime.fromisoformat(a.replace("Z", "+00:00"))
         t1 = datetime.fromisoformat(b.replace("Z", "+00:00"))
         return int((t1 - t0).total_seconds() // 60)
-    except ValueError:
+    except (TypeError, ValueError):
         return None

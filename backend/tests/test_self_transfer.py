@@ -1,6 +1,7 @@
 from app.engines.self_transfer import (
     bridge_pairs,
     combine_at_hubs,
+    connection_minutes,
     pick_transfer_hubs,
     stitch_chain,
 )
@@ -217,3 +218,8 @@ def test_combine_keeps_three_ticket_only_when_cheaper():
     )
     assert cheaper[0].price == 230
     assert cheaper[0].separate_tickets and len(cheaper[0].separate_tickets) == 3
+
+
+def test_connection_minutes_missing_times():
+    assert connection_minutes(None, "2026-11-20T08:00") is None  # type: ignore[arg-type]
+    assert connection_minutes("", "2026-11-20T08:00") is None

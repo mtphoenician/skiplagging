@@ -1284,9 +1284,13 @@ def _deal_from_row(row: HiddenDealRow) -> HiddenDeal | None:
         return None
     risk = None
     warnings: list[str] = []
-    if local is not None and through_offer is not None:
-        risk = assess(local, through_offer, row.hidden_city, row.destination)
-        warnings = list(HIDDEN_CITY_WARNINGS)
+    if local is not None and through_offer is not None and local.price is not None and through_offer.price is not None:
+        try:
+            risk = assess(local, through_offer, row.hidden_city, row.destination)
+            warnings = list(HIDDEN_CITY_WARNINGS)
+        except (TypeError, ValueError):
+            risk = None
+            warnings = []
     return HiddenDeal(
         id=row.id,
         origin=row.origin,

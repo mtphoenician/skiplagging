@@ -171,6 +171,10 @@ async def search_all_ways(
         o for o in indexed if classify_for_search(o, route_origins, route_dests)
     ]
     raw_local = offers_in_usd(_drop_sandbox(_dedupe([*indexed_useful, *shop_local])))
+    if query.return_date:
+        raw_local = [o for o in raw_local if o.return_date == query.return_date]
+    else:
+        raw_local = [o for o in raw_local if not o.return_date]
     local_offers = _prefer_real_carriers(
         _dedupe_itineraries(_keep_on_route(raw_local, route_origins, route_dests))
     )
@@ -427,15 +431,18 @@ async def search_all_ways(
         if ticketed_ap:
             match.hidden_city_name = f"{ticketed_ap.city} ({ticketed})"
     if hidden_matches and not round_trip:
-        await repo.persist_hidden_deals(
-            session,
-            hidden_matches,
-            origin=o_ap.iata[:3],
-            origin_city=o_ap.city,
-            dest=d_ap.iata[:3],
-            dest_city=d_ap.city,
-            date=query.date,
-        )
+        try:
+            await repo.persist_hidden_deals(
+                session,
+                hidden_matches,
+                origin=o_ap.iata[:3],
+                origin_city=o_ap.city,
+                dest=d_ap.iata[:3],
+                dest_city=d_ap.city,
+                date=query.date,
+            )
+        except Exception:
+            await session.rollback()
 
     channels = [
         ChannelGroup(
@@ -530,25 +537,32 @@ async def search_all_ways(
     elapsed = round((time.perf_counter() - t0) * 1000, 1)
     persist_payload = [o.model_dump() for o in priced[:30]]
     persist_payload += [m.through_offer.model_dump() for m in hidden_matches[:15]]
-    search_id = await repo.persist_search(
-        session,
-        origin=o_ap.iata[:3],
-        destination=d_ap.iata[:3],
-        date=query.date,
-        adults=query.adults,
-        cabin=query.cabin,
-        currency=query.currency,
-        elapsed_ms=elapsed,
-        sources=sources_used,
-        offers=persist_payload,
-    )
-    if traffic_o and traffic_o.aircraft:
-        await repo.persist_tracks(
+    search_id = None
+    try:
+        search_id = await repo.persist_search(
             session,
-            (o_ap.members or [o_ap.iata])[0],
-            [a.model_dump() for a in traffic_o.aircraft],
-            traffic_o.api_time,
+            origin=o_ap.iata[:3],
+            destination=d_ap.iata[:3],
+            date=query.date,
+            adults=query.adults,
+            cabin=query.cabin,
+            currency=query.currency,
+            elapsed_ms=elapsed,
+            sources=sources_used,
+            offers=persist_payload,
         )
+    except Exception:
+        await session.rollback()
+    if traffic_o and traffic_o.aircraft:
+        try:
+            await repo.persist_tracks(
+                session,
+                (o_ap.members or [o_ap.iata])[0],
+                [a.model_dump() for a in traffic_o.aircraft],
+                traffic_o.api_time,
+            )
+        except Exception:
+            await session.rollback()
 
     return SearchResponse(
         query=query,
@@ -1132,11 +1146,15 @@ def _parse_leg_time(value: str) -> datetime | None:
 
 
 def layover_minutes(offer: Offer) -> int:
-    if len(offer.segments) < 2:
+    segs = offer.segments
+    if offer.outbound_end is not None:
+        idx = min(max(offer.outbound_end, 0), len(offer.segments) - 1)
+        segs = offer.segments[: idx + 1]
+    if len(segs) < 2:
         return 0
     total = 0
     parsed = 0
-    for first, second in zip(offer.segments, offer.segments[1:]):
+    for first, second in zip(segs, segs[1:]):
         arr = _parse_leg_time(first.arr)
         dep = _parse_leg_time(second.dep)
         if arr is None or dep is None:
@@ -1151,7 +1169,7 @@ def layover_minutes(offer: Offer) -> int:
             parsed += 1
     if parsed:
         return total
-    air = sum(s.duration_min for s in offer.segments)
+    air = sum(s.duration_min for s in segs)
     inferred = offer.duration_min - air
     if inferred > 0:
         return inferred

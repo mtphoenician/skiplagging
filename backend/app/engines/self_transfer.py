@@ -33,7 +33,7 @@ def connection_minutes(arr: str, dep: str) -> int | None:
     try:
         a = datetime.fromisoformat(arr.replace("Z", "+00:00"))
         b = datetime.fromisoformat(dep.replace("Z", "+00:00"))
-    except ValueError:
+    except (TypeError, ValueError, AttributeError):
         return None
     if a.tzinfo is None and b.tzinfo is not None:
         b = b.replace(tzinfo=None)

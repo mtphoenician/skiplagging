@@ -35,6 +35,28 @@
   const inboundSegs = $derived(offer.segments.slice(outEnd + 1));
   const days = $derived(first && destSeg ? plusDays(first.dep, destSeg.arr) : '');
   const waits = $derived(stopovers(offer));
+  const inboundWaits = $derived(
+    inboundSegs.length > 1 ? stopovers(offer, outEnd + 1, offer.segments.length - 1) : []
+  );
+  const outMins = $derived(outboundSegs.reduce((n, s) => n + (s.duration_min || 0), 0));
+  const inMins = $derived(inboundSegs.reduce((n, s) => n + (s.duration_min || 0), 0));
+  const shownOutMins = $derived.by(() => {
+    if (first && destSeg) {
+      const a = Date.parse(first.dep);
+      const b = Date.parse(destSeg.arr);
+      if (!Number.isNaN(a) && !Number.isNaN(b) && b > a) return Math.round((b - a) / 60000);
+    }
+    return inboundSegs.length ? outMins : offer.duration_min;
+  });
+  const shownInMins = $derived.by(() => {
+    if (!inboundSegs.length) return 0;
+    const a0 = inboundSegs[0];
+    const a1 = inboundSegs[inboundSegs.length - 1];
+    const a = Date.parse(a0.dep);
+    const b = Date.parse(a1.arr);
+    if (!Number.isNaN(a) && !Number.isNaN(b) && b > a) return Math.round((b - a) / 60000);
+    return inMins;
+  });
   const isSelf = $derived(offer.kind === 'self-transfer');
   const carriers = $derived.by(() => {
     const codes: string[] = [];
@@ -73,19 +95,21 @@
         </p>
       {/if}
       <p class="flight-path">{fromLabel} – {toLabel}</p>
-      {#if offer.stops > 0}
-        <p class="stops-count">{offer.stops} stop{offer.stops === 1 ? '' : 's'}</p>
-        <div class="legs">
-          {#each waits as stop}
-            <span class:xfer={stop.selfTransfer}>
-              {stop.code}
-              {#if stop.minutes}
-                {duration(stop.minutes)}
-                {stop.selfTransfer ? 'self-transfer' : 'stopover'}
-              {/if}
-            </span>
-          {/each}
-        </div>
+      {#if outboundSegs.length}
+        {#if waits.length}
+          <p class="stops-count">{offer.stops} stop{offer.stops === 1 ? '' : 's'}{inboundSegs.length ? ' outbound' : ''}</p>
+          <div class="legs">
+            {#each waits as stop}
+              <span class:xfer={stop.selfTransfer}>
+                {stop.code}
+                {#if stop.minutes}
+                  {duration(stop.minutes)}
+                  {stop.selfTransfer ? 'self-transfer' : 'stopover'}
+                {/if}
+              </span>
+            {/each}
+          </div>
+        {/if}
         <div class="legs flights">
           {#each outboundSegs as s}
             <span>{s.flight_number} {s.origin}→{s.dest} {hm(s.dep)}–{hm(s.arr)}</span>
@@ -94,6 +118,19 @@
       {/if}
       {#if inboundSegs.length}
         <p class="stops-count">Return {offer.return_date}</p>
+        {#if inboundWaits.length}
+          <div class="legs">
+            {#each inboundWaits as stop}
+              <span class:xfer={stop.selfTransfer}>
+                {stop.code}
+                {#if stop.minutes}
+                  {duration(stop.minutes)}
+                  {stop.selfTransfer ? 'self-transfer' : 'stopover'}
+                {/if}
+              </span>
+            {/each}
+          </div>
+        {/if}
         <div class="legs flights">
           {#each inboundSegs as s}
             <span>{s.flight_number} {s.origin}→{s.dest} {hm(s.dep)}–{hm(s.arr)}</span>
@@ -101,8 +138,11 @@
         </div>
       {/if}
       <div class="seg" style="margin-top:8px">
-        <span>{duration(offer.duration_min)}</span>
-        {#if offer.stops === 0}
+        <span>{duration(shownOutMins)}</span>
+        {#if inboundSegs.length && shownInMins}
+          <span>Return {duration(shownInMins)}</span>
+        {/if}
+        {#if outboundSegs.length === 1}
           <span>Nonstop</span>
         {/if}
       </div>

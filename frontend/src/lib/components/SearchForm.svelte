@@ -36,6 +36,10 @@
   let error = $state('');
   let submitting = $state(false);
 
+  $effect(() => {
+    if (return_date && date && return_date < date) return_date = '';
+  });
+
   function swap() {
     const a = origin;
     origin = destination;
@@ -106,7 +110,7 @@
       <DatePicker bind:value={date} label="Depart" />
     </div>
     <div class="span-return">
-      <DatePicker bind:value={return_date} label="Return (optional)" />
+      <DatePicker bind:value={return_date} label="Return (optional)" clearable min={date} />
     </div>
     <div class="span-cabin">
       <SelectMenu bind:value={cabin} label="Cabin" options={cabins} />

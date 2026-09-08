@@ -79,9 +79,13 @@ class DuffelProvider:
             await asyncio.sleep(min(max(wait, 1.5), 25.0))
         if r is None or r.status_code >= 400:
             return []
+        try:
+            payload = r.json() or {}
+        except Exception:
+            return []
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
         offers: list[Offer] = []
-        for raw in (r.json().get("data") or {}).get("offers") or []:
+        for raw in (payload.get("data") or {}).get("offers") or []:
             try:
                 parsed = _one(raw, req, now)
             except (TypeError, ValueError, KeyError):
@@ -109,7 +113,10 @@ class DuffelProvider:
         )
         if r.status_code >= 400:
             return None
-        raw = (r.json() or {}).get("data") or {}
+        try:
+            raw = (r.json() or {}).get("data") or {}
+        except Exception:
+            return None
         if not raw:
             return None
         dummy = ShopRequest(origin="AAA", dest="BBB", date="2099-01-01", cabin=cabin, currency=currency)
@@ -189,7 +196,15 @@ def _one(raw: dict[str, Any], req: ShopRequest, now: str) -> Offer | None:
     owner = (raw.get("owner") or {}).get("iata_code") or segments[0].carrier
     live = bool(raw.get("live_mode"))
     outbound_n = outbound_end + 1
-    ret = req.return_date if len(slices) > 1 else None
+    ret = None
+    if len(slices) > 1:
+        inbound = slices[1]
+        ret = (inbound.get("departure_date") or "")[:10] or None
+        if not ret:
+            first_in = (inbound.get("segments") or [{}])[0]
+            ret = (first_in.get("departing_at") or "")[:10] or None
+        if not ret:
+            ret = req.return_date
     return Offer(
         id=f"duffel-{raw.get('id', '')}",
         kind="nonstop" if outbound_n == 1 else "connecting",
@@ -243,14 +258,17 @@ def _dur(iso: str | None) -> int:
         date_part, time_part = body.split("T", 1)
     else:
         date_part, time_part = body, ""
-    if "D" in date_part:
-        days = int(date_part.split("D", 1)[0] or 0)
-    if "H" in time_part:
-        hours, time_part = time_part.split("H", 1)
-        hours = int(hours or 0)
-    if "M" in time_part:
-        minutes, time_part = time_part.split("M", 1)
-        minutes = int(minutes or 0)
-    if "S" in time_part:
-        seconds = int(time_part.split("S", 1)[0] or 0)
+    try:
+        if "D" in date_part:
+            days = int(date_part.split("D", 1)[0] or 0)
+        if "H" in time_part:
+            hours, time_part = time_part.split("H", 1)
+            hours = int(hours or 0)
+        if "M" in time_part:
+            minutes, time_part = time_part.split("M", 1)
+            minutes = int(minutes or 0)
+        if "S" in time_part:
+            seconds = int(time_part.split("S", 1)[0] or 0)
+    except (TypeError, ValueError):
+        return 0
     return days * 1440 + hours * 60 + minutes + seconds // 60

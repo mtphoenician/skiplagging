@@ -12,6 +12,7 @@ import httpx
 from app.config import get_settings
 from app.db import repo
 from app.db.session import init_db, session_factory
+from app.engines.hidden import ticketed_destination
 from app.engines.risk import attach_risk
 from app.engines.shop import _drop_sandbox, _priced_in_currency, _shop_providers, layover_minutes
 from app.models import Offer
@@ -27,11 +28,24 @@ def _scan_dates() -> list[str]:
     return [(today + timedelta(days=offset)).isoformat() for offset in (21, 35, 49)]
 
 
+def _via_stops(offer: Offer, origin: str) -> tuple[str, list[tuple[int, str]]]:
+    ticketed = ticketed_destination(offer)
+    idx = offer.outbound_end if offer.outbound_end is not None else len(offer.segments) - 1
+    idx = min(max(idx, 0), len(offer.segments) - 1)
+    origin_u = origin.upper()
+    vias: list[tuple[int, str]] = []
+    for i, seg in enumerate(offer.segments[:idx]):
+        dest_b = seg.dest.upper()
+        if dest_b not in {origin_u, ticketed}:
+            vias.append((i, dest_b))
+    return ticketed, vias
+
+
 def _cheapest_to(offers: list[Offer], dest: str) -> Offer | None:
     priced = [
         o
         for o in offers
-        if o.price is not None and o.segments and o.segments[-1].dest.upper() == dest.upper()
+        if o.price is not None and o.segments and ticketed_destination(o) == dest.upper()
     ]
     priced = _priced_in_currency(priced)
     if not priced:
@@ -137,12 +151,12 @@ async def discover_hidden_deals(
                     if offer.price is None or len(offer.segments) < 2:
                         continue
                     connecting_seen += 1
-                    dest_b = offer.segments[0].dest.upper()
-                    dest_c = offer.segments[-1].dest.upper()
-                    if dest_b in {origin, dest_c} or dest_b in skip:
-                        continue
-                    if dest_b not in by_dest:
-                        missing_b.add(dest_b)
+                    _ticketed, vias = _via_stops(offer, origin)
+                    for _i, dest_b in vias:
+                        if dest_b in skip:
+                            continue
+                        if dest_b not in by_dest:
+                            missing_b.add(dest_b)
 
                 for dest_b in sorted(missing_b)[:20]:
                     req = ShopRequest(origin=origin, dest=dest_b, date=date, nonstop=False, max_offers=25, currency="USD")
@@ -165,59 +179,60 @@ async def discover_hidden_deals(
                     for offer in all_offers:
                         if offer.price is None or len(offer.segments) < 2:
                             continue
-                        dest_b = offer.segments[0].dest.upper()
-                        dest_c = offer.segments[-1].dest.upper()
-                        if dest_b in {origin, dest_c}:
+                        dest_c, vias = _via_stops(offer, origin)
+                        if not dest_c:
                             continue
-                        local = cheapest_b.get(dest_b)
-                        if local is None or local.price is None or offer.currency != local.currency:
-                            continue
-                        if not is_live_fare(offer) or not is_live_fare(local):
-                            continue
-                        compared += 1
-                        if offer.price >= local.price:
-                            gap = (offer.price / local.price) if local.price else 99
-                            closest.append(
-                                (
-                                    gap,
-                                    f"{origin}->{dest_b}->{dest_c} through={offer.price} local={local.price} {offer.currency}",
+                        for exit_i, dest_b in vias:
+                            local = cheapest_b.get(dest_b)
+                            if local is None or local.price is None or offer.currency != local.currency:
+                                continue
+                            if not is_live_fare(offer) or not is_live_fare(local):
+                                continue
+                            compared += 1
+                            if offer.price >= local.price:
+                                gap = (offer.price / local.price) if local.price else 99
+                                closest.append(
+                                    (
+                                        gap,
+                                        f"{origin}->{dest_b}->{dest_c} through={offer.price} local={local.price} {offer.currency}",
+                                    )
                                 )
+                                continue
+                            key = (origin, dest_b, dest_c, date)
+                            if key in seen:
+                                continue
+                            seen.add(key)
+                            b_ap = await repo.get_airport(session, dest_b)
+                            c_ap = await repo.get_airport(session, dest_c)
+                            if not b_ap or not c_ap:
+                                continue
+                            match = attach_risk(
+                                match_id=f"disc-{origin}-{dest_b}-{dest_c}-{offer.id}",
+                                hidden_city=dest_c,
+                                hidden_name=f"{c_ap.city} ({dest_c})",
+                                local=local,
+                                through=offer,
+                                true_dest=dest_b,
+                                origin_country=o_ap.country,
+                                hidden_country=c_ap.country,
+                                exit_segment_index=exit_i,
                             )
-                            continue
-                        key = (origin, dest_b, dest_c, date)
-                        if key in seen:
-                            continue
-                        seen.add(key)
-                        b_ap = await repo.get_airport(session, dest_b)
-                        c_ap = await repo.get_airport(session, dest_c)
-                        if not b_ap or not c_ap:
-                            continue
-                        match = attach_risk(
-                            match_id=f"disc-{origin}-{dest_b}-{dest_c}-{offer.id}",
-                            hidden_city=dest_c,
-                            hidden_name=f"{c_ap.city} ({dest_c})",
-                            local=local,
-                            through=offer,
-                            true_dest=dest_b,
-                            origin_country=o_ap.country,
-                            hidden_country=c_ap.country,
-                        )
-                        match.bookers = booker_links(origin, dest_c, date, 1, currency="USD")
-                        await repo.persist_hidden_deals(
-                            session,
-                            [match],
-                            origin=origin,
-                            origin_city=o_ap.city,
-                            dest=dest_b,
-                            dest_city=b_ap.city,
-                            date=date,
-                        )
-                        matches.append(match)
-                        print(
-                            f"  HIT {origin}->{dest_b}->{dest_c} through={offer.price} {offer.currency} "
-                            f"local={local.price} save={match.gross_saving}",
-                            flush=True,
-                        )
+                            match.bookers = booker_links(origin, dest_c, date, 1, currency="USD")
+                            await repo.persist_hidden_deals(
+                                session,
+                                [match],
+                                origin=origin,
+                                origin_city=o_ap.city,
+                                dest=dest_b,
+                                dest_city=b_ap.city,
+                                date=date,
+                            )
+                            matches.append(match)
+                            print(
+                                f"  HIT {origin}->{dest_b}->{dest_c} through={offer.price} {offer.currency} "
+                                f"local={local.price} save={match.gross_saving}",
+                                flush=True,
+                            )
                 found += len(matches)
                 print(
                     f"{origin} {date}: {len(matches)} inversion(s), {len(all_offers)} offers, "

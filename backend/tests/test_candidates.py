@@ -256,6 +256,29 @@ def test_savings_summary_keeps_history_bounded():
     assert summarize_savings([]) == (0.0, 0.0, 0.0)
 
 
+def test_learner_round_trip_ticketed_is_outbound_dest():
+    from app.providers.mock import jfk_ord_roundtrip
+
+    rt = jfk_ord_roundtrip("2026-10-10", "2026-10-17")
+    batch = build_batch(
+        [rt],
+        origins={"JFK"},
+        intended={"ORD"},
+        honest_price=430,
+        honest_currency="USD",
+        probed=[],
+        date="2026-10-10",
+        adults=1,
+        cabin="ECONOMY",
+        now=NOW,
+    )
+    fare = batch.fares[0]
+    assert fare.ticketed == "ORD"
+    assert fare.connections == []
+    assert ("ORD", "JFK", "AA", "AA101") not in batch.edges
+    assert not batch.stats
+
+
 # ── budget ─────────────────────────────────────────────────────────────────────
 
 

@@ -124,7 +124,13 @@
   });
 
   const names = $derived(data?.airline_names ?? {});
-  const noShop = $derived(Boolean(data && data.cheapest_any == null && data.data_gaps.length));
+  const noShop = $derived(
+    Boolean(
+      data &&
+        data.cheapest_any == null &&
+        data.data_gaps.some((g) => g.includes('No Duffel token') || g.includes('mock is off'))
+    )
+  );
   const sandboxGap = $derived(
     data?.data_gaps.find((g) => g.includes('sandbox') || g.includes('duffel_test')) || ''
   );
@@ -349,7 +355,7 @@
     {#if !data.honest_pick && !data.best_pick && !data.hidden_if_cheaper && !showSelf && !listedCount}
       <p class="empty">
         {noShop
-          ? sandboxGap || 'No priced flights here — this app is not connected to a fare shop.'
+          ? 'No priced flights here — this app is not connected to a fare shop.'
           : 'No priced flight on this city pair for that date. Try another date or nearby airports.'}
       </p>
     {/if}

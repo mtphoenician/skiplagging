@@ -13,7 +13,7 @@ from app.models import Offer
 def observation_meta(offer: Offer) -> dict | None:
     if not offer.segments or offer.price is None:
         return None
-    first, last = offer.segments[0], offer.segments[-1]
+    first = offer.segments[0]
     ticketed = ticketed_destination(offer)
     idx = offer.outbound_end if offer.outbound_end is not None else len(offer.segments) - 1
     idx = min(max(idx, 0), len(offer.segments) - 1)

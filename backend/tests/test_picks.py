@@ -148,6 +148,30 @@ def test_pick_uses_price_then_shortest_layover():
     assert pick.layover_min == 300
 
 
+def test_assess_none_local_price_does_not_raise():
+    from app.engines.risk import assess
+
+    local = _offer("n", None, [_seg("JFK", "ORD", "2026-10-10T08:00", "2026-10-10T10:00")], 0)
+    through = _offer(
+        "h",
+        100,
+        [
+            _seg("JFK", "ORD", "2026-10-10T08:00", "2026-10-10T10:00"),
+            _seg("ORD", "DEN", "2026-10-10T11:00", "2026-10-10T13:00"),
+        ],
+        1,
+    )
+    risk = assess(local, through, "DEN", "ORD")
+    assert risk.items
+
+
+def test_layover_minutes_round_trip_ignores_the_stay_at_b():
+    from app.providers.mock import jfk_ord_roundtrip
+
+    rt = jfk_ord_roundtrip("2026-10-10", "2026-10-17")
+    assert layover_minutes(rt) == 0
+
+
 def test_pick_same_price_prefers_shorter_layover():
     long_wait = _offer(
         "c1",
@@ -335,6 +359,7 @@ def test_duffel_duration_parses_overnight():
     assert _dur("P1DT30M") == 1470
     assert _dur("P1DT2H30M") == 1590
     assert _dur("") == 0
+    assert _dur("PT2H30.5M") == 0
 
 
 def test_best_is_nonstop_when_cheapest_is_connecting():

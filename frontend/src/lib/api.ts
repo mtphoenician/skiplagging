@@ -320,7 +320,7 @@ export function itineraryBookers(
     {
       id: 'booking-com',
       name: 'Booking.com',
-      url: `https://flights.booking.com/flights/${o}.AIRPORT-${d}.AIRPORT/?type=${returnDate ? 'ROUNDTRIP' : 'ONEWAY'}&adults=${adults}&cabinClass=${cabin}&depart=${date}&from=${o}&to=${d}&sort=BEST`
+      url: `https://flights.booking.com/flights/${o}.AIRPORT-${d}.AIRPORT/?type=${returnDate ? 'ROUNDTRIP' : 'ONEWAY'}&adults=${adults}&cabinClass=${cabin}&depart=${date}${returnDate ? `&return=${returnDate}` : ''}&from=${o}&to=${d}&sort=BEST`
     },
     {
       id: 'expedia',
@@ -365,12 +365,13 @@ export function plusDays(dep: string, arr: string): string {
 }
 
 export function stopovers(
-  offer: Offer
+  offer: Offer,
+  from = 0,
+  last = outboundEndIndex(offer)
 ): { code: string; minutes: number; selfTransfer: boolean }[] {
   const marked = new Set((offer.self_transfer_airports ?? []).map((c) => c.toUpperCase()));
   const out: { code: string; minutes: number; selfTransfer: boolean }[] = [];
-  const lastOutbound = outboundEndIndex(offer);
-  for (let i = 0; i < lastOutbound; i++) {
+  for (let i = from; i < last && i < offer.segments.length - 1; i++) {
     const arr = Date.parse(offer.segments[i].arr);
     const dep = Date.parse(offer.segments[i + 1].dep);
     const minutes =
@@ -387,7 +388,7 @@ export function stopovers(
 export function defaultDate(): string {
   const d = new Date();
   d.setDate(d.getDate() + 11);
-  return d.toISOString().slice(0, 10);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
 
 export function kt(ms: number | null): string {

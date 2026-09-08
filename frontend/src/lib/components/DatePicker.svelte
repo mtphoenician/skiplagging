@@ -1,5 +1,10 @@
 <script lang="ts">
-  let { value = $bindable(''), label = 'Date' }: { value: string; label?: string } = $props();
+  let {
+    value = $bindable(''),
+    label = 'Date',
+    clearable = false,
+    min = ''
+  }: { value: string; label?: string; clearable?: boolean; min?: string } = $props();
 
   let open = $state(false);
   let cursor = $state(new Date());
@@ -65,7 +70,8 @@
 
   function cell(dt: Date, muted: boolean, today: Date) {
     const iso = `${dt.getFullYear()}-${pad(dt.getMonth() + 1)}-${pad(dt.getDate())}`;
-    return { iso, day: dt.getDate(), muted, past: dt < today, on: iso === value };
+    const beforeMin = Boolean(min && iso < min);
+    return { iso, day: dt.getDate(), muted, past: dt < today || beforeMin, on: iso === value };
   }
 
   function pad(n: number) {
@@ -109,6 +115,11 @@
           <svg viewBox="0 0 20 20" width="16" height="16"><path d="M8 4l6 6-6 6" fill="none" stroke="currentColor" stroke-width="1.6" /></svg>
         </button>
       </div>
+      {#if clearable && value}
+        <button class="ghost" type="button" onclick={() => { value = ''; open = false; }}>
+          Clear
+        </button>
+      {/if}
       <div class="cal-week">
         {#each week as w}
           <span>{w}</span>

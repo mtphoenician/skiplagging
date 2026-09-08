@@ -147,7 +147,7 @@ _META = (
         "meta-search",
         "Metasearch strong in the Middle East and Asia.",
         False,
-        "https://www.wego.com/flights/searches/{o}-{d}-{dmon}:ow/economy/{adults}a",
+        "https://www.wego.com/flights/searches/{o}-{d}-{wego_dates}/economy/{adults}a",
     ),
     (
         "expedia",
@@ -163,7 +163,7 @@ _META = (
         "ota",
         "OTA. Flight checkout on Booking.com can issue the ticket if you finish there.",
         True,
-        "https://flights.booking.com/flights/{ob}-{db}/?type={book_type}&adults={adults}&cabinClass={book_cabin}&depart={date}&from={o}&to={d}&sort=BEST",
+        "https://flights.booking.com/flights/{ob}-{db}/?type={book_type}&adults={adults}&cabinClass={book_cabin}&depart={date}{book_return}&from={o}&to={d}&sort=BEST",
     ),
     (
         "trip-com",
@@ -171,7 +171,7 @@ _META = (
         "ota",
         "OTA. Trip.com is often merchant of record if you finish checkout there.",
         True,
-        "https://www.trip.com/flights/{ol}-to-{dl}/?dcity={o}&acity={d}&ddate={date}&flighttype=ow&class=ys&quantity={adults}",
+        "https://www.trip.com/flights/{ol}-to-{dl}/?dcity={o}&acity={d}&ddate={date}{trip_adate}&flighttype={flighttype}&class=ys&quantity={adults}",
     ),
     (
         "priceline",
@@ -179,7 +179,7 @@ _META = (
         "ota",
         "OTA. Booking Holdings shop. Can issue if you finish checkout there.",
         True,
-        "https://www.priceline.com/m/fly/search/{o}-{d}-{ymd}/?cabin-class=ECO&no-of-adults={adults}",
+        "https://www.priceline.com/m/fly/search/{priceline_path}/?cabin-class=ECO&no-of-adults={adults}",
     ),
     (
         "kiwi",
@@ -195,7 +195,7 @@ _META = (
         "ota",
         "US OTA. Can issue if you finish checkout there.",
         True,
-        "https://www.cheapoair.com/flights/results?from={o}&to={d}&fromDt={us}&tripType=ONEWAY&adults={adults}",
+        "https://www.cheapoair.com/flights/results?from={o}&to={d}&fromDt={us}{cheapo_ret}&tripType={cheapo_trip}&adults={adults}",
     ),
     (
         "edreams",
@@ -203,7 +203,7 @@ _META = (
         "ota",
         "European OTA. Can issue if you finish checkout there.",
         True,
-        "https://www.edreams.com/flights/{ol}-{dl}/{date}/{adults}-0-0/",
+        "https://www.edreams.com/flights/{edreams_path}",
     ),
     (
         "traveloka",
@@ -211,7 +211,7 @@ _META = (
         "ota",
         "Southeast Asia OTA. Can issue if you finish checkout there.",
         True,
-        "https://www.traveloka.com/en-en/flight/fullsearch?ap={o}.{d}&dt={tvldt}.NA&ps={adults}.0.0",
+        "https://www.traveloka.com/en-en/flight/fullsearch?ap={o}.{d}&dt={tvldt_pair}&ps={adults}.0.0",
     ),
     (
         "makemytrip",
@@ -219,7 +219,7 @@ _META = (
         "ota",
         "India OTA. Can issue if you finish checkout there.",
         True,
-        "https://www.makemytrip.com/flight/search?itinerary={o}-{d}-{mmt}&tripType=O&paxType=A-{adults}_C-0_I-0&cabinClass=E",
+        "https://www.makemytrip.com/flight/search?itinerary={mmt_itin}&tripType={mmt_trip}&paxType=A-{adults}_C-0_I-0&cabinClass=E",
     ),
     (
         "despegar",
@@ -227,7 +227,7 @@ _META = (
         "ota",
         "Latin America OTA. Can issue if you finish checkout there.",
         True,
-        "https://www.despegar.com/shop/flights/results/oneway/{o}/{d}/{date}/{adults}/0/0",
+        "https://www.despegar.com/shop/flights/results/{despegar_kind}/{o}/{d}/{date}{despegar_ret}/{adults}/0/0",
     ),
     (
         "skiplagged-com",
@@ -277,7 +277,19 @@ def booker_links(
         "sky_path": f"{date[2:].replace('-', '')}/{ret[2:].replace('-', '')}/" if ret else f"{date[2:].replace('-', '')}/",
         "trip": "roundtrip" if ret else "oneway",
         "wego_trip": "rt" if ret else "ow",
+        "wego_dates": f"{_dmon(date)}:{ret}" if ret else f"{_dmon(date)}:ow",
         "book_type": "ROUNDTRIP" if ret else "ONEWAY",
+        "book_return": f"&return={ret}" if ret else "",
+        "trip_adate": f"&adate={ret}" if ret else "",
+        "priceline_path": f"{o}-{d}-{date.replace('-', '')}/{d}-{o}-{ret.replace('-', '')}" if ret else f"{o}-{d}-{date.replace('-', '')}",
+        "cheapo_trip": "ROUNDTRIP" if ret else "ONEWAY",
+        "cheapo_ret": f"&toDt={_us(ret)}" if ret else "",
+        "edreams_path": f"{o.lower()}-{d.lower()}/{date}/{ret}/{adults}-0-0/" if ret else f"{o.lower()}-{d.lower()}/{date}/{adults}-0-0/",
+        "tvldt_pair": f"{_tvldt(date)}.{_tvldt(ret)}" if ret else f"{_tvldt(date)}.NA",
+        "mmt_itin": f"{o}-{d}-{_mmt(date)}_{d}-{o}-{_mmt(ret)}" if ret else f"{o}-{d}-{_mmt(date)}",
+        "mmt_trip": "R" if ret else "O",
+        "despegar_kind": "roundtrip" if ret else "oneway",
+        "despegar_ret": f"/{ret}" if ret else "",
         "kiwi_ret": ret if ret else "no-return",
         "flighttype": "rt" if ret else "ow",
         "sky_cabin": {

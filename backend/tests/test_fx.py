@@ -7,6 +7,7 @@ import pytest
 from app.engines.refresh import refresh_priced_offer
 from app.fx import offer_in_usd, to_usd
 from app.models import Offer, SearchQuery, Segment
+from app.providers.base import ShopRequest
 from app.providers.duffel import DuffelProvider
 
 
@@ -128,3 +129,56 @@ async def test_duffel_get_offer_parses_and_refresh_converts_to_usd():
         assert usd is not None
         assert usd.currency == "USD"
         assert usd.price is not None and usd.price > 170
+
+
+def test_duffel_two_slice_sets_return_date_without_req():
+    from app.engines.hidden import ticketed_destination
+    from app.providers.duffel import _one
+
+    raw = {
+        "id": "off_rt",
+        "live_mode": True,
+        "total_amount": "430.00",
+        "total_currency": "USD",
+        "slices": [
+            {
+                "duration": "PT2H15M",
+                "segments": [
+                    {
+                        "origin": {"iata_code": "JFK"},
+                        "destination": {"iata_code": "ORD"},
+                        "marketing_carrier": {"iata_code": "AA"},
+                        "operating_carrier": {"iata_code": "AA"},
+                        "marketing_carrier_flight_number": "100",
+                        "departing_at": "2026-10-10T08:00",
+                        "arriving_at": "2026-10-10T10:15",
+                        "duration": "PT2H15M",
+                    }
+                ],
+            },
+            {
+                "departure_date": "2026-10-17",
+                "duration": "PT2H15M",
+                "segments": [
+                    {
+                        "origin": {"iata_code": "ORD"},
+                        "destination": {"iata_code": "JFK"},
+                        "marketing_carrier": {"iata_code": "AA"},
+                        "operating_carrier": {"iata_code": "AA"},
+                        "marketing_carrier_flight_number": "101",
+                        "departing_at": "2026-10-17T18:00",
+                        "arriving_at": "2026-10-17T21:15",
+                        "duration": "PT2H15M",
+                    }
+                ],
+            },
+        ],
+    }
+    req = ShopRequest(origin="JFK", dest="ORD", date="2026-10-10")
+    got = _one(raw, req, "2026-09-08T12:00:00+00:00")
+    assert got is not None
+    assert got.return_date == "2026-10-17"
+    assert got.outbound_end == 0
+    assert ticketed_destination(got) == "ORD"
+    assert got.stops == 0
+

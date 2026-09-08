@@ -113,16 +113,20 @@ def build_batch(
 
     priced = [o for o in offers_in_usd(offers) if o.price is not None and o.segments]
     for offer in priced:
-        first, last = offer.segments[0], offer.segments[-1]
+        first = offer.segments[0]
         if first.origin.upper() not in origin_set:
             continue
+        idx = offer.outbound_end if offer.outbound_end is not None else len(offer.segments) - 1
+        idx = min(max(idx, 0), len(offer.segments) - 1)
+        ticketed = ticketed_destination(offer)
+        outbound = offer.segments[: idx + 1]
         batch.fares.append(
             FareObservation(
                 offer_uid=offer.id,
                 fingerprint=itinerary_fingerprint(offer),
                 origin=first.origin.upper(),
-                ticketed=last.dest.upper(),
-                connections=[s.dest.upper() for s in offer.segments[:-1]],
+                ticketed=ticketed,
+                connections=[s.dest.upper() for s in offer.segments[:idx]],
                 stops=offer.stops,
                 carrier=(offer.carrier or "").upper(),
                 provider=offer.source,
@@ -135,7 +139,7 @@ def build_batch(
                 expires_at=offer.expires_at,
             )
         )
-        for seg in offer.segments:
+        for seg in outbound:
             key = (seg.origin.upper(), seg.dest.upper(), (seg.carrier or "").upper(), seg.flight_number or "")
             edge = batch.edges.get(key)
             if edge is None:
@@ -172,7 +176,9 @@ def build_batch(
             hit = detect_hidden_city(offer, intended_set)
             if hit:
                 via_b[(a, hit.exit_airport)].append(offer)
-            for s in offer.segments[:-1]:
+            idx = offer.outbound_end if offer.outbound_end is not None else len(offer.segments) - 1
+            idx = min(max(idx, 0), len(offer.segments) - 1)
+            for s in offer.segments[:idx]:
                 x = s.dest.upper()
                 if x not in intended_set and x != a:
                     other_connections.add((a, x))

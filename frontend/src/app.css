@@ -426,7 +426,7 @@ h3 {
   }
 
   .span-cabin {
-    grid-column: 2 / 4;
+    grid-column: 1 / -1;
   }
 
   .search-grid .go {
