@@ -105,6 +105,14 @@
       data.query.cabin
     );
   });
+  const confirmNote = $derived.by(() => {
+    if (!data) return '';
+    const hidden = data.hidden_if_cheaper;
+    if (!hidden) return 'Confirm this city-pair on another site. We do not copy their prices.';
+    const ticketed = hidden.ticketed_destination || hidden.hidden_city;
+    const origin = hidden.through_offer.segments[0]?.origin || data.origin.iata;
+    return `These links search the ticketed trip ${origin} → ${ticketed}, not ${data.origin.iata} → ${data.destination.iata}. Hidden-city is the full itinerary.`;
+  });
 </script>
 
 <svelte:head>
@@ -181,7 +189,7 @@
     {/if}
 
     {#if confirms.length}
-      <p class="note" style="margin:14px 0 8px">Confirm on another site. We do not copy their prices.</p>
+      <p class="note" style="margin:14px 0 8px">{confirmNote}</p>
       <div class="book-row">
         {#each confirms as b}
           <a class="book-btn" href={b.url} target="_blank" rel="noopener noreferrer">{b.name}</a>

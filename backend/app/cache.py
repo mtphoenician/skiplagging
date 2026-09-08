@@ -19,4 +19,4 @@ def search_key(
     live: bool,
     currency: str = "USD",
 ) -> tuple:
-    return (origin.upper(), dest.upper(), date, adults, cabin, nearby, live, currency.upper(), "v3")
+    return (origin.upper(), dest.upper(), date, adults, cabin, nearby, live, currency.upper(), "v4")

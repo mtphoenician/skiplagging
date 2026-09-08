@@ -2,6 +2,7 @@ from types import SimpleNamespace
 
 from app.engines.shop import (
     _dedupe_itineraries,
+    _drop_sandbox,
     _hidden_if_cheaper,
     _keep_on_route,
     _prefer_real_carriers,
@@ -263,6 +264,17 @@ def test_codeshare_keeps_one_itinerary():
     kept = _dedupe_itineraries([ib, ba])
     assert len(kept) == 1
     assert kept[0].id == "ib"
+
+
+def test_drop_sandbox_duffel_keeps_live_and_mock():
+    fake = _offer("ba-test", 71, [_seg("JFK", "ORD", "2026-10-10T06:58", "2026-10-10T08:08", "BA0105")], 0, currency="GBP")
+    fake = fake.model_copy(update={"live": False, "note": "Duffel offer. live_mode=False."})
+    live = _offer("ba-live", 410, [_seg("JFK", "LHR", "2026-10-10T18:00", "2026-10-11T06:10", "BA0112")], 0)
+    live = live.model_copy(update={"live": True})
+    mock = _offer("aa", 240, [_seg("JFK", "ORD", "2026-10-10T08:00", "2026-10-10T10:15", "AA100")], 0)
+    mock = mock.model_copy(update={"source": "mock", "carrier": "AA"})
+    kept = _drop_sandbox([fake, live, mock])
+    assert [o.id for o in kept] == ["ba-live", "aa"]
 
 
 def test_prefer_real_carriers_skips_duffel_airways():

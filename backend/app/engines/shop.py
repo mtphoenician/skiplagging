@@ -137,7 +137,7 @@ async def search_all_ways(
     indexed_useful = [
         o for o in indexed if classify_for_search(o, route_origins, route_dests)
     ]
-    raw_local = _dedupe([*indexed_useful, *shop_local])
+    raw_local = _drop_sandbox(_dedupe([*indexed_useful, *shop_local]))
     local_offers = _prefer_real_carriers(
         _dedupe_itineraries(_keep_on_route(raw_local, route_origins, route_dests))
     )
@@ -157,7 +157,7 @@ async def search_all_ways(
         nearby_offers = [
             o for o in _dedupe(nearby_offers) if not _on_route(o, route_origins, route_dests)
         ]
-        nearby_offers = _prefer_real_carriers(_dedupe_itineraries(nearby_offers))
+        nearby_offers = _drop_sandbox(_prefer_real_carriers(_dedupe_itineraries(nearby_offers)))
         if priced:
             nearby_offers = [o for o in nearby_offers if o.currency == priced[0].currency]
         if any((o.carrier or "").upper() not in TEST_CARRIERS for o in local_offers):
@@ -214,16 +214,20 @@ async def search_all_ways(
             hidden_matches.extend(extra)
         except Exception:
             skipped = []
-    hidden_matches = _clean_hidden_matches(hidden_matches)
+    hidden_matches = _clean_hidden_matches(
+        [m for m in hidden_matches if not _is_sandbox(m.through_offer)]
+    )
     hidden_matches.sort(key=lambda m: (-(m.gross_saving or 0), -m.risk.net_saving_estimate))
     try:
         await repo.remember_offers(
             session,
-            [
-                *raw_local,
-                *nearby_offers,
-                *[m.through_offer for m in hidden_matches],
-            ],
+            _drop_sandbox(
+                [
+                    *raw_local,
+                    *nearby_offers,
+                    *[m.through_offer for m in hidden_matches],
+                ]
+            ),
             date=query.date,
             adults=query.adults,
             cabin=query.cabin,
@@ -654,7 +658,7 @@ async def _shop_providers(
     for part in parts:
         if isinstance(part, list):
             out.extend(part)
-    return out
+    return _drop_sandbox(out)
 
 
 async def _shop_nearby(
@@ -840,6 +844,17 @@ def _via_b(offer: Offer, origin: str | set[str], dest_b: str | set[str], dest_c:
 
 
 TEST_CARRIERS = {"ZZ", "XX", "YY"}
+
+
+def _is_sandbox(offer: Offer) -> bool:
+    if offer.live is False:
+        return True
+    note = offer.note or ""
+    return offer.source == "duffel" and "live_mode=False" in note
+
+
+def _drop_sandbox(offers: list[Offer]) -> list[Offer]:
+    return [o for o in offers if not _is_sandbox(o)]
 
 
 def _on_route(offer: Offer, origins: set[str], dests: set[str]) -> bool:

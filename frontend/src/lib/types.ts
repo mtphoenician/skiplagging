@@ -104,6 +104,7 @@ export interface Offer {
   stops: number;
   first_flight: string;
   retrieved_at?: string | null;
+  live?: boolean | null;
 }
 
 export interface RiskItem {

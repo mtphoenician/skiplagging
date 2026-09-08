@@ -153,6 +153,7 @@ class Offer(BaseModel):
     first_flight: str
     retrieved_at: str | None = None
     note: str | None = None
+    live: bool | None = None
 
 
 class RiskItem(BaseModel):
