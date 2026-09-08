@@ -1,4 +1,13 @@
-from app.engines.shop import _hidden_if_cheaper, _via_b, layover_minutes, pick_honest
+from app.engines.shop import (
+    _dedupe_itineraries,
+    _hidden_if_cheaper,
+    _keep_on_route,
+    _prefer_real_carriers,
+    _via_b,
+    layover_minutes,
+    pick_honest,
+)
+from app.providers.duffel import _dur
 from app.models import HiddenCityMatch, Offer, RiskAssessment, Segment
 
 
@@ -223,3 +232,34 @@ def test_via_b_requires_first_sector_to_true_dest():
     assert not _via_b(through, "LGW", "BOS", "JFK")
     nonstop = _offer("n1", 300, [_seg("LHR", "JFK", "2026-10-22T08:00", "2026-10-22T11:00")], 0)
     assert not _via_b(nonstop, "LHR", "BOS", "JFK")
+
+
+def test_keep_on_route_drops_other_airports():
+    paris_london = _offer("n1", 110, [_seg("CDG", "LGW", "2026-09-19T10:00", "2026-09-19T10:55")], 0)
+    junk = _offer("n2", 41, [_seg("VIY", "SEN", "2026-09-19T13:56", "2026-09-19T13:57")], 0)
+    kept = _keep_on_route([paris_london, junk], {"CDG", "ORY", "PAR"}, {"LGW", "LHR", "LON"})
+    assert [o.id for o in kept] == ["n1"]
+
+
+def test_codeshare_keeps_one_itinerary():
+    ib = _offer("ib", 41, [_seg("CDG", "LHR", "2026-09-19T13:56", "2026-09-19T14:56", "IB1")], 0)
+    ba = ib.model_copy(update={"id": "ba", "price": 42, "carrier": "BA", "first_flight": "BA1"})
+    ba.segments[0] = ba.segments[0].model_copy(update={"flight_number": "BA1", "carrier": "BA"})
+    kept = _dedupe_itineraries([ib, ba])
+    assert len(kept) == 1
+    assert kept[0].id == "ib"
+
+
+def test_prefer_real_carriers_skips_duffel_airways():
+    zz = _offer("zz", 41, [_seg("CDG", "LHR", "2026-09-19T13:56", "2026-09-19T14:56", "ZZ1")], 0)
+    zz = zz.model_copy(update={"carrier": "ZZ"})
+    ba = _offer("ba", 110, [_seg("CDG", "LHR", "2026-09-19T10:00", "2026-09-19T11:00", "BA1")], 0)
+    kept = _prefer_real_carriers([zz, ba])
+    assert [o.id for o in kept] == ["ba"]
+
+
+def test_duffel_duration_parses_overnight():
+    assert _dur("PT2H30M") == 150
+    assert _dur("P1DT30M") == 1470
+    assert _dur("P1DT2H30M") == 1590
+    assert _dur("") == 0

@@ -61,7 +61,10 @@ class DuffelProvider:
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
         offers: list[Offer] = []
         for raw in (r.json().get("data") or {}).get("offers") or []:
-            parsed = _one(raw, req, now)
+            try:
+                parsed = _one(raw, req, now)
+            except (TypeError, ValueError, KeyError):
+                continue
             if parsed:
                 offers.append(parsed)
             if len(offers) >= req.max_offers:
@@ -139,12 +142,23 @@ def _f(v: Any) -> float | None:
 def _dur(iso: str | None) -> int:
     if not iso:
         return 0
-    iso = iso.replace("PT", "")
-    h = m = 0
-    if "H" in iso:
-        a, iso = iso.split("H", 1)
-        h = int(a or 0)
-    if "M" in iso:
-        b, _ = iso.split("M", 1)
-        m = int(b or 0)
-    return h * 60 + m
+    raw = iso.strip().upper()
+    if not raw.startswith("P"):
+        return 0
+    days = hours = minutes = seconds = 0
+    body = raw[1:]
+    if "T" in body:
+        date_part, time_part = body.split("T", 1)
+    else:
+        date_part, time_part = body, ""
+    if "D" in date_part:
+        days = int(date_part.split("D", 1)[0] or 0)
+    if "H" in time_part:
+        hours, time_part = time_part.split("H", 1)
+        hours = int(hours or 0)
+    if "M" in time_part:
+        minutes, time_part = time_part.split("M", 1)
+        minutes = int(minutes or 0)
+    if "S" in time_part:
+        seconds = int(time_part.split("S", 1)[0] or 0)
+    return days * 1440 + hours * 60 + minutes + seconds // 60

@@ -97,8 +97,16 @@ async def search_all_ways(
     traffic_d = gathered[5] if isinstance(gathered[5], LiveTraffic) else None
     board = gathered[6] if isinstance(gathered[6], list) else []
 
-    local_offers = _dedupe(local_offers)
-    nearby_offers = _dedupe(nearby_offers)
+    route_origins = {*(o_members), *(o_tokens)}
+    route_dests = {*(d_members), *(d_tokens)}
+    local_offers = _keep_on_route(_dedupe(local_offers), route_origins, route_dests)
+    local_offers = _prefer_real_carriers(_dedupe_itineraries(local_offers))
+    nearby_offers = [
+        o
+        for o in _dedupe(nearby_offers)
+        if not _on_route(o, route_origins, route_dests)
+    ]
+    nearby_offers = _prefer_real_carriers(_dedupe_itineraries(nearby_offers))
     hidden_matches.sort(key=lambda m: (-(m.gross_saving or 0), -m.risk.net_saving_estimate))
 
     priced = [o for o in local_offers if o.price is not None]
@@ -152,19 +160,19 @@ async def search_all_ways(
             kind="nonstop",
             label="Priced nonstop A → B",
             blurb="GDS/NDC priced offers that end at your destination with one flight. A search offer is not a ticket.",
-            offers=sorted(nonstop, key=lambda o: o.price or 0)[:10],
+            offers=sorted(nonstop, key=lambda o: o.price or 1e12)[:1],
         ),
         ChannelGroup(
             kind="connecting",
             label="Priced connecting itineraries that end at B",
             blurb="Honest through products ticketed to B. Different from hidden-city A→B→C.",
-            offers=sorted(connecting, key=lambda o: (o.price or 1e12, layover_minutes(o), o.duration_min))[:10],
+            offers=sorted(connecting, key=lambda o: (o.price or 1e12, layover_minutes(o), o.duration_min))[:1],
         ),
         ChannelGroup(
             kind="nearby",
             label="Priced nearby-airport substitutes",
             blurb="Same trip intent, different IATA. Still a real A′→B′ offer, not skiplagging.",
-            offers=sorted([o for o in nearby_offers if o.price is not None], key=lambda o: o.price or 0)[:8],
+            offers=sorted([o for o in nearby_offers if o.price is not None], key=lambda o: o.price or 1e12)[:1],
         ),
         ChannelGroup(
             kind="hidden-city",
@@ -555,6 +563,41 @@ def _via_b(offer: Offer, origin: str | set[str], dest_b: str | set[str], dest_c:
         and last.dest.upper() == dest_c.upper()
         and last.dest.upper() not in dests
     )
+
+
+TEST_CARRIERS = {"ZZ", "XX", "YY"}
+
+
+def _on_route(offer: Offer, origins: set[str], dests: set[str]) -> bool:
+    if not offer.segments:
+        return False
+    allowed_o = {c.upper() for c in origins}
+    allowed_d = {c.upper() for c in dests}
+    return offer.segments[0].origin.upper() in allowed_o and offer.segments[-1].dest.upper() in allowed_d
+
+
+def _keep_on_route(offers: list[Offer], origins: set[str], dests: set[str]) -> list[Offer]:
+    return [o for o in offers if _on_route(o, origins, dests)]
+
+
+def _codeshare_key(offer: Offer) -> tuple:
+    return tuple(
+        (s.origin.upper(), s.dest.upper(), (s.dep or "")[:16], (s.arr or "")[:16]) for s in offer.segments
+    )
+
+
+def _dedupe_itineraries(offers: list[Offer]) -> list[Offer]:
+    best: dict[tuple, Offer] = {}
+    for offer in sorted(offers, key=lambda o: (o.price or 1e12, layover_minutes(o), o.duration_min)):
+        key = _codeshare_key(offer)
+        if key not in best:
+            best[key] = offer
+    return list(best.values())
+
+
+def _prefer_real_carriers(offers: list[Offer]) -> list[Offer]:
+    real = [o for o in offers if (o.carrier or "").upper() not in TEST_CARRIERS]
+    return real or offers
 
 
 def _dedupe(offers: list[Offer]) -> list[Offer]:

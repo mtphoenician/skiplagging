@@ -118,6 +118,7 @@ const AIRLINES: Record<string, string> = {
 export function airlineName(code: string | null | undefined, names: Record<string, string> = {}): string {
   if (!code) return '';
   const id = code.toUpperCase();
+  if (id === 'ZZ' || id === 'XX' || id === 'YY') return 'Duffel Airways (test)';
   return names[id] || AIRLINES[id] || id;
 }
 
