@@ -313,6 +313,7 @@ class SearchResponse(BaseModel):
     cheapest_local: float | None
     cheapest_any: float | None
     honest_pick: HonestPick | None = None
+    best_pick: HonestPick | None = None
     hidden_if_cheaper: HiddenCityMatch | None = None
     channels: list[ChannelGroup]
     hidden_city: list[HiddenCityMatch]

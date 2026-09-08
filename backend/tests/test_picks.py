@@ -1,11 +1,16 @@
+from types import SimpleNamespace
+
 from app.engines.shop import (
     _dedupe_itineraries,
     _hidden_if_cheaper,
     _keep_on_route,
     _prefer_real_carriers,
+    _route_pairs,
     _via_b,
     layover_minutes,
+    pick_best,
     pick_honest,
+    shop_tokens,
 )
 from app.providers.duffel import _dur
 from app.models import HiddenCityMatch, Offer, RiskAssessment, Segment
@@ -94,7 +99,7 @@ def test_pick_prefers_cheapest_nonstop_over_dearer_connecting():
     assert pick is not None
     assert pick.kind == "nonstop"
     assert pick.offer.id == "n1"
-    assert pick.reason == "Cheapest nonstop"
+    assert pick.reason == "Cheapest — nonstop"
 
 
 def test_pick_prefers_cheaper_connecting_over_nonstop():
@@ -195,6 +200,7 @@ def test_hidden_only_when_cheaper_than_honest_pick():
     dear_match = _match("m2", dear_through, honest.offer, -50)
     assert _hidden_if_cheaper([cheap_match], honest) is cheap_match
     assert _hidden_if_cheaper([dear_match], honest) is None
+    assert _hidden_if_cheaper([cheap_match], None) is None
     assert pick_honest([], []) is None
 
 
@@ -263,3 +269,83 @@ def test_duffel_duration_parses_overnight():
     assert _dur("P1DT30M") == 1470
     assert _dur("P1DT2H30M") == 1590
     assert _dur("") == 0
+
+
+def test_best_is_nonstop_when_cheapest_is_connecting():
+    nonstop = _offer("n1", 400, [_seg("LHR", "JFK", "2026-10-22T08:00", "2026-10-22T11:00")], 0, duration_min=420)
+    connect = _offer(
+        "c1",
+        180,
+        [
+            _seg("LHR", "DUB", "2026-10-22T08:00", "2026-10-22T09:00", "BA2"),
+            _seg("DUB", "JFK", "2026-10-22T10:00", "2026-10-22T13:00", "BA3"),
+        ],
+        1,
+        duration_min=600,
+    )
+    cheap = pick_honest([nonstop], [connect])
+    best = pick_best([nonstop], [connect], cheap)
+    assert cheap is not None and cheap.offer.id == "c1"
+    assert best is not None
+    assert best.offer.id == "n1"
+    assert best.reason == "Best — cheapest nonstop"
+
+
+def test_best_omitted_when_cheapest_is_already_the_nonstop():
+    cheap_ns = _offer("n1", 200, [_seg("LHR", "JFK", "2026-10-22T08:00", "2026-10-22T11:00")], 0, duration_min=420)
+    dear_ns = _offer("n2", 350, [_seg("LHR", "JFK", "2026-10-22T12:00", "2026-10-22T15:00")], 0, duration_min=420)
+    cheap = pick_honest([cheap_ns, dear_ns], [])
+    assert pick_best([cheap_ns, dear_ns], [], cheap) is None
+
+
+def test_best_prefers_faster_nonstop_near_cheapest():
+    slow = _offer("n1", 200, [_seg("LHR", "JFK", "2026-10-22T08:00", "2026-10-22T16:00")], 0, duration_min=480)
+    fast = _offer("n2", 220, [_seg("LHR", "JFK", "2026-10-22T09:00", "2026-10-22T15:00")], 0, duration_min=360)
+    cheap = pick_honest([slow, fast], [])
+    best = pick_best([slow, fast], [], cheap)
+    assert cheap is not None and cheap.offer.id == "n1"
+    assert best is not None
+    assert best.offer.id == "n2"
+    assert best.reason == "Best — shortest nonstop"
+
+
+def test_city_shop_tokens_include_member_airports():
+    paris = SimpleNamespace(type="city", iata="PAR", members=["CDG", "ORY", "BVA"])
+    london = SimpleNamespace(type="city", iata="LON", members=["LHR", "LGW", "STN", "LCY"])
+    assert shop_tokens(paris) == ["PAR", "CDG", "ORY", "BVA"]
+    assert shop_tokens(london) == ["LON", "LHR", "LGW", "STN"]
+    pairs = _route_pairs(shop_tokens(paris), shop_tokens(london))
+    assert pairs[0] == ("PAR", "LON")
+    assert ("CDG", "LHR") in pairs
+    assert ("CDG", "LGW") in pairs
+    assert ("ORY", "LGW") in pairs
+    # Member airport pairs must keep connections — not nonstop-only.
+    assert all(o != "PAR" or d != "LON" for o, d in pairs[1:])
+
+
+def test_best_is_shorter_connecting_within_price_band():
+    long_trip = _offer(
+        "c1",
+        180,
+        [
+            _seg("LHR", "DUB", "2026-10-22T08:00", "2026-10-22T09:00", "BA2"),
+            _seg("DUB", "JFK", "2026-10-22T14:00", "2026-10-22T20:00", "BA3"),
+        ],
+        1,
+        duration_min=720,
+    )
+    short_trip = _offer(
+        "c2",
+        200,
+        [
+            _seg("LHR", "AMS", "2026-10-22T08:00", "2026-10-22T09:00", "BA4"),
+            _seg("AMS", "JFK", "2026-10-22T10:00", "2026-10-22T13:00", "BA5"),
+        ],
+        1,
+        duration_min=420,
+    )
+    cheap = pick_honest([], [long_trip, short_trip])
+    best = pick_best([], [long_trip, short_trip], cheap)
+    assert cheap is not None and cheap.offer.id == "c1"
+    assert best is not None
+    assert best.offer.id == "c2"

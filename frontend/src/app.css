@@ -884,6 +884,20 @@ h3 {
   font-size: clamp(1.8rem, 4vw, 2.8rem);
 }
 
+.picks-row {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 0;
+}
+
+@media (min-width: 860px) {
+  .picks-row {
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 12px;
+    align-items: start;
+  }
+}
+
 .meta {
   color: var(--muted);
   font-size: 0.92rem;

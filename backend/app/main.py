@@ -193,6 +193,7 @@ async def search(query: SearchQuery) -> SearchResponse:
         query.cabin,
         query.include_nearby,
         False,
+        query.currency,
     )
     cached = app.state.cache.get(key)
     if cached is not None:

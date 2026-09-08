@@ -1,12 +1,15 @@
 <script lang="ts">
-  import { airlineName, duration, money, timeRange } from '$lib/api';
+  import { airlineName, duration, hm, money, timeRange } from '$lib/api';
   import type { HiddenCityMatch } from '$lib/types';
 
   let { match, names = {} }: { match: HiddenCityMatch; names?: Record<string, string> } = $props();
   let open = $state(false);
   const t = $derived(match.through_offer);
-  const getOff = $derived(t.segments[0]?.dest || '');
+  const first = $derived(t.segments[0]);
+  const last = $derived(t.segments[t.segments.length - 1]);
+  const getOff = $derived(first?.dest || '');
   const carrier = $derived(airlineName(t.carrier, names));
+  const path = $derived(t.segments.map((s) => s.origin).concat(last ? [last.dest] : []).join(' → '));
 </script>
 
 <article class="hc">
@@ -16,9 +19,16 @@
       {#if match.first_flight_match}
         <span class="chip good">Same first flight</span>
       {/if}
-      <h3 style="margin:10px 0 8px;font-size:1.15rem">
-        {carrier || 'Airline'} ticket to {match.hidden_city_name || match.hidden_city} · leave at {getOff}
-      </h3>
+      {#if carrier}
+        <p class="airline-name" style="margin-top:10px">{carrier}</p>
+      {/if}
+      {#if first && last}
+        <p class="flight-times">{hm(first.dep)} → {hm(last.arr)}</p>
+      {/if}
+      <p class="flight-path">{path}</p>
+      <p class="note" style="margin:4px 0 8px">
+        Ticketed to {match.hidden_city_name || match.hidden_city} · leave at {getOff}
+      </p>
       <div class="seg">
         {#each t.segments as s}
           <span><strong>{s.flight_number}</strong> {s.origin}→{s.dest} {timeRange(s.dep, s.arr, s.duration_min)}</span>

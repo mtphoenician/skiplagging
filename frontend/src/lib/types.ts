@@ -273,6 +273,7 @@ export interface SearchResponse {
   cheapest_local: number | null;
   cheapest_any: number | null;
   honest_pick: HonestPick | null;
+  best_pick?: HonestPick | null;
   hidden_if_cheaper: HiddenCityMatch | null;
   channels: ChannelGroup[];
   hidden_city: HiddenCityMatch[];
