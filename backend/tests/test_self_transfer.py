@@ -45,25 +45,43 @@ def test_pick_hubs_ranks_overlap_first():
     assert "BEY" not in hubs and "CBR" not in hubs
 
 
-def test_oceania_dest_keeps_asian_hubs_not_only_gulf():
+def test_one_sided_overlap_uses_the_graph_not_a_hub_list():
     hubs = pick_transfer_hubs(
         "BEY",
         "CBR",
-        {"DXB", "DOH", "AUH", "SHJ", "IST"},
+        {"DXB", "DOH"},
         {"SYD", "MEL"},
         limit=4,
     )
-    assert "KUL" in hubs
-    assert hubs[:3] == ["KUL", "SIN", "DPS"]
+    assert set(hubs) <= {"DXB", "DOH", "SYD", "MEL"}
+    assert "BEY" not in hubs and "CBR" not in hubs
 
 
-def test_bridge_pairs_for_oceania():
-    assert bridge_pairs(["KUL", "SIN", "DPS", "SYD"], "CBR")[:2] == [("KUL", "DPS"), ("KUL", "SYD")]
+def test_extra_hubs_fill_when_overlap_is_thin():
+    hubs = pick_transfer_hubs(
+        "BEY",
+        "CBR",
+        {"DXB"},
+        {"SYD"},
+        limit=4,
+        extra_hubs=["SIN", "FRA", "KUL"],
+    )
+    assert hubs[0] in {"DXB", "SYD"}
+    assert "SIN" in hubs
 
 
-def test_bridge_pairs_skip_domestic():
-    assert bridge_pairs(["ORD", "DTW", "ATL"], "ORD") == []
-    assert bridge_pairs(["DXB", "DOH"], "JFK") == []
+def test_bridge_pairs_only_when_no_shared_hub():
+    assert bridge_pairs(
+        ["KUL", "SIN", "DPS", "SYD"],
+        from_origin={"KUL", "SIN"},
+        into_dest={"DPS", "SYD"},
+    )[:2] == [("KUL", "DPS"), ("KUL", "SYD")]
+
+
+def test_bridge_pairs_skip_when_two_tickets_already_work():
+    assert bridge_pairs(["KUL", "DXB"], from_origin={"KUL"}, into_dest={"KUL", "SYD"}) == []
+    assert bridge_pairs(["ORD", "DTW", "ATL"]) == []
+    assert bridge_pairs(["DXB", "DOH"], from_origin={"DXB"}, into_dest={"DOH"}) == [("DXB", "DOH")]
 
 
 def test_pick_hubs_zero_limit():
@@ -151,3 +169,51 @@ def test_combine_keeps_cheapest():
     dear = _offer("b2", 900, [_seg("KUL", "CBR", "2026-11-20T09:00", "2026-11-20T23:00", "VA2", "VA")], "VA")
     out = combine_at_hubs({"KUL": [left]}, {"KUL": [dear, cheap]}, {"CBR"})
     assert out[0].price == 300
+
+
+def test_stitch_rejects_six_flights():
+    left = _offer(
+        "a",
+        200,
+        [
+            _seg("BEY", "SHJ", "2026-11-19T12:15", "2026-11-19T16:20", "G91"),
+            _seg("SHJ", "KUL", "2026-11-19T21:25", "2026-11-20T08:40", "D71"),
+            _seg("KUL", "SIN", "2026-11-20T11:00", "2026-11-20T12:30", "AK3"),
+        ],
+        "AK",
+    )
+    right = _offer(
+        "b",
+        200,
+        [
+            _seg("SIN", "DPS", "2026-11-20T16:00", "2026-11-20T18:30", "VA1", "VA"),
+            _seg("DPS", "SYD", "2026-11-20T21:25", "2026-11-21T04:00", "VA2", "VA"),
+            _seg("SYD", "CBR", "2026-11-21T08:00", "2026-11-21T09:00", "VA3", "VA"),
+        ],
+        "VA",
+    )
+    assert stitch_chain([left, right], "CBR") is None
+
+
+def test_combine_keeps_three_ticket_only_when_cheaper():
+    left = _offer("a", 100, [_seg("BEY", "KUL", "2026-11-19T08:00", "2026-11-19T20:00", "AK1")], "AK")
+    two_right = _offer("b", 200, [_seg("KUL", "CBR", "2026-11-20T08:00", "2026-11-20T22:00", "VA1", "VA")], "VA")
+    mid = _offer("m", 50, [_seg("KUL", "DPS", "2026-11-20T08:00", "2026-11-20T12:00", "AK2")], "AK")
+    dear_last = _offer("c", 400, [_seg("DPS", "CBR", "2026-11-20T16:00", "2026-11-21T06:00", "VA9", "VA")], "VA")
+    out = combine_at_hubs(
+        {"KUL": [left]},
+        {"KUL": [two_right], "DPS": [dear_last]},
+        {"CBR"},
+        mids={("KUL", "DPS"): [mid]},
+    )
+    assert out
+    assert all(len(o.separate_tickets) == 2 for o in out)
+    cheap_last = _offer("c2", 80, [_seg("DPS", "CBR", "2026-11-20T16:00", "2026-11-21T06:00", "VA8", "VA")], "VA")
+    cheaper = combine_at_hubs(
+        {"KUL": [left]},
+        {"KUL": [two_right], "DPS": [cheap_last]},
+        {"CBR"},
+        mids={("KUL", "DPS"): [mid]},
+    )
+    assert cheaper[0].price == 230
+    assert cheaper[0].separate_tickets and len(cheaper[0].separate_tickets) == 3

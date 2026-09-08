@@ -15,7 +15,6 @@ from app.config import Settings
 from app.db import repo
 from app.engines.budget import start_ledger, timed_shop, current_ledger
 from app.engines.candidates import (
-    HUB_ONWARD,
     Candidate,
     hub_probabilities,
     rank_candidates,
@@ -33,11 +32,13 @@ from app.engines.index import classify_for_search, ticketed_dests_through
 from app.engines.learn import build_batch
 from app.engines.risk import attach_risk
 from app.engines.self_transfer import (
+    MAX_LEG_FLIGHTS,
     bridge_pairs,
     combine_at_hubs,
     next_day,
     pick_transfer_hubs,
 )
+from app.fx import offer_in_usd, offers_in_usd
 from app.models import (
     BoardFlight,
     CandidateTrace,
@@ -58,6 +59,7 @@ from app.providers.bookers import booker_links
 from app.providers.duffel import DuffelProvider
 from app.providers.mock import MockProvider
 from app.providers.opensky import OpenSkyProvider, tracker_links
+from app.providers.sandbox import TEST_CARRIERS
 
 SIDE_TIMEOUT = 1.2
 
@@ -76,6 +78,7 @@ async def search_all_ways(
     t0 = time.perf_counter()
     ledger = start_ledger(settings.search_cost_usd)
     origin, dest = query.origin, query.destination
+    query = query.model_copy(update={"currency": "USD"})
 
     o_ap = await repo.get_place(session, origin)
     d_ap = await repo.get_place(session, dest)
@@ -106,7 +109,7 @@ async def search_all_ways(
         date=query.date,
         adults=query.adults,
         cabin=query.cabin,
-        currency=query.currency,
+        currency="USD",
         max_offers=20,
     )
 
@@ -122,7 +125,7 @@ async def search_all_ways(
         )
     except Exception:
         indexed = []
-    indexed = [o for o in indexed if not _is_self_transfer(o)]
+    indexed = [o for o in offers_in_usd(indexed) if not _is_self_transfer(o)]
     indexed_honest = [
         o
         for o in indexed
@@ -162,13 +165,13 @@ async def search_all_ways(
     indexed_useful = [
         o for o in indexed if classify_for_search(o, route_origins, route_dests)
     ]
-    raw_local = _drop_sandbox(_dedupe([*indexed_useful, *shop_local]))
+    raw_local = offers_in_usd(_drop_sandbox(_dedupe([*indexed_useful, *shop_local])))
     local_offers = _prefer_real_carriers(
         _dedupe_itineraries(_keep_on_route(raw_local, route_origins, route_dests))
     )
     local_offers = [o for o in local_offers if not _is_self_transfer(o)]
     priced = _priced_in_currency(
-        [o for o in local_offers if o.price is not None], query.currency
+        [o for o in local_offers if o.price is not None], "USD"
     )
     nearby_offers: list[Offer] = []
     if (
@@ -184,6 +187,7 @@ async def search_all_ways(
             o for o in _dedupe(nearby_offers) if not _on_route(o, route_origins, route_dests)
         ]
         nearby_offers = _drop_sandbox(_prefer_real_carriers(_dedupe_itineraries(nearby_offers)))
+        nearby_offers = offers_in_usd(nearby_offers)
         if priced:
             nearby_offers = [o for o in nearby_offers if o.currency == priced[0].currency]
         if any((o.carrier or "").upper() not in TEST_CARRIERS for o in local_offers):
@@ -193,7 +197,7 @@ async def search_all_ways(
 
     nonstop = [o for o in priced if o.stops == 0]
     connecting = [o for o in priced if o.stops > 0]
-    honest_pick = pick_honest(nonstop, connecting, query.currency)
+    honest_pick = pick_honest(nonstop, connecting, "USD")
     best_pick = pick_best(nonstop, connecting, honest_pick)
 
     rejected: list[str] = []
@@ -227,8 +231,8 @@ async def search_all_ways(
                 route_dests,
                 mode,
             )
-            self_transfer_offers = _drop_sandbox(self_transfer_offers)
-            transfer_legs = _drop_sandbox(transfer_legs)
+            self_transfer_offers = offers_in_usd(_drop_sandbox(self_transfer_offers))
+            transfer_legs = offers_in_usd(_drop_sandbox(transfer_legs))
         except Exception:
             self_transfer_offers, transfer_legs = [], []
     if can_shop and honest_pick:
@@ -245,7 +249,11 @@ async def search_all_ways(
             pass
         else:
             chosen = select_candidates(
-                ranked, budget, settings.candidate_min_score, exclude=excluded
+                ranked,
+                budget,
+                settings.candidate_min_score,
+                cold_start=settings.fast_candidates,
+                exclude=excluded,
             )
             expanded = [c.code for c in chosen]
         if mode == "fast":
@@ -254,6 +262,7 @@ async def search_all_ways(
                 ranked,
                 settings.max_hidden_candidates,
                 settings.candidate_min_score,
+                cold_start=settings.fast_candidates,
                 exclude=excluded | set(expanded),
             )
             pending = [c.code for c in preview]
@@ -381,7 +390,7 @@ async def search_all_ways(
     }
     airline_pairs = await repo.airlines_by_iata(session, list(name_codes))
     airline_names = {code: name for code, name in airline_pairs}
-    book_ccy = compare_ccy or query.currency
+    book_ccy = "USD"
     bookers = booker_links(
         o_ap.iata,
         d_ap.iata,
@@ -510,7 +519,8 @@ async def search_all_ways(
         "Reference / track / schedule / priced-offer / booker are different layers. A tracker is not a ticket. A metasearch link is not a PNR.",
         "Ranking: this is a price comparator first. Cheapest regular ticket, then the best (fewest stops) and fastest. Self-transfer and hidden-city rows are additions shown only when they cost less than the cheapest regular ticket.",
         "Hidden-city rows are complete tickets that continue past the intended city. The priced itinerary is never rewritten into a fake A→B fare.",
-        "Self-transfer rows are separate tickets stitched at a hub. The sum is not one PNR and is not hidden-city.",
+        "Every priced row is converted to USD before ranking, so GBP and other airline quotes never mix with dollar fares.",
+        "Self-transfer rows are separate tickets stitched at a hub, at most five flights. The sum is not one PNR and is not hidden-city.",
         "This API never calls Amadeus Flight Create Orders or Duffel Orders.",
     ]
 
@@ -766,7 +776,7 @@ async def _shop_providers(
     if mock:
         mocked = await timed_shop("mock", req.origin, req.dest, req.date, purpose, mock.shop(req))
         if mocked:
-            return mocked
+            return offers_in_usd(_drop_sandbox(mocked))
 
     def paid(provider: str, r: ShopRequest, coro: Awaitable[list[Offer]]) -> Awaitable[list[Offer]]:
         return timed_shop(provider, r.origin, r.dest, r.date, purpose, coro)
@@ -788,7 +798,7 @@ async def _shop_providers(
     for part in parts:
         if isinstance(part, list):
             out.extend(part)
-    return _drop_sandbox(out)
+    return offers_in_usd(_drop_sandbox(out))
 
 
 async def _shop_nearby(
@@ -854,7 +864,11 @@ async def _shop_self_transfers(
     into: set[str] = set()
     for code in list(dest_place.members or [dest])[:3]:
         into.update(await repo.origins_into(session, code, limit=24))
-    n_hubs = 3 if mode == "fast" else 4
+    extra = await repo.busiest_airports(
+        session, limit=20, exclude={origin, dest, *list(origin_place.members or []), *list(dest_place.members or [])}
+    )
+    continents = await repo.continents_for(session, [origin, dest, *from_origin, *into, *extra])
+    n_hubs = 2 if mode == "fast" else 3
     ledger = current_ledger()
     paid = len(ledger.paid()) if ledger else 0
     left = max(0, settings.max_provider_calls - paid)
@@ -862,7 +876,15 @@ async def _shop_self_transfers(
     n_hubs = min(n_hubs, left // per_hub) if per_hub else 0
     if n_hubs < 1:
         return [], []
-    hubs = pick_transfer_hubs(origin, dest, from_origin, into, limit=n_hubs)
+    hubs = pick_transfer_hubs(
+        origin,
+        dest,
+        from_origin,
+        into,
+        limit=n_hubs,
+        extra_hubs=extra,
+        continents=continents,
+    )
     if not hubs:
         return [], []
 
@@ -872,9 +894,15 @@ async def _shop_self_transfers(
 
     def keep_legs(offers: list[Offer], dest_ok) -> list[Offer]:
         kept = _prefer_real_carriers(
-            [o for o in offers if dest_ok(o) and detect_hidden_city(o, intended) is None]
+            [
+                o
+                for o in offers
+                if dest_ok(o)
+                and detect_hidden_city(o, intended) is None
+                and 0 < len(o.segments) <= MAX_LEG_FLIGHTS
+            ]
         )
-        kept.sort(key=lambda o: (o.price or 1e12, o.duration_min, o.stops))
+        kept.sort(key=lambda o: (o.stops, o.price or 1e12, o.duration_min))
         return kept[:4]
 
     async def inbound_hub(hub: str) -> tuple[str, list[Offer]]:
@@ -902,11 +930,12 @@ async def _shop_self_transfers(
             outbound[row[0]] = row[1]
 
     mids: dict[tuple[str, str], list[Offer]] = {}
-    for h1, h2 in bridge_pairs(hubs, dest, limit=2 if mode == "deep" else 1):
-        mid = await leg(h1, h2, req.date)
-        kept_mid = keep_legs(mid, lambda o, dest_h=h2: is_standard_to(o, dest_h))
-        if kept_mid:
-            mids[(h1, h2)] = kept_mid
+    if mode == "deep":
+        for h1, h2 in bridge_pairs(hubs, from_origin=from_origin, into_dest=into, limit=2):
+            mid = await leg(h1, h2, req.date)
+            kept_mid = keep_legs(mid, lambda o, dest_h=h2: is_standard_to(o, dest_h))
+            if kept_mid:
+                mids[(h1, h2)] = kept_mid
     legs: list[Offer] = []
     for group in (*inbound.values(), *outbound.values(), *mids.values()):
         legs.extend(group)
@@ -946,9 +975,6 @@ async def _plan_candidates(
                 for c in part:
                     pool.setdefault(c.upper(), "amadeus")
     route_map = await repo.route_map_from(session, dest_members[:4])
-    for b in dest_members[:4]:
-        for c in HUB_ONWARD.get(b.upper(), []):
-            pool.setdefault(c, "hub")
     for b, spokes in route_map.items():
         for c in sorted(spokes):
             pool.setdefault(c, "openflights")
@@ -1005,37 +1031,44 @@ def _classify_hidden(
     origin_place,
     min_saving: float,
 ) -> tuple[list[HiddenCityMatch], list[str]]:
+    local_usd = offer_in_usd(local)
+    if local_usd is None or local_usd.price is None:
+        return [], ["honest fare could not be converted to USD"]
     matches: list[HiddenCityMatch] = []
     rejected: list[str] = []
     for offer in offers:
         if offer.price is None:
             continue
-        if is_standard_to(offer, intended):
+        converted = offer_in_usd(offer)
+        if converted is None or converted.price is None:
+            rejected.append(f"{offer.id}: could not convert to USD")
             continue
-        hit = detect_hidden_city(offer, intended)
+        if is_standard_to(converted, intended):
+            continue
+        hit = detect_hidden_city(converted, intended)
         if hit is None:
             rejected.append(f"{offer.id}: does not pass through intended destination")
             continue
-        saving = hidden_city_savings(local.price, offer.price)
-        if offer.currency != local.currency or not meaningful_saving(saving, min_saving):
-            rejected.append(f"{offer.id}: saving below floor or currency mismatch")
+        saving = hidden_city_savings(local_usd.price, converted.price)
+        if not meaningful_saving(saving, min_saving):
+            rejected.append(f"{offer.id}: saving below floor")
             continue
-        offer.kind = "hidden-city"
-        ticketed = ticketed_destination(offer)
+        converted.kind = "hidden-city"
+        ticketed = ticketed_destination(converted)
         matches.append(
             attach_risk(
-                match_id=f"hc-{offer.id}-{hit.exit_airport}",
+                match_id=f"hc-{converted.id}-{hit.exit_airport}",
                 hidden_city=ticketed,
                 hidden_name=ticketed,
-                local=local,
-                through=offer,
+                local=local_usd,
+                through=converted,
                 true_dest=hit.exit_airport,
                 origin_country=getattr(origin_place, "country", "") or "",
                 hidden_country="",
                 exit_segment_index=hit.exit_segment_index,
             )
         )
-        record_offer(offer.segments[0].origin, hit.exit_airport, ticketed, offer.price)
+        record_offer(converted.segments[0].origin, hit.exit_airport, ticketed, converted.price)
     return matches, rejected
 
 
@@ -1050,9 +1083,6 @@ def _via_b(offer: Offer, origin: str | set[str], dest_b: str | set[str], dest_c:
     if ticketed_destination(offer) != dest_c.upper() or dest_c.upper() in dests:
         return False
     return detect_hidden_city(offer, dests) is not None
-
-
-TEST_CARRIERS = {"ZZ", "XX", "YY"}
 
 
 def _is_sandbox(offer: Offer) -> bool:
@@ -1152,14 +1182,13 @@ def layover_minutes(offer: Offer) -> int:
 
 
 def _priced_in_currency(offers: list[Offer], preferred: str | None = None) -> list[Offer]:
-    priced = [o for o in offers if o.price is not None]
+    priced = [o for o in offers_in_usd(offers) if o.price is not None]
     if not priced:
         return []
-    if preferred:
-        want = preferred.upper()
-        matched = [o for o in priced if (o.currency or "").upper() == want]
-        if matched:
-            return matched
+    want = (preferred or "USD").upper()
+    matched = [o for o in priced if (o.currency or "").upper() == want]
+    if matched:
+        return matched
     counts: dict[str, int] = {}
     for offer in priced:
         counts[offer.currency] = counts.get(offer.currency, 0) + 1
@@ -1243,15 +1272,15 @@ def _hidden_if_cheaper(
 ) -> HiddenCityMatch | None:
     if not matches or honest is None or honest.offer.price is None:
         return None
-    ceiling = honest.offer.price
-    currency = honest.offer.currency
+    ceiling_offer = offer_in_usd(honest.offer)
+    if ceiling_offer is None or ceiling_offer.price is None:
+        return None
+    ceiling = ceiling_offer.price
     for match in matches:
-        price = match.through_offer.price
-        if (
-            price is not None
-            and match.through_offer.currency == currency
-            and price < ceiling
-        ):
+        through = offer_in_usd(match.through_offer)
+        if through is None or through.price is None:
+            continue
+        if through.price < ceiling:
             return match
     return None
 

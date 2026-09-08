@@ -29,6 +29,7 @@ from app.db.tables import (
     SearchRow,
     TrackRow,
 )
+from app.fx import offer_in_usd, offers_in_usd, to_usd
 from app.models import Airport, Country, HiddenDeal, HiddenCityMatch, Navaid, Offer, Region, Runway
 from app.providers.bookers import booker_links
 
@@ -632,6 +633,39 @@ async def origins_into(session: AsyncSession, dest: str, limit: int = 40) -> lis
     return [row[0] for row in (await session.execute(stmt)).all() if row[0]]
 
 
+async def busiest_airports(
+    session: AsyncSession, *, limit: int = 32, exclude: set[str] | None = None
+) -> list[str]:
+    """IATA codes with the most historical OpenFlights nonstops. A hub prior, not a schedule."""
+    skip = {c.upper()[:3] for c in (exclude or set()) if c}
+    stmt = (
+        select(RouteRow.origin_iata, func.count())
+        .where(RouteRow.stops == 0, RouteRow.origin_iata != "")
+        .group_by(RouteRow.origin_iata)
+        .order_by(func.count().desc())
+        .limit(max(limit + len(skip) + 8, limit))
+    )
+    out: list[str] = []
+    for code, _n in (await session.execute(stmt)).all():
+        c = (code or "").upper()[:3]
+        if len(c) != 3 or c in skip:
+            continue
+        out.append(c)
+        if len(out) >= limit:
+            break
+    return out
+
+
+async def continents_for(session: AsyncSession, codes: list[str]) -> dict[str, str]:
+    want = [c.upper()[:3] for c in codes if c]
+    if not want:
+        return {}
+    rows = (
+        await session.execute(select(AirportRow.iata, AirportRow.continent).where(AirportRow.iata.in_(want)))
+    ).all()
+    return {iata: (continent or "") for iata, continent in rows if iata}
+
+
 async def airline_by_icao(session: AsyncSession, icao: str) -> AirlineRow | None:
     stmt = select(AirlineRow).where(AirlineRow.icao == icao.upper()).limit(1)
     return (await session.execute(stmt)).scalars().first()
@@ -938,7 +972,10 @@ async def remember_offers(
 
     stored = 0
     for offer in offers:
-        meta = observation_meta(offer)
+        converted = offer_in_usd(offer)
+        if converted is None:
+            continue
+        meta = observation_meta(converted)
         if meta is None:
             continue
         stmt = pg_insert(OfferObservationRow).values(
@@ -952,7 +989,7 @@ async def remember_offers(
             source=meta["source"],
             fingerprint=meta["fingerprint"],
             price=meta["price"],
-            payload=offer.model_dump(),
+            payload=converted.model_dump(),
             observed_at=datetime.now(timezone.utc),
         )
         stmt = stmt.on_conflict_do_update(
@@ -1009,7 +1046,7 @@ async def recall_offers(
             out.append(Offer.model_validate(row.payload))
         except (TypeError, ValueError, KeyError):
             continue
-    return out
+    return offers_in_usd(out)
 
 
 async def recall_candidate_dests(
@@ -1192,11 +1229,28 @@ async def persist_hidden_deals(
     return saved
 
 
-def _deal_from_row(row: HiddenDealRow) -> HiddenDeal:
+def _deal_from_row(row: HiddenDealRow) -> HiddenDeal | None:
     # Always rebuild booker URLs so saved deals never keep a dead Google `#flt=` link.
-    bookers = booker_links(row.origin, row.hidden_city, row.date, 1, currency=row.currency or "USD")
-    local = Offer.model_validate(row.local_payload) if row.local_payload else None
-    through = Offer.model_validate(row.through_payload) if row.through_payload else None
+    ccy = row.currency or "USD"
+    honest = to_usd(row.honest_price, ccy)
+    through = to_usd(row.through_price, ccy)
+    if honest is None or through is None:
+        return None
+    saving = round(honest - through, 2)
+    pct = round(100.0 * saving / honest, 2) if honest else row.saving_pct
+    bookers = booker_links(row.origin, row.hidden_city, row.date, 1, currency="USD")
+    local = None
+    if row.local_payload:
+        try:
+            local = offer_in_usd(Offer.model_validate(row.local_payload))
+        except (TypeError, ValueError, KeyError):
+            local = None
+    through_offer = None
+    if row.through_payload:
+        try:
+            through_offer = offer_in_usd(Offer.model_validate(row.through_payload))
+        except (TypeError, ValueError, KeyError):
+            through_offer = None
     return HiddenDeal(
         id=row.id,
         origin=row.origin,
@@ -1206,16 +1260,16 @@ def _deal_from_row(row: HiddenDealRow) -> HiddenDeal:
         hidden_city=row.hidden_city,
         hidden_city_name=row.hidden_city_name,
         date=row.date,
-        honest_price=row.honest_price,
-        through_price=row.through_price,
-        currency=row.currency,
-        saving=row.saving,
-        saving_pct=row.saving_pct,
+        honest_price=honest,
+        through_price=through,
+        currency="USD",
+        saving=saving,
+        saving_pct=pct,
         first_flight=row.first_flight,
         source=row.source,
         bookers=bookers,
         local_offer=local,
-        through_offer=through,
+        through_offer=through_offer,
     )
 
 
@@ -1232,7 +1286,7 @@ async def list_hidden_deals(
     if dest:
         stmt = stmt.where(HiddenDealRow.destination == dest.upper())
     rows = (await session.execute(stmt.limit(min(limit, 120)))).scalars().all()
-    return [_deal_from_row(r) for r in rows]
+    return [d for r in rows if (d := _deal_from_row(r)) is not None]
 
 
 # ── learned search intelligence ────────────────────────────────────────────────

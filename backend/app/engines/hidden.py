@@ -15,8 +15,6 @@ HIDDEN_CITY_WARNINGS = [
     "This prototype does not provide legal or contractual advice.",
 ]
 
-MIN_HIDDEN_SAVING = 20.0
-
 
 @dataclass(frozen=True)
 class HiddenCityHit:
@@ -68,7 +66,11 @@ def hidden_city_savings(best_standard: float | None, through_price: float | None
     return round(best_standard - through_price, 2)
 
 
-def meaningful_saving(saving: float | None, floor: float = MIN_HIDDEN_SAVING) -> bool:
+def meaningful_saving(saving: float | None, floor: float | None = None) -> bool:
+    if floor is None:
+        from app.config import get_settings
+
+        floor = get_settings().min_hidden_saving
     return saving is not None and saving >= floor
 
 

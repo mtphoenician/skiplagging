@@ -39,6 +39,11 @@ class SearchQuery(BaseModel):
 
         return normalize_place_id(v)
 
+    @field_validator("currency")
+    @classmethod
+    def _usd_only(cls, v: str) -> str:
+        return "USD"
+
 
 class Country(BaseModel):
     iso2: str

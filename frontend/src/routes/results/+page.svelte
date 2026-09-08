@@ -133,10 +133,9 @@
   );
   // Page-level booker links always search the honest city pair A → B. The
   // hidden-city card carries its own links to the ticketed A → C trip.
-  const confirmIds = ['google-flights', 'kayak', 'skyscanner', 'booking-com', 'expedia'];
   const confirms = $derived.by(() => {
     if (!data) return [];
-    const fromApi = (data.bookers ?? []).filter((b) => confirmIds.includes(b.id));
+    const fromApi = (data.bookers ?? []).filter((b) => !b.id.startsWith('carrier-')).slice(0, 5);
     if (fromApi.length) return fromApi;
     return itineraryBookers(
       data.origin.iata,
@@ -184,20 +183,22 @@
   });
   const minPrice = $derived(Math.min(...allOffers.map((o) => o.price ?? Infinity)));
   const minDuration = $derived(Math.min(...allOffers.map((o) => o.duration_min || Infinity)));
-  function bestScore(o: Offer): number {
-    // Kayak-style blend: price, then time and stops as a mild penalty.
-    return (o.price ?? 1e9) + o.duration_min * 0.15 + o.stops * 20 + (o.kind === 'self-transfer' ? 40 : 0);
-  }
   const shown = $derived.by(() => {
     const rows = allOffers.filter((o) => maxStops < 0 || o.stops <= maxStops);
     const by: Record<typeof sort, (a: Offer, b: Offer) => number> = {
       cheapest: (a, b) => (a.price ?? 1e9) - (b.price ?? 1e9) || a.duration_min - b.duration_min,
       fastest: (a, b) => a.duration_min - b.duration_min || (a.price ?? 1e9) - (b.price ?? 1e9),
-      best: (a, b) => bestScore(a) - bestScore(b)
+      best: (a, b) => a.stops - b.stops || (a.price ?? 1e9) - (b.price ?? 1e9) || a.duration_min - b.duration_min
     };
     return [...rows].sort(by[sort]);
   });
-  const bestId = $derived(allOffers.length ? [...allOffers].sort((a, b) => bestScore(a) - bestScore(b))[0].id : '');
+  const bestId = $derived(
+    allOffers.length
+      ? [...allOffers].sort(
+          (a, b) => a.stops - b.stops || (a.price ?? 1e9) - (b.price ?? 1e9) || a.duration_min - b.duration_min
+        )[0].id
+      : ''
+  );
   const stopCounts = $derived({
     nonstop: allOffers.filter((o) => o.stops === 0).length,
     one: allOffers.filter((o) => o.stops <= 1).length

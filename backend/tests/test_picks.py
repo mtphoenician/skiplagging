@@ -173,13 +173,14 @@ def test_pick_same_price_prefers_shorter_layover():
     assert pick.layover_min == 60
 
 
-def test_pick_ignores_other_currency_amounts():
+def test_pick_converts_foreign_currency_to_usd():
     usd = _offer("n1", 400, [_seg("LHR", "JFK", "2026-10-22T08:00", "2026-10-22T11:00")], 0)
     gbp = _offer("n2", 80, [_seg("LHR", "JFK", "2026-10-22T09:00", "2026-10-22T12:00")], 0, currency="GBP")
     pick = pick_honest([usd, gbp], [])
     assert pick is not None
+    assert pick.offer.id == "n2"
     assert pick.offer.currency == "USD"
-    assert pick.offer.id == "n1"
+    assert pick.offer.price is not None and pick.offer.price < 400
 
 
 def test_pick_uses_requested_currency_when_present():
@@ -187,7 +188,7 @@ def test_pick_uses_requested_currency_when_present():
     gbp = _offer("n2", 80, [_seg("LHR", "JFK", "2026-10-22T09:00", "2026-10-22T12:00")], 0, currency="GBP")
     pick = pick_honest([usd, gbp], [], preferred="USD")
     assert pick is not None
-    assert pick.offer.id == "n1"
+    assert pick.offer.id == "n2"
     assert pick.offer.currency == "USD"
 
 
@@ -214,7 +215,7 @@ def test_hidden_only_when_cheaper_than_honest_pick():
     assert pick_honest([], []) is None
 
 
-def test_hidden_not_shown_when_currency_differs():
+def test_hidden_shown_when_converted_price_is_cheaper():
     honest = pick_honest(
         [_offer("n1", 300, [_seg("LHR", "BOS", "2026-10-22T08:00", "2026-10-22T11:00")], 0)],
         [],
@@ -229,7 +230,25 @@ def test_hidden_not_shown_when_currency_differs():
         1,
         currency="GBP",
     )
-    assert _hidden_if_cheaper([_match("m1", gbp_through, honest.offer, 220)], honest) is None
+    assert _hidden_if_cheaper([_match("m1", gbp_through, honest.offer, 220)], honest) is not None
+
+
+def test_hidden_not_shown_when_converted_price_is_not_cheaper():
+    honest = pick_honest(
+        [_offer("n1", 300, [_seg("LHR", "BOS", "2026-10-22T08:00", "2026-10-22T11:00")], 0)],
+        [],
+    )
+    gbp_through = _offer(
+        "h1",
+        800,
+        [
+            _seg("LHR", "BOS", "2026-10-22T08:00", "2026-10-22T11:00", "BA9"),
+            _seg("BOS", "JFK", "2026-10-22T12:00", "2026-10-22T13:00", "BA10"),
+        ],
+        1,
+        currency="GBP",
+    )
+    assert _hidden_if_cheaper([_match("m1", gbp_through, honest.offer, -500)], honest) is None
 
 
 def test_via_b_allows_any_intermediate_stop():

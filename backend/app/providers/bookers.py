@@ -5,6 +5,7 @@ from urllib.parse import quote
 
 from app.metros import METROS
 from app.models import BookerLink
+from app.providers.sandbox import TEST_CARRIERS
 
 
 def _varint(n: int) -> bytes:
@@ -291,7 +292,7 @@ def booker_links(
     google = google_flights_url(o, d, date, ccy, adults, cabin_u)
     for iata, name in airlines or []:
         iata = iata.upper()
-        if len(iata) < 2 or iata in {"ZZ", "XX", "YY"}:
+        if len(iata) < 2 or iata in TEST_CARRIERS:
             continue
         links.append(
             BookerLink(

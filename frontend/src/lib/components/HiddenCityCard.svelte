@@ -37,7 +37,7 @@
       if (r.offer) quoted = r.offer;
       refreshNote =
         r.offer?.price != null
-          ? `Still a hidden-city ticket via ${getOff}. Fresh price ${r.offer.price} ${r.offer.currency}.`
+          ? `Still a hidden-city ticket via ${getOff}. Fresh price ${money(r.offer.price, r.offer.currency)}.`
           : 'Still available.';
     } catch (e) {
       refreshNote = e instanceof Error ? e.message : 'Refresh failed';
@@ -80,7 +80,7 @@
       </div>
       {#if match.bookers?.length}
         <div class="book-row" style="margin-top:12px">
-          {#each match.bookers.filter((b) => ['google-flights', 'kayak', 'skyscanner', 'booking-com', 'expedia'].includes(b.id)).slice(0, 5) as b}
+          {#each match.bookers.filter((b) => !b.id.startsWith('carrier-')).slice(0, 5) as b}
             <a class="book-btn" href={b.url} target="_blank" rel="noreferrer">{b.name}</a>
           {/each}
         </div>
@@ -88,8 +88,8 @@
     </div>
     <div class="price">
       <span class="price-was">{money(match.local_offer.price, match.currency)}</span>
-      {money(shownPrice, match.currency)}
-      <small>Save {money(shownSaving, match.currency)}</small>
+      {money(shownPrice, t.currency || match.currency)}
+      <small>Save {money(shownSaving, t.currency || match.currency)}</small>
       <button class="ghost recheck" type="button" onclick={onRefresh} disabled={checking}>
         {checking ? 'Checking…' : 'Recheck this ticket'}
       </button>

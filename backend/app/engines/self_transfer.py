@@ -18,61 +18,11 @@ from app.models import Offer, SeparateTicket
 MIN_TRANSFER_MIN = 150
 MAX_TRANSFER_MIN = 22 * 60
 
-# Long-haul change-of-plane cities. OpenFlights overlap ranks them per search.
-WORLD_HUBS = (
-    "DXB", "DOH", "AUH", "SHJ", "IST", "SIN", "KUL", "DPS", "BKK", "HKG",
-    "SYD", "MEL", "FRA", "CDG", "LHR", "AMS", "ICN", "NRT", "LAX", "JFK",
-)
-
-HUB_REGION = {
-    "DXB": "gulf",
-    "DOH": "gulf",
-    "AUH": "gulf",
-    "SHJ": "gulf",
-    "IST": "tr",
-    "SIN": "asean",
-    "KUL": "asean",
-    "DPS": "asean",
-    "BKK": "asean",
-    "HKG": "ea",
-    "ICN": "ea",
-    "NRT": "ea",
-    "SYD": "oc",
-    "MEL": "oc",
-    "FRA": "eu",
-    "CDG": "eu",
-    "LHR": "eu",
-    "AMS": "eu",
-    "LAX": "na",
-    "JFK": "na",
-}
-
-OCEANIA = {
-    "CBR", "SYD", "MEL", "BNE", "PER", "ADL", "OOL", "HBA", "CNS", "AKL", "CHC", "WLG",
-}
-
-# Deep pass: extra A→H1 + H1→H2 + H2→B stitches (Kayak's KUL + DPS self-transfers).
-BRIDGE_PAIRS = (("KUL", "DPS"), ("KUL", "SYD"), ("SIN", "SYD"), ("SIN", "DPS"))
-
-
-def preferred_hubs(origin: str, dest: str) -> list[str]:
-    dest_u, origin_u = dest.upper(), origin.upper()
-    if dest_u in OCEANIA:
-        return ["KUL", "SIN", "DPS", "SYD", "MEL", "DXB", "DOH", "SHJ"]
-    if origin_u in OCEANIA:
-        return ["SIN", "KUL", "DXB", "DOH", "LHR"]
-    return list(WORLD_HUBS)
-
-
-def bridge_pairs(hubs: list[str], dest: str, limit: int = 2) -> list[tuple[str, str]]:
-    """Only Oceania long-haul needs a 3-ticket bridge (KUL→DPS). No fallback mid-leg."""
-    chosen = {h.upper() for h in hubs}
-    wanted: list[tuple[str, str]] = []
-    if dest.upper() in OCEANIA:
-        for a, b in BRIDGE_PAIRS:
-            if a in chosen and b in chosen and a != b:
-                wanted.append((a, b))
-    return wanted[:limit]
+# Combined self-transfer: 5 flights is already a long day. A 6th is almost
+# never cheaper than a simpler 2-ticket stitch, and barely sold as inventory.
+MAX_SELF_FLIGHTS = 5
+# One coupon: Duffel tops out at 2 connections (3 flights). Longer legs are rare.
+MAX_LEG_FLIGHTS = 3
 
 
 def next_day(date: str) -> str:
@@ -93,45 +43,80 @@ def connection_minutes(arr: str, dep: str) -> int | None:
     return gap
 
 
+def bridge_pairs(
+    hubs: list[str],
+    from_origin: set[str] | None = None,
+    into_dest: set[str] | None = None,
+    limit: int = 2,
+) -> list[tuple[str, str]]:
+    """3-ticket H1→H2 only when no shared hub can do A→H + H→B.
+
+    H1 is a city the origin already flies to; H2 is a city that already flies
+    to B. No fixed KUL/DPS list — the OpenFlights overlap for this search is
+    the geography.
+    """
+    if limit <= 0:
+        return []
+    chosen = [h.upper() for h in hubs if len(h) == 3]
+    from_u = {c.upper() for c in (from_origin or set())}
+    into_u = {c.upper() for c in (into_dest or set())}
+    if not from_u or not into_u:
+        return []
+    if any(h in from_u and h in into_u for h in chosen):
+        return []
+    lefts = [h for h in chosen if h in from_u]
+    rights = [h for h in chosen if h in into_u]
+    out: list[tuple[str, str]] = []
+    for h1 in lefts:
+        for h2 in rights:
+            if h1 != h2:
+                out.append((h1, h2))
+            if len(out) >= limit:
+                return out
+    return out
+
+
 def pick_transfer_hubs(
     origin: str,
     dest: str,
     from_origin: set[str],
     into_dest: set[str],
     limit: int = 4,
+    extra_hubs: list[str] | None = None,
+    continents: dict[str, str] | None = None,
 ) -> list[str]:
+    """Rank change-of-plane cities from route overlap, then globally busy airports."""
     if limit <= 0:
         return []
     origin_u, dest_u = origin.upper(), dest.upper()
     exclude = {origin_u, dest_u}
-    from_u = {c.upper() for c in from_origin}
-    into_u = {c.upper() for c in into_dest}
-    preferred = preferred_hubs(origin_u, dest_u)
-    ranked: list[tuple[int, int, int, str]] = []
+    from_u = {c.upper() for c in from_origin} - exclude
+    into_u = {c.upper() for c in into_dest} - exclude
+    extra = [h.upper() for h in (extra_hubs or []) if len(h) == 3 and h not in exclude]
+    extra_rank = {h: i for i, h in enumerate(extra)}
     seen: set[str] = set()
-    pool = preferred + list(WORLD_HUBS) + sorted(from_u | into_u)
-    for hub in pool:
-        h = hub.upper()
-        if len(h) != 3 or h in exclude or h in seen:
+    ranked: list[tuple[int, int, str]] = []
+    for hub in [*from_u, *into_u, *extra]:
+        if hub in seen or len(hub) != 3:
             continue
-        seen.add(h)
-        pref = preferred.index(h) if h in preferred else 80
-        overlap = int(h in from_u) + int(h in into_u)
-        world = 0 if h in WORLD_HUBS else 1
-        ranked.append((pref, -overlap, world, h))
+        seen.add(hub)
+        overlap = int(hub in from_u) + int(hub in into_u)
+        ranked.append((-overlap, extra_rank.get(hub, 80), hub))
     ranked.sort()
+    origin_c = (continents or {}).get(origin_u, "")
+    dest_c = (continents or {}).get(dest_u, "")
+    region_cap = 3 if origin_c and dest_c and origin_c != dest_c else 2
     out: list[str] = []
     region_n: dict[str, int] = {}
-    region_cap = 3 if dest_u in OCEANIA else 2
-    for _, _, _, h in ranked:
-        region = HUB_REGION.get(h, h)
+    for _, _, h in ranked:
+        region = (continents or {}).get(h) or h
         if region_n.get(region, 0) >= region_cap:
             continue
         region_n[region] = region_n.get(region, 0) + 1
         out.append(h)
         if len(out) >= limit:
             return out
-    for _, _, _, h in ranked:
+    for _, _, h in ranked:
         if h not in out:
             out.append(h)
         if len(out) >= limit:
@@ -184,6 +169,8 @@ def stitch_chain(parts: list[Offer], intended: str | set[str]) -> Offer | None:
     if detect_hidden_city(last, dests):
         return None
     segments = [s for p in parts for s in p.segments]
+    if len(segments) > MAX_SELF_FLIGHTS:
+        return None
     first, last_seg = segments[0], segments[-1]
     door = connection_minutes(first.dep, last_seg.arr)
     carriers = []
@@ -241,7 +228,7 @@ def combine_at_hubs(
     out: list[Offer] = []
 
     def cheapest(offers: list[Offer], n: int = 4) -> list[Offer]:
-        return sorted(offers, key=lambda o: (o.price or 1e12, o.duration_min, o.stops))[:n]
+        return sorted(offers, key=lambda o: (o.stops, o.price or 1e12, o.duration_min))[:n]
 
     for hub, lefts in inbound.items():
         rights = outbound.get(hub) or []
@@ -257,7 +244,14 @@ def combine_at_hubs(
                     joined = stitch_chain([left, mid, right], intended)
                     if joined:
                         out.append(joined)
-    out.sort(key=lambda o: (o.price or 1e12, o.duration_min, o.stops))
+    out.sort(
+        key=lambda o: (
+            o.price or 1e12,
+            len(o.segments),
+            len(o.separate_tickets),
+            o.duration_min,
+        )
+    )
     seen: set[str] = set()
     uniq: list[Offer] = []
     for offer in out:
@@ -266,6 +260,18 @@ def combine_at_hubs(
             continue
         seen.add(key)
         uniq.append(offer)
-        if len(uniq) >= limit:
-            break
-    return uniq
+    twos = [o for o in uniq if len(o.separate_tickets) <= 2]
+    threes = [o for o in uniq if len(o.separate_tickets) >= 3]
+    best_two = min((o.price or 1e12) for o in twos) if twos else None
+    if best_two is not None:
+        threes = [o for o in threes if (o.price or 1e12) < best_two]
+    ranked = sorted(
+        [*twos, *threes],
+        key=lambda o: (
+            o.price or 1e12,
+            len(o.segments),
+            len(o.separate_tickets),
+            o.duration_min,
+        ),
+    )
+    return ranked[:limit]

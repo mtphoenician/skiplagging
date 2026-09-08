@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from statistics import median
 
 from app.engines.hidden import detect_hidden_city, itinerary_fingerprint, ticketed_destination
+from app.fx import offers_in_usd, to_usd
 from app.models import Offer
 
 MAX_SAVINGS_KEPT = 200
@@ -106,7 +107,11 @@ def build_batch(
     probe_b = (probe_intended or sorted(intended_set)[0]).upper()[:3] if intended_set else ""
     probed_u = {p.upper() for p in probed}
 
-    priced = [o for o in offers if o.price is not None and o.segments]
+    if honest_price is not None:
+        honest_price = to_usd(honest_price, honest_currency or "USD")
+        honest_currency = "USD" if honest_price is not None else None
+
+    priced = [o for o in offers_in_usd(offers) if o.price is not None and o.segments]
     for offer in priced:
         first, last = offer.segments[0], offer.segments[-1]
         if first.origin.upper() not in origin_set:

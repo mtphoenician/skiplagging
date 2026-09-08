@@ -1,15 +1,15 @@
 """CandidateGenerator: which ticketed destinations C are worth a paid shop for A→B?
 
 The naive plan shops A→every airport. We rank C by what our own database has
-learned and shop only the top few. Bootstrap hubs are a cold-start hint, not a
-schedule; observed A→B→C tickets outweigh them as soon as we have any.
+learned and shop only the top few. OpenFlights B→C spokes are a cold-start hint,
+not a schedule; observed A→B→C tickets outweigh them as soon as we have any.
 
 candidateScore =
       0.30 × historical_connection_probability   (A→C tickets that route via B)
     + 0.25 × historical_savings_probability      (…and undercut the honest A→B)
     + 0.20 × expected_savings                    (median saving % of A→B, clipped)
     + 0.10 × freshness                           (how recently that happened)
-    + 0.10 × carrier_hub_probability             (B→C exists on a hub list / route map)
+    + 0.10 × carrier_hub_probability             (OpenFlights published B→C)
     + 0.05 × provider_success_rate               (our suppliers actually answer A→C)
 """
 
@@ -18,18 +18,6 @@ from __future__ import annotations
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-
-HUB_ONWARD: dict[str, list[str]] = {
-    "ORD": ["DEN", "SEA", "SFO", "LAX", "PHX", "LAS", "MSP", "MCI", "OMA"],
-    "DFW": ["LAX", "SFO", "PHX", "LAS", "AUS", "SAT", "DEN"],
-    "ATL": ["MCO", "TPA", "FLL", "MIA", "MSY", "DFW", "IAH"],
-    "CLT": ["ATL", "MIA", "TPA", "ORD", "DFW"],
-    "DEN": ["SEA", "SFO", "LAX", "PHX", "ORD"],
-    "LHR": ["JFK", "EWR", "BOS", "ORD", "DXB", "SIN"],
-    "CDG": ["JFK", "BOS", "ATL", "DXB"],
-    "FRA": ["JFK", "ORD", "SFO", "LAX"],
-    "AMS": ["JFK", "BOS", "ORD"],
-}
 
 WEIGHTS = {
     "connection": 0.30,
@@ -121,13 +109,11 @@ def is_dead(stat: RouteStat | None) -> bool:
 
 
 def hub_probabilities(intended: list[str] | set[str], route_map: dict[str, set[str]] | None = None) -> dict[str, float]:
-    """carrier_hub_probability per C: 1.0 on the bootstrap list, 0.6 on the historical route map."""
+    """1.0 when OpenFlights published a historical B→C nonstop; else 0. Not a schedule."""
     out: dict[str, float] = defaultdict(float)
     for b in intended:
-        for c in HUB_ONWARD.get(b.upper(), []):
-            out[c.upper()] = max(out[c.upper()], 1.0)
         for c in (route_map or {}).get(b.upper(), set()):
-            out[c.upper()] = max(out[c.upper()], 0.6)
+            out[c.upper()] = 1.0
     return dict(out)
 
 
@@ -263,7 +249,7 @@ def candidates_beyond(
     limit: int,
     extra: list[str] | None = None,
 ) -> list[str]:
-    """Cold-start order with no database: observed this process, then extra, then hubs."""
+    """Cold-start order with no database: observed this process, then caller extras."""
     intended_u = {code.upper() for code in intended}
     origin_u = origin.upper()
     seen = {origin_u, *intended_u}
@@ -283,8 +269,6 @@ def candidates_beyond(
     ]
     push(observed)
     push(list(extra or []))
-    for dest in intended:
-        push(HUB_ONWARD.get(dest.upper(), []))
     return ranked[:limit]
 
 

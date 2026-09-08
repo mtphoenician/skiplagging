@@ -7,7 +7,7 @@ from typing import Any
 import httpx
 
 from app.config import Settings
-from app.models import Offer, Segment
+from app.models import Cabin, Offer, Segment
 from app.providers.base import ShopRequest
 
 # Duffel's documented ceiling is 2. Omitting the field defaults to 1, which
@@ -18,6 +18,9 @@ DUFFEL_MAX_CONNECTIONS = 2
 
 def offer_request_body(req: ShopRequest) -> dict:
     connections = 0 if req.nonstop else DUFFEL_MAX_CONNECTIONS
+    # Duffel has no offer-request currency field. Quotes arrive in the org
+    # billing currency, or the airline's currency for IATA agencies. The
+    # shop layer converts every amount to USD before ranking.
     return {
         "data": {
             "slices": [
@@ -80,6 +83,62 @@ class DuffelProvider:
             if len(offers) >= req.max_offers:
                 break
         return offers
+
+    async def get_offer(self, offer_id: str, *, cabin: Cabin = "ECONOMY", currency: str = "USD") -> Offer | None:
+        """Live re-fetch of one Duffel offer. Price is current; itinerary may still expire."""
+        oid = offer_id.removeprefix("duffel-")
+        if not oid:
+            return None
+        headers = {
+            "Authorization": f"Bearer {self._s.duffel_token}",
+            "Duffel-Version": "v2",
+            "Accept": "application/json",
+        }
+        r = await self._client.get(
+            f"https://api.duffel.com/air/offers/{oid}",
+            headers=headers,
+            timeout=20.0,
+        )
+        if r.status_code >= 400:
+            return None
+        raw = (r.json() or {}).get("data") or {}
+        if not raw:
+            return None
+        dummy = ShopRequest(origin="AAA", dest="BBB", date="2099-01-01", cabin=cabin, currency=currency)
+        try:
+            parsed = _one(raw, dummy, datetime.now(timezone.utc).isoformat(timespec="seconds"))
+        except (TypeError, ValueError, KeyError):
+            return None
+        return parsed
+
+    async def refresh_offer(self, offer: Offer) -> Offer | None:
+        """GET the stored offer id, else re-shop the ticketed city-pair and match the path."""
+        from app.engines.hidden import itinerary_fingerprint
+
+        fresh = await self.get_offer(offer.id, cabin=offer.cabin, currency="USD")
+        if fresh is not None and fresh.live is not False:
+            return fresh
+        if not offer.segments:
+            return None
+        first, last = offer.segments[0], offer.segments[-1]
+        date = (first.dep or "")[:10]
+        if not date:
+            return None
+        req = ShopRequest(
+            origin=first.origin,
+            dest=last.dest,
+            date=date,
+            adults=1,
+            cabin=offer.cabin,
+            currency="USD",
+            nonstop=len(offer.segments) == 1,
+            max_offers=20,
+        )
+        want = itinerary_fingerprint(offer)
+        for candidate in await self.shop(req):
+            if itinerary_fingerprint(candidate) == want:
+                return candidate
+        return None
 
 
 def _one(raw: dict[str, Any], req: ShopRequest, now: str) -> Offer | None:

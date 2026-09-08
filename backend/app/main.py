@@ -13,6 +13,7 @@ from app.config import get_settings
 from app.db import repo
 from app.db.session import init_db, session_factory
 from app.engines.candidates import graph_snapshot
+from app.engines.refresh import refresh_priced_offer
 from app.engines.hidden import detect_hidden_city, refresh_keeps_hidden_city
 from app.engines.shop import search_all_ways
 from app.models import (
@@ -26,7 +27,6 @@ from app.models import (
     SearchQuery,
     SearchResponse,
 )
-from app.providers.mock import MockProvider
 from app.providers.aerodatabox import AeroDataBoxProvider
 from app.providers.opensky import OpenSkyProvider
 
@@ -251,14 +251,15 @@ async def search_expand(body: SearchExpandRequest) -> SearchResponse:
 
 @app.post("/offers/refresh", response_model=OfferRefreshResponse)
 async def refresh_offer(body: OfferRefreshRequest) -> OfferRefreshResponse:
-    mock = MockProvider()
-    fresh = await mock.refresh_offer(body.offer)
+    fresh = await refresh_priced_offer(body.offer, app.state.settings, app.state.http)
     if fresh is None:
-        return OfferRefreshResponse(
-            offer=None,
-            valid=False,
-            reason="Booking integration not configured for this provider. Confirm the fare on the booker link.",
+        configured = body.offer.source != "duffel" or app.state.settings.duffel_enabled
+        reason = (
+            "Could not re-fetch this fare from the supplier. Confirm it on a booker."
+            if configured
+            else "Duffel is not configured. Confirm the fare on the booker link."
         )
+        return OfferRefreshResponse(offer=None, valid=False, reason=reason)
     intended = body.intended_destination
     if detect_hidden_city(body.offer, intended):
         if not refresh_keeps_hidden_city(body.offer, fresh, intended):
@@ -267,6 +268,8 @@ async def refresh_offer(body: OfferRefreshRequest) -> OfferRefreshResponse:
                 valid=False,
                 reason="Refreshed itinerary no longer passes through the intended city.",
             )
+        if body.offer.kind == "hidden-city" and fresh.kind != "hidden-city":
+            fresh = fresh.model_copy(update={"kind": "hidden-city"})
     return OfferRefreshResponse(offer=fresh, valid=True, reason="")
 
 

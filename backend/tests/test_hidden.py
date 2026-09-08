@@ -154,6 +154,8 @@ async def test_mock_refresh_reprices_den_and_rejects_moved_hub():
 
 
 def test_refresh_endpoint_matches_mock_contract():
+    from unittest.mock import AsyncMock, patch
+
     from fastapi.testclient import TestClient
 
     from app.main import app
@@ -175,13 +177,16 @@ def test_refresh_endpoint_matches_mock_contract():
         ).json()
         assert dead["valid"] is False
         assert "intended city" in dead["reason"]
-        other = client.post(
-            "/offers/refresh",
-            json={
-                "offer": den.model_copy(update={"id": "duffel-x", "source": "duffel"}).model_dump(),
-                "intended_destination": "ORD",
-            },
-        ).json()
+        with patch("app.engines.refresh.DuffelProvider") as cls:
+            inst = cls.return_value
+            inst.refresh_offer = AsyncMock(return_value=None)
+            other = client.post(
+                "/offers/refresh",
+                json={
+                    "offer": den.model_copy(update={"id": "duffel-x", "source": "duffel"}).model_dump(),
+                    "intended_destination": "ORD",
+                },
+            ).json()
         assert other["valid"] is False
         assert other["offer"] is None
 

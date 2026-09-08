@@ -37,10 +37,10 @@
         <li>Optionally price nearby airports when the city pair is thin.</li>
         <li>Find cities C that historically connect from B, then learn from tickets we actually priced.</li>
         <li>Price complete A→C trips and keep those that stop at your city B on the way.</li>
-        <li>Show a hidden-city fare only when that through-ticket is cheaper than the cheapest honest A→B, in the same currency.</li>
+        <li>Show a hidden-city fare only when that through-ticket is cheaper than the cheapest honest A→B, after converting every quote to USD.</li>
         <li>
           Separately, stitch independently priced A→H and H→B tickets into a self-transfer row when the layover is long
-          enough. That is not hidden-city: you are going to B, on two or three tickets.
+          enough and the combined trip is at most five flights. That is not hidden-city: you are going to B, on two or three tickets.
         </li>
       </ol>
     </section>

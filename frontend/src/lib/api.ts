@@ -186,41 +186,11 @@ export function duration(min: number): string {
   return h ? (m ? `${h}h ${m}m` : `${h}h`) : `${m}m`;
 }
 
-const AIRLINES: Record<string, string> = {
-  AA: 'American Airlines',
-  AF: 'Air France',
-  AZ: 'ITA Airways',
-  BA: 'British Airways',
-  D8: 'Norwegian',
-  DE: 'Condor',
-  DL: 'Delta',
-  DY: 'Norwegian',
-  EK: 'Emirates',
-  FR: 'Ryanair',
-  GR: 'Aurigny',
-  HR: 'Hahn Air',
-  IB: 'Iberia',
-  KL: 'KLM',
-  LH: 'Lufthansa',
-  LX: 'Swiss',
-  QR: 'Qatar Airways',
-  TK: 'Turkish Airlines',
-  UA: 'United',
-  U2: 'easyJet',
-  UX: 'Air Europa',
-  VS: 'Virgin Atlantic',
-  VA: 'Virgin Australia',
-  AK: 'AirAsia',
-  G9: 'Air Arabia',
-  QF: 'Qantas',
-  WN: 'Southwest'
-};
-
 export function airlineName(code: string | null | undefined, names: Record<string, string> = {}): string {
   if (!code) return '';
   const id = code.toUpperCase();
   if (id === 'ZZ' || id === 'XX' || id === 'YY') return 'Duffel Airways (test)';
-  return names[id] || AIRLINES[id] || id;
+  return names[id] || id;
 }
 
 function varint(n: number | bigint): number[] {

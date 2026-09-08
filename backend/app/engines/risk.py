@@ -81,7 +81,7 @@ def assess(
             label="Questioning, repricing, or refusal",
             severity="medium" if not international else "high",
             predictability="low",
-            why="American, Delta and Lufthansa materials allow cancellation, repricing, refusal of carriage or fare-difference collection when point-beyond practices are detected.",
+            why="Carrier contracts of carriage may allow cancellation, repricing, refusal of carriage or fare-difference collection when a passenger does not complete the ticketed itinerary.",
         )
     )
 

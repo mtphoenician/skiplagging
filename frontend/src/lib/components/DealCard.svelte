@@ -1,14 +1,12 @@
 <script lang="ts">
-  import { duration, itineraryBookers, money, timeRange } from '$lib/api';
+  import { duration, money, timeRange } from '$lib/api';
   import type { HiddenDeal } from '$lib/types';
 
   let { deal, compact = false }: { deal: HiddenDeal; compact?: boolean } = $props();
   const through = $derived(deal.through_offer);
   const getOff = $derived(deal.dest);
   const href = $derived(`/results?origin=${deal.origin}&destination=${deal.dest}&date=${deal.date}&nearby=0`);
-  const bookers = $derived(
-    itineraryBookers(deal.origin, deal.hidden_city, deal.date, 1, deal.currency).slice(0, 4)
-  );
+  const bookers = $derived((deal.bookers ?? []).filter((b) => !b.id.startsWith('carrier-')).slice(0, 4));
 </script>
 
 <article class="hc deal-card">

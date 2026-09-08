@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 from collections import defaultdict
+from datetime import date, timedelta
 
 import httpx
 
@@ -19,61 +20,11 @@ from app.providers.base import ShopRequest
 from app.providers.bookers import booker_links
 from app.providers.duffel import DuffelProvider
 
-# Duffel test documents these as returning shaped offers (connections / stops).
-SEED_PAIRS = (
-    ("LHR", "DXB"),
-    ("DXB", "AMS"),
-    ("LHR", "JFK"),
-    ("JFK", "LHR"),
-    ("LHR", "CDG"),
-    ("CDG", "JFK"),
-    ("CDG", "LHR"),
-    ("AMS", "JFK"),
-    ("FRA", "JFK"),
-    ("MAD", "JFK"),
-    ("FCO", "JFK"),
-    ("DUB", "JFK"),
-    ("BOS", "LHR"),
-    ("ORD", "LHR"),
-    ("LAX", "LHR"),
-    ("SFO", "LHR"),
-    ("MIA", "LHR"),
-    ("ATL", "LHR"),
-    ("DFW", "LHR"),
-    ("EWR", "LHR"),
-    ("LGW", "JFK"),
-    ("MAN", "JFK"),
-    ("BCN", "JFK"),
-    ("ZRH", "JFK"),
-    ("VIE", "JFK"),
-    ("CPH", "JFK"),
-    ("OSL", "JFK"),
-    ("ARN", "JFK"),
-    ("LIS", "JFK"),
-    ("ATH", "JFK"),
-    ("IST", "LHR"),
-    ("DXB", "LHR"),
-    ("DOH", "LHR"),
-    ("SIN", "LHR"),
-    ("HKG", "LHR"),
-    ("NRT", "LHR"),
-    ("HND", "LAX"),
-    ("SYD", "LAX"),
-    ("YYZ", "LHR"),
-    ("YVR", "LHR"),
-    ("MEX", "JFK"),
-    ("GRU", "JFK"),
-    ("BTS", "MRU"),
-)
 
-HUBS = (
-    "LHR", "LGW", "CDG", "AMS", "FRA", "MAD", "FCO", "DUB", "MUC", "ZRH",
-    "JFK", "EWR", "BOS", "ORD", "ATL", "DFW", "LAX", "SFO", "MIA", "IAD",
-    "DXB", "DOH", "IST", "SIN", "HKG", "NRT", "SYD", "YYZ",
-)
-
-SKIP_DESTS = {"STN"}  # Duffel test: STN→LHR is a forced timeout
-DEFAULT_DATES = ("2026-10-22", "2026-11-05", "2026-11-19")
+def _scan_dates() -> list[str]:
+    """A few weeks out so suppliers still hold inventory. Not a fixed calendar."""
+    today = date.today()
+    return [(today + timedelta(days=offset)).isoformat() for offset in (21, 35, 49)]
 
 
 def _cheapest_to(offers: list[Offer], dest: str) -> Offer | None:
@@ -104,11 +55,11 @@ async def _shop(
         return offers
 
 
-async def _dests_for(origin: str, extra: list[str], limit: int) -> list[str]:
+async def _dests_for(origin: str, extra: list[str], limit: int, skip: set[str]) -> list[str]:
     async with session_factory()() as session:
         spokes = [code for code, _, _ in await repo.destinations_from(session, origin, limit=limit)]
     out: list[str] = []
-    seen = {origin.upper(), *SKIP_DESTS}
+    seen = {origin.upper(), *skip}
     for code in [*extra, *spokes]:
         c = code.upper()
         if len(c) != 3 or c in seen:
@@ -127,7 +78,8 @@ async def discover_hidden_deals(
 ) -> dict:
     settings = get_settings()
     await init_db()
-    days = [day] if day else list(dates or DEFAULT_DATES)
+    days = [day] if day else list(dates or _scan_dates())
+    skip = settings.skip_dests
     if not settings.amadeus_enabled and not settings.duffel_enabled:
         return {"scanned": 0, "found_this_run": 0, "stored": 0, "errors": ["No shop keys"], "dates": days}
 
@@ -139,12 +91,13 @@ async def discover_hidden_deals(
     empty_shops = 0
     closest: list[tuple[float, str]] = []
     errors: list[str] = []
-    hubs = list(HUBS[:limit])
     extras_by_origin: dict[str, list[str]] = defaultdict(list)
-    for o, d in SEED_PAIRS:
-        extras_by_origin[o].append(d)
-        if o not in hubs:
-            hubs.append(o)
+    async with session_factory()() as session:
+        hubs = await repo.busiest_airports(session, limit=limit, exclude=skip)
+        for o in hubs:
+            extras_by_origin[o] = [
+                d for d, _, _ in await repo.destinations_from(session, o, limit=8) if d.upper() not in skip
+            ]
 
     sem = asyncio.Semaphore(max(2, min(settings.max_concurrency, 3)))
 
@@ -154,7 +107,7 @@ async def discover_hidden_deals(
         for date in days:
             print(f"\n===== {date} =====", flush=True)
             for origin in hubs:
-                dests = await _dests_for(origin, extras_by_origin.get(origin, []), dests_per_origin)
+                dests = await _dests_for(origin, extras_by_origin.get(origin, []), dests_per_origin, skip)
                 if not dests:
                     continue
                 scanned += 1
@@ -162,7 +115,7 @@ async def discover_hidden_deals(
                 by_dest: dict[str, list[Offer]] = {}
                 all_offers: list[Offer] = []
                 for dest in dests:
-                    req = ShopRequest(origin=origin, dest=dest, date=date, nonstop=False, max_offers=25)
+                    req = ShopRequest(origin=origin, dest=dest, date=date, nonstop=False, max_offers=25, currency="USD")
                     offers = await _shop(req, amadeus, duffel, sem)
                     shops += 1
                     if not offers:
@@ -178,13 +131,13 @@ async def discover_hidden_deals(
                     connecting_seen += 1
                     dest_b = offer.segments[0].dest.upper()
                     dest_c = offer.segments[-1].dest.upper()
-                    if dest_b in {origin, dest_c} or dest_b in SKIP_DESTS:
+                    if dest_b in {origin, dest_c} or dest_b in skip:
                         continue
                     if dest_b not in by_dest:
                         missing_b.add(dest_b)
 
                 for dest_b in sorted(missing_b)[:20]:
-                    req = ShopRequest(origin=origin, dest=dest_b, date=date, nonstop=False, max_offers=25)
+                    req = ShopRequest(origin=origin, dest=dest_b, date=date, nonstop=False, max_offers=25, currency="USD")
                     offers = await _shop(req, amadeus, duffel, sem)
                     shops += 1
                     if offers:

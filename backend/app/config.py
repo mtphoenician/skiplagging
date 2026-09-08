@@ -23,6 +23,8 @@ class Settings(BaseSettings):
     min_hidden_saving: float = 20.0
     max_provider_calls: int = 12
     cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
+    # Duffel sandbox hangs on some pairs (STN→LHR). Comma-separated IATA.
+    discover_skip_dests: str = "STN"
 
     model_config = SettingsConfigDict(
         env_file=("../.env", ".env"),
@@ -33,6 +35,10 @@ class Settings(BaseSettings):
     @property
     def origin_list(self) -> list[str]:
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
+
+    @property
+    def skip_dests(self) -> set[str]:
+        return {c.strip().upper() for c in self.discover_skip_dests.split(",") if c.strip()}
 
     @property
     def amadeus_enabled(self) -> bool:

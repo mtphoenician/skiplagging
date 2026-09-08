@@ -135,8 +135,9 @@ def test_ranking_prefers_learned_history_over_hub_list():
     )
     codes = [c.code for c in ranked]
     assert codes[:2] == ["DEN", "SEA"]
-    assert codes.index("PHX") < codes.index("MIA")  # unknown hub beats a known dud
-    assert codes.index("BOS") > codes.index("PHX")  # route-map hint is weaker than the hub list
+    bos = next(c for c in ranked if c.code == "BOS")
+    phx = next(c for c in ranked if c.code == "PHX")
+    assert bos.score > phx.score  # OpenFlights B→C outranks a code with no route-map evidence
     assert all(c.code not in {"JFK", "ORD"} for c in ranked)
 
 
@@ -224,9 +225,9 @@ def test_learner_counts_index_hits_without_double_counting_probes():
     assert den.observations == 1 and den.successful_connections == 1
 
 
-def test_learner_ignores_other_currency_and_offers_from_other_origins():
+def test_learner_converts_gbp_and_ignores_offers_from_other_origins():
     honest = _offer("aa", 240, [_seg("JFK", "ORD", "AA100", "AA")])
-    gbp = _offer("gbp", 100, [_seg("JFK", "ORD", "BA1", "BA"), _seg("ORD", "DEN", "BA2", "BA")], currency="GBP")
+    gbp = _offer("gbp", 80, [_seg("JFK", "ORD", "BA1", "BA"), _seg("ORD", "DEN", "BA2", "BA")], currency="GBP")
     other = _offer("ewr", 90, [_seg("EWR", "ORD", "UA9"), _seg("ORD", "DEN", "UA10")])
     batch = build_batch(
         [honest, gbp, other],
@@ -241,9 +242,10 @@ def test_learner_ignores_other_currency_and_offers_from_other_origins():
         now=NOW,
     )
     den = batch.stats[("JFK", "ORD", "DEN")]
-    assert den.successful_connections == 1 and den.cheaper_than_direct_count == 0  # £100 is not "cheaper" than $240
+    assert den.successful_connections == 1 and den.cheaper_than_direct_count == 1
     assert ("JFK", "ORD", "DEN") in batch.stats and ("EWR", "ORD", "DEN") not in batch.stats
     assert {f.offer_uid for f in batch.fares} == {"aa", "gbp"}
+    assert all(f.currency == "USD" for f in batch.fares)
 
 
 def test_savings_summary_keeps_history_bounded():
