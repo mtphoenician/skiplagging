@@ -90,18 +90,6 @@ SOURCES: list[SourceDef] = [
         can_track=False,
     ),
     SourceDef(
-        id="amadeus",
-        name="Amadeus Self-Service",
-        layer="priced-offer",
-        role="GDS shopping: Flight Offers Search returns priced itineraries (fare + tax + RBD). Flight Offers Price confirms. Flight Create Orders would create a PNR — this app does not call Create Orders.",
-        is_not="Not ADS-B. Test hostname is not production inventory. A search offer is not a ticket.",
-        freshness="Live shop if AMADEUS_CLIENT_ID/SECRET are set.",
-        url="https://developers.amadeus.com",
-        can_price=True,
-        can_book=False,
-        can_track=False,
-    ),
-    SourceDef(
         id="duffel",
         name="Duffel",
         layer="priced-offer",
@@ -344,8 +332,6 @@ def sources_payload(enabled: dict[str, bool]) -> list[dict]:
         )
         if s.id == "opensky":
             item["configured"] = True
-        if s.id == "amadeus":
-            item["configured"] = enabled.get("amadeus", False)
         if s.id == "duffel":
             item["configured"] = enabled.get("duffel", False)
         if s.id == "aerodatabox":

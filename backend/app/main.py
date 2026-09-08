@@ -72,8 +72,8 @@ async def health() -> dict:
         "ok": True,
         "database": "postgresql",
         "shop": {
-            "amadeus": s.amadeus_enabled,
             "duffel": s.duffel_enabled,
+            "duffel_live": s.duffel_live,
             "publish_deals": s.publish_deals,
         },
         "track": {"opensky": True, "aerodatabox": s.aerodatabox_enabled},
@@ -89,14 +89,13 @@ async def sources() -> dict:
             "reference — OurAirports countries/regions/airports/runways/navaids + GeoNames countryInfo",
             "historical-route-map — who used to fly B→C (OpenFlights, stale)",
             "schedule-status — FIDS board (AeroDataBox if keyed)",
-            "priced-offer — GDS/NDC shop (Amadeus/Duffel if keyed)",
+            "priced-offer — NDC shop (Duffel if keyed)",
             "order-pnr — not implemented; we never create a reservation",
             "live-track — ADS-B state vectors (OpenSky)",
             "meta-search / ota / airline-direct — booker deep-links only",
         ],
         "sources": sources_payload(
             {
-                "amadeus": s.amadeus_enabled,
                 "duffel": s.duffel_enabled,
                 "aerodatabox": s.aerodatabox_enabled,
             }
@@ -212,6 +211,7 @@ def _key(query: SearchQuery) -> tuple:
         query.include_nearby,
         False,
         query.currency,
+        query.return_date,
     )
 
 

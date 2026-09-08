@@ -37,6 +37,17 @@ def test_all_bookers_carry_route_and_date():
         assert "2026" in url or "261010" in url or "10Oct26" in url, sid
 
 
+def test_round_trip_bookers_use_return_date():
+    links = booker_links("JFK", "ORD", "2026-10-10", 1, return_date="2026-10-17")
+    by_id = {b.id: b.url for b in links}
+    assert google_tfs("JFK", "ORD", "2026-10-10", return_date="2026-10-17") in by_id["google-flights"]
+    assert "JFK-ORD/2026-10-10/2026-10-17" in by_id["kayak"]
+    assert "rtn=1" in by_id["skyscanner"]
+    assert "261017" in by_id["skyscanner"]
+    assert "trip=roundtrip" in by_id["expedia"]
+    assert "2026-10-17" in by_id["kiwi"]
+
+
 def test_stale_deal_google_hash_is_replaced_on_read():
     from app.db.repo import _deal_from_row
     from app.db.tables import HiddenDealRow
@@ -56,7 +67,7 @@ def test_stale_deal_google_hash_is_replaced_on_read():
         saving=70,
         saving_pct=29,
         first_flight="AA123",
-        source="amadeus",
+        source="",
         bookers=[
             {
                 "id": "google-flights",

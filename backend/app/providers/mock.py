@@ -125,12 +125,38 @@ def jfk_dfw_den(date: str) -> Offer:
     )
 
 
+def jfk_ord_roundtrip(date: str, return_date: str) -> Offer:
+    offer = _offer(
+        "mock-jfk-ord-roundtrip",
+        430,
+        [
+            _seg("JFK", "ORD", _t(date, "08:00"), _t(date, "10:15"), "AA100", "AA", 135),
+            _seg("ORD", "JFK", _t(return_date, "18:00"), _t(return_date, "21:15"), "AA101", "AA", 135),
+        ],
+        date,
+    )
+    return offer.model_copy(
+        update={
+            "kind": "nonstop",
+            "stops": 0,
+            "return_date": return_date,
+            "outbound_end": 0,
+            "duration_min": 270,
+            "note": "Mock round-trip fixture. Hidden-city is one-way only.",
+        }
+    )
+
+
 class MockProvider:
     name = "mock"
 
     async def shop(self, req: ShopRequest) -> list[Offer]:
         origin, dest = req.origin.upper(), req.dest.upper()
         date = req.date
+        if req.return_date:
+            if origin == "JFK" and dest in {"ORD", "CHI", "MDW"}:
+                return [jfk_ord_roundtrip(date, req.return_date)]
+            return []
         if origin == "JFK" and dest in {"ORD", "CHI", "MDW"}:
             return [jfk_ord_nonstop(date), jfk_ord_den(date), jfk_ord_sea(date), jfk_dfw_lax(date)]
         if origin == "JFK" and dest == "DEN":

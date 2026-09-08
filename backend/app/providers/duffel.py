@@ -11,25 +11,33 @@ from app.models import Cabin, Offer, Segment
 from app.providers.base import ShopRequest
 
 # Duffel's documented ceiling is 2. Omitting the field defaults to 1, which
-# never returns two-stop tickets. We do not apply a tighter product cap;
-# if Amadeus (or anyone) returns three connections, we still classify them.
+# never returns two-stop tickets. We still classify a longer ticket if one arrives.
 DUFFEL_MAX_CONNECTIONS = 2
 
 
 def offer_request_body(req: ShopRequest) -> dict:
     connections = 0 if req.nonstop else DUFFEL_MAX_CONNECTIONS
+    slices = [
+        {
+            "origin": req.origin,
+            "destination": req.dest,
+            "departure_date": req.date,
+        }
+    ]
+    if req.return_date:
+        slices.append(
+            {
+                "origin": req.dest,
+                "destination": req.origin,
+                "departure_date": req.return_date,
+            }
+        )
     # Duffel has no offer-request currency field. Quotes arrive in the org
     # billing currency, or the airline's currency for IATA agencies. The
     # shop layer converts every amount to USD before ranking.
     return {
         "data": {
-            "slices": [
-                {
-                    "origin": req.origin,
-                    "destination": req.dest,
-                    "departure_date": req.date,
-                }
-            ],
+            "slices": slices,
             "passengers": [{"type": "adult"} for _ in range(req.adults)],
             "cabin_class": req.cabin.lower().replace("premium_economy", "premium_economy"),
             "max_connections": connections,
@@ -113,26 +121,28 @@ class DuffelProvider:
 
     async def refresh_offer(self, offer: Offer) -> Offer | None:
         """GET the stored offer id, else re-shop the ticketed city-pair and match the path."""
-        from app.engines.hidden import itinerary_fingerprint
+        from app.engines.hidden import itinerary_fingerprint, ticketed_destination
 
         fresh = await self.get_offer(offer.id, cabin=offer.cabin, currency="USD")
         if fresh is not None and fresh.live is not False:
             return fresh
         if not offer.segments:
             return None
-        first, last = offer.segments[0], offer.segments[-1]
+        first = offer.segments[0]
         date = (first.dep or "")[:10]
         if not date:
             return None
+        outbound_n = (offer.outbound_end + 1) if offer.outbound_end is not None else len(offer.segments)
         req = ShopRequest(
             origin=first.origin,
-            dest=last.dest,
+            dest=ticketed_destination(offer) or offer.segments[-1].dest,
             date=date,
             adults=1,
             cabin=offer.cabin,
             currency="USD",
-            nonstop=len(offer.segments) == 1,
+            nonstop=outbound_n == 1,
             max_offers=20,
+            return_date=offer.return_date,
         )
         want = itinerary_fingerprint(offer)
         for candidate in await self.shop(req):
@@ -145,35 +155,44 @@ def _one(raw: dict[str, Any], req: ShopRequest, now: str) -> Offer | None:
     slices = raw.get("slices") or []
     if not slices:
         return None
-    segs_raw = slices[0].get("segments") or []
-    if not segs_raw:
-        return None
-    segments = []
-    for s in segs_raw:
-        origin = (s.get("origin") or {}).get("iata_code") or ""
-        dest = (s.get("destination") or {}).get("iata_code") or ""
-        mkt = s.get("marketing_carrier") or {}
-        op = s.get("operating_carrier") or {}
-        segments.append(
-            Segment(
-                origin=origin,
-                dest=dest,
-                carrier=mkt.get("iata_code") or "XX",
-                operating_carrier=op.get("iata_code"),
-                flight_number=f"{mkt.get('iata_code', 'XX')}{s.get('marketing_carrier_flight_number', '')}",
-                dep=s.get("departing_at") or "",
-                arr=s.get("arriving_at") or "",
-                duration_min=_dur(s.get("duration")),
-                rbd="",
-                aircraft=(s.get("aircraft") or {}).get("iata_code") or "",
+    segments: list[Segment] = []
+    outbound_end = -1
+    total_mins = 0
+    for slice_i, sl in enumerate(slices):
+        segs_raw = sl.get("segments") or []
+        if not segs_raw:
+            return None
+        for s in segs_raw:
+            origin = (s.get("origin") or {}).get("iata_code") or ""
+            dest = (s.get("destination") or {}).get("iata_code") or ""
+            mkt = s.get("marketing_carrier") or {}
+            op = s.get("operating_carrier") or {}
+            segments.append(
+                Segment(
+                    origin=origin,
+                    dest=dest,
+                    carrier=mkt.get("iata_code") or "XX",
+                    operating_carrier=op.get("iata_code"),
+                    flight_number=f"{mkt.get('iata_code', 'XX')}{s.get('marketing_carrier_flight_number', '')}",
+                    dep=s.get("departing_at") or "",
+                    arr=s.get("arriving_at") or "",
+                    duration_min=_dur(s.get("duration")),
+                    rbd="",
+                    aircraft=(s.get("aircraft") or {}).get("iata_code") or "",
+                )
             )
-        )
+        if slice_i == 0:
+            outbound_end = len(segments) - 1
+        total_mins += _dur(sl.get("duration"))
+    if not segments or outbound_end < 0:
+        return None
     owner = (raw.get("owner") or {}).get("iata_code") or segments[0].carrier
     live = bool(raw.get("live_mode"))
-    slice_mins = _dur(slices[0].get("duration"))
+    outbound_n = outbound_end + 1
+    ret = req.return_date if len(slices) > 1 else None
     return Offer(
         id=f"duffel-{raw.get('id', '')}",
-        kind="nonstop" if len(segments) == 1 else "connecting",
+        kind="nonstop" if outbound_n == 1 else "connecting",
         channel="ndc",
         source="duffel",
         layer="priced-offer",
@@ -188,12 +207,14 @@ def _one(raw: dict[str, Any], req: ShopRequest, now: str) -> Offer | None:
         validating_airline=owner,
         refundable=False,
         carrier=segments[0].carrier,
-        duration_min=slice_mins or sum(s.duration_min for s in segments),
-        stops=max(len(segments) - 1, 0),
+        duration_min=total_mins or sum(s.duration_min for s in segments),
+        stops=max(outbound_n - 1, 0),
         first_flight=segments[0].flight_number,
         retrieved_at=now,
         expires_at=raw.get("expires_at"),
         live=live,
+        return_date=ret,
+        outbound_end=outbound_end,
         note=(
             "Duffel offer. live_mode="
             + str(live)

@@ -4,7 +4,7 @@
   import OfferCard from '$lib/components/OfferCard.svelte';
   import SearchForm from '$lib/components/SearchForm.svelte';
   import TrafficPanel from '$lib/components/TrafficPanel.svelte';
-  import { duration, expandSearch, itineraryBookers, mergeSearch, money, searchFares } from '$lib/api';
+  import { duration, expandSearch, itineraryBookers, mergeSearch, money, outboundDest, searchFares } from '$lib/api';
   import type { Cabin, Offer, SearchQuery, SearchResponse } from '$lib/types';
 
   const params = $derived(page.url.searchParams);
@@ -21,6 +21,7 @@
   let origin = $state('');
   let destination = $state('');
   let date = $state('');
+  let return_date = $state('');
   let adults = $state(1);
   let cabin = $state<Cabin>('ECONOMY');
   let include_nearby = $state(true);
@@ -29,6 +30,7 @@
     const o = (params.get('origin') || '').toUpperCase();
     const d = (params.get('destination') || '').toUpperCase();
     const dt = params.get('date') || '';
+    const ret = params.get('return') || '';
     const ad = Number(params.get('adults') || 1);
     const cb = (params.get('cabin') || 'ECONOMY') as Cabin;
     const near = params.get('nearby') !== '0';
@@ -36,6 +38,7 @@
     origin = o;
     destination = d;
     date = dt;
+    return_date = ret;
     adults = ad;
     cabin = cb;
     include_nearby = near;
@@ -57,6 +60,7 @@
       origin: o,
       destination: d,
       date: dt,
+      return_date: ret || null,
       adults: ad,
       cabin: cb,
       currency: 'USD',
@@ -121,6 +125,10 @@
 
   const names = $derived(data?.airline_names ?? {});
   const noShop = $derived(Boolean(data && data.cheapest_any == null && data.data_gaps.length));
+  const sandboxGap = $derived(
+    data?.data_gaps.find((g) => g.includes('sandbox') || g.includes('duffel_test')) || ''
+  );
+  const roundTrip = $derived(Boolean(data?.query.return_date));
   const lists = $derived(data?.channels.filter((c) => c.kind !== 'hidden-city') ?? []);
   const listedCount = $derived(lists.reduce((n, c) => n + c.offers.length, 0));
   const hiddenList = $derived(data?.hidden_city ?? []);
@@ -143,7 +151,8 @@
       data.query.date,
       data.query.adults,
       data.honest_pick?.offer.currency || data.query.currency,
-      data.query.cabin
+      data.query.cabin,
+      data.query.return_date
     );
   });
   const confirmNote = $derived(
@@ -211,10 +220,10 @@
 
   function cities(offer: Offer): { fromCity: string; toCity: string } {
     if (!data) return { fromCity: '', toCity: '' };
-    const last = offer.segments[offer.segments.length - 1];
+    const dest = outboundDest(offer);
     return {
       fromCity: offer.segments[0]?.origin === data.origin.iata ? data.origin.city : '',
-      toCity: last?.dest === data.destination.iata ? data.destination.city : ''
+      toCity: dest === data.destination.iata ? data.destination.city : ''
     };
   }
 </script>
@@ -229,6 +238,7 @@
     bind:origin
     bind:destination
     bind:date
+    bind:return_date
     bind:adults
     bind:cabin
     bind:include_nearby
@@ -244,12 +254,14 @@
       <p class="meta">
         {data.origin.type === 'city' ? `${data.origin.city} (all)` : data.origin.iata}–{data.destination.type === 'city'
           ? `${data.destination.city} (all)`
-          : data.destination.iata} · {data.query.date}
+          : data.destination.iata} · {data.query.date}{data.query.return_date ? `–${data.query.return_date}` : ''}
         · {data.query.adults} adult{data.query.adults === 1 ? '' : 's'}
       </p>
     </header>
 
-    {#if noShop}
+    {#if sandboxGap}
+      <p class="banner">{sandboxGap}</p>
+    {:else if noShop}
       <p class="banner">
         No fare-shop keys are configured, so this app cannot price a ticket.
       </p>
@@ -337,7 +349,7 @@
     {#if !data.honest_pick && !data.best_pick && !data.hidden_if_cheaper && !showSelf && !listedCount}
       <p class="empty">
         {noShop
-          ? 'No priced flights here — this app is not connected to a fare shop.'
+          ? sandboxGap || 'No priced flights here — this app is not connected to a fare shop.'
           : 'No priced flight on this city pair for that date. Try another date or nearby airports.'}
       </p>
     {/if}
@@ -406,14 +418,22 @@
       {/if}
     {:else if tab === 'hidden'}
       <p class="note">
-        A cheaper ticket that continues past your city. You would get off at your stop. Airlines prohibit this.
+        {#if roundTrip}
+          Hidden-city is one-way only. This search is comparing honest round-trip tickets.
+        {:else}
+          A cheaper ticket that continues past your city. You would get off at your stop. Airlines prohibit this.
+        {/if}
       </p>
       {#if hiddenList.length}
         {#each hiddenList as match}
           <HiddenCityCard {match} names={names} />
         {/each}
       {:else}
-        <p class="empty">No through-ticket cheaper than the cheapest honest fare on this date.</p>
+        <p class="empty">
+          {roundTrip
+            ? 'No hidden-city row on a round-trip search.'
+            : 'No through-ticket cheaper than the cheapest honest fare on this date.'}
+        </p>
       {/if}
     {:else if tab === 'live'}
       <TrafficPanel traffic={data.traffic_origin} label={data.origin.city} />

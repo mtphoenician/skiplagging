@@ -41,4 +41,4 @@ def is_live_fare(offer: Offer) -> bool:
         return False
     if (offer.source or "").lower() == "duffel":
         return offer.live is True
-    return True
+    return False

@@ -15,7 +15,6 @@ from app.db.session import init_db, session_factory
 from app.engines.risk import attach_risk
 from app.engines.shop import _drop_sandbox, _priced_in_currency, _shop_providers, layover_minutes
 from app.models import Offer
-from app.providers.amadeus import AmadeusProvider
 from app.providers.base import ShopRequest
 from app.providers.bookers import booker_links
 from app.providers.duffel import DuffelProvider
@@ -42,13 +41,12 @@ def _cheapest_to(offers: list[Offer], dest: str) -> Offer | None:
 
 async def _shop(
     req: ShopRequest,
-    amadeus: AmadeusProvider | None,
     duffel: DuffelProvider | None,
     sem: asyncio.Semaphore,
 ) -> list[Offer]:
     async with sem:
         try:
-            offers = await _shop_providers(req, amadeus, duffel, purpose="discover")
+            offers = await _shop_providers(req, duffel, purpose="discover")
         except Exception as exc:
             print(f"  shop error {req.origin}->{req.dest} {req.date}: {exc}", flush=True)
             return []
@@ -81,16 +79,15 @@ async def discover_hidden_deals(
     await init_db()
     days = [day] if day else list(dates or _scan_dates())
     skip = settings.skip_dests
-    if not settings.amadeus_enabled and not settings.duffel_enabled:
-        return {"scanned": 0, "found_this_run": 0, "stored": 0, "errors": ["No shop keys"], "dates": days}
+    if not settings.duffel_enabled:
+        return {"scanned": 0, "found_this_run": 0, "stored": 0, "errors": ["No Duffel token"], "dates": days}
     if not settings.publish_deals:
         return {
             "scanned": 0,
             "found_this_run": 0,
             "stored": 0,
             "errors": [
-                "Need a Duffel live token (duffel_live_…) or Amadeus production to publish deals. "
-                "Test inventory is not saved."
+                "Need a Duffel live token (duffel_live_…) to publish deals. Test inventory is not saved."
             ],
             "dates": days,
         }
@@ -114,7 +111,6 @@ async def discover_hidden_deals(
     sem = asyncio.Semaphore(max(2, min(settings.max_concurrency, 3)))
 
     async with httpx.AsyncClient(timeout=httpx.Timeout(45.0, connect=10.0)) as client:
-        amadeus = AmadeusProvider(settings, client) if settings.amadeus_enabled else None
         duffel = DuffelProvider(settings, client) if settings.duffel_enabled else None
         for date in days:
             print(f"\n===== {date} =====", flush=True)
@@ -128,7 +124,7 @@ async def discover_hidden_deals(
                 all_offers: list[Offer] = []
                 for dest in dests:
                     req = ShopRequest(origin=origin, dest=dest, date=date, nonstop=False, max_offers=25, currency="USD")
-                    offers = await _shop(req, amadeus, duffel, sem)
+                    offers = await _shop(req, duffel, sem)
                     shops += 1
                     if not offers:
                         empty_shops += 1
@@ -150,7 +146,7 @@ async def discover_hidden_deals(
 
                 for dest_b in sorted(missing_b)[:20]:
                     req = ShopRequest(origin=origin, dest=dest_b, date=date, nonstop=False, max_offers=25, currency="USD")
-                    offers = await _shop(req, amadeus, duffel, sem)
+                    offers = await _shop(req, duffel, sem)
                     shops += 1
                     if offers:
                         by_dest[dest_b] = offers

@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 
 from app.models import Offer
 
-Purpose = str  # "direct" | "expand" | "nearby" | "discover"
+Purpose = str  # "direct" | "expand" | "nearby" | "discover" | "interline"
 
 
 @dataclass(slots=True)
@@ -34,6 +34,8 @@ class ProviderCall:
 @dataclass
 class Ledger:
     cost_per_call: float = 0.005
+    max_paid: int = 12
+    reserved: int = 0
     calls: list[ProviderCall] = field(default_factory=list)
 
     @property
@@ -43,12 +45,26 @@ class Ledger:
     def paid(self) -> list[ProviderCall]:
         return [c for c in self.calls if c.cost_usd > 0]
 
+    def remaining(self) -> int:
+        return max(0, self.max_paid - len(self.paid()) - self.reserved)
+
+    def reserve(self, n: int = 1) -> bool:
+        if n <= 0:
+            return True
+        if self.remaining() < n:
+            return False
+        self.reserved += n
+        return True
+
+    def release_reserve(self, n: int = 1) -> None:
+        self.reserved = max(0, self.reserved - n)
+
 
 _LEDGER: ContextVar[Ledger | None] = ContextVar("search_ledger", default=None)
 
 
-def start_ledger(cost_per_call: float) -> Ledger:
-    ledger = Ledger(cost_per_call=cost_per_call)
+def start_ledger(cost_per_call: float, max_paid: int = 12) -> Ledger:
+    ledger = Ledger(cost_per_call=cost_per_call, max_paid=max_paid)
     _LEDGER.set(ledger)
     return ledger
 
@@ -69,6 +85,13 @@ async def timed_shop(
     coro: Awaitable[list[Offer]],
 ) -> list[Offer]:
     """Await a provider shop, record it in the current ledger, never raise."""
+    ledger = _LEDGER.get()
+    paid = provider not in FREE_PROVIDERS
+    if paid and ledger is not None and not ledger.reserve():
+        close = getattr(coro, "close", None)
+        if close:
+            close()
+        return []
     t0 = time.perf_counter()
     ok = True
     offers: list[Offer] = []
@@ -79,7 +102,9 @@ async def timed_shop(
     except Exception:
         ok = False
         offers = []
-    ledger = _LEDGER.get()
+    finally:
+        if paid and ledger is not None:
+            ledger.release_reserve()
     if ledger is not None:
         ledger.calls.append(
             ProviderCall(

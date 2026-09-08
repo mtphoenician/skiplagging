@@ -248,7 +248,7 @@ def test_health_and_defaults_and_search(client: TestClient):
     assert data["bookers"]
     assert all("aa.com" not in b["url"] for b in data["bookers"])
     assert data["connection_hints"]
-    assert all(h["source"] in {"openflights-routes", "amadeus"} for h in data["connection_hints"])
+    assert all(h["source"] in {"openflights-routes"} for h in data["connection_hints"])
     assert data["search_id"]
 
 

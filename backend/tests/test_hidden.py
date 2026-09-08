@@ -12,8 +12,10 @@ from app.engines.hidden import (
     itinerary_fingerprint,
     meaningful_saving,
     refresh_keeps_hidden_city,
+    ticketed_destination,
 )
 from app.engines.shop import _classify_hidden
+from app.providers.base import ShopRequest
 from app.providers.mock import MockProvider, jfk_dfw_den, jfk_dfw_lax, jfk_ord_den, jfk_ord_nonstop, jfk_ord_sea
 
 
@@ -99,7 +101,7 @@ def test_hidden_when_intended_is_the_third_stop():
         id="three-stop-exit-b",
         kind="connecting",
         channel="gds",
-        source="amadeus",
+        source="duffel",
         segments=[
             seg("JFK", "CLT", "UA1"),
             seg("CLT", "ATL", "UA2"),
@@ -128,6 +130,42 @@ def test_hidden_when_intended_is_the_third_stop():
 def test_rejected_when_path_misses_intended():
     assert detect_hidden_city(jfk_dfw_lax("2026-10-10"), "ORD") is None
     assert not is_standard_to(jfk_dfw_lax("2026-10-10"), "ORD")
+
+
+def test_round_trip_is_never_hidden_city():
+    through = jfk_ord_den("2026-10-10").model_copy(update={"return_date": "2026-10-17", "outbound_end": 1})
+    assert detect_hidden_city(through, "ORD") is None
+
+
+def test_ticketed_destination_uses_outbound_on_round_trip():
+    offer = jfk_ord_nonstop("2026-10-10").model_copy(
+        update={
+            "return_date": "2026-10-17",
+            "outbound_end": 0,
+            "segments": [
+                *jfk_ord_nonstop("2026-10-10").segments,
+                jfk_ord_nonstop("2026-10-10").segments[0].model_copy(
+                    update={"origin": "ORD", "dest": "JFK", "dep": "2026-10-17T18:00", "arr": "2026-10-17T21:00"}
+                ),
+            ],
+        }
+    )
+    assert ticketed_destination(offer) == "ORD"
+    assert is_standard_to(offer, "ORD")
+
+
+@pytest.mark.asyncio
+async def test_mock_round_trip_is_honest_only():
+    mock = MockProvider()
+    req = ShopRequest(origin="JFK", dest="ORD", date="2026-10-10", return_date="2026-10-17")
+    offers = await mock.shop(req)
+    assert len(offers) == 1
+    offer = offers[0]
+    assert offer.return_date == "2026-10-17"
+    assert offer.outbound_end == 0
+    assert ticketed_destination(offer) == "ORD"
+    assert detect_hidden_city(offer, "ORD") is None
+    assert offer.stops == 0
 
 
 def test_refresh_invalid_when_connection_moves():

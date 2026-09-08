@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta, timezone
 
 from app.engines.budget import Ledger, provider_score, timed_shop, start_ledger
@@ -276,6 +277,35 @@ async def test_ledger_records_paid_calls_and_free_mock(anyio_backend="asyncio"):
     assert ledger.total_cost == 0.01
     failed = next(c for c in ledger.calls if c.dest == "SEA")
     assert failed.ok is False and failed.offers == 0
+
+
+async def test_ledger_caps_paid_calls(anyio_backend="asyncio"):
+    ledger = start_ledger(0.005, max_paid=1)
+
+    async def ok():
+        return [_offer("x", 1, [_seg("JFK", "ORD", "AA1", "AA")])]
+
+    first = await timed_shop("duffel", "JFK", "DEN", "2026-10-10", "expand", ok())
+    second = await timed_shop("duffel", "JFK", "SEA", "2026-10-10", "expand", ok())
+    assert len(first) == 1
+    assert second == []
+    assert len(ledger.paid()) == 1
+
+
+async def test_ledger_caps_concurrent_paid_calls(anyio_backend="asyncio"):
+    ledger = start_ledger(0.005, max_paid=2)
+
+    async def ok():
+        await asyncio.sleep(0.02)
+        return [_offer("x", 1, [_seg("JFK", "ORD", "AA1", "AA")])]
+
+    parts = await asyncio.gather(
+        timed_shop("duffel", "JFK", "AAA", "2026-10-10", "direct", ok()),
+        timed_shop("duffel", "JFK", "BBB", "2026-10-10", "direct", ok()),
+        timed_shop("duffel", "JFK", "CCC", "2026-10-10", "direct", ok()),
+    )
+    assert sum(1 for part in parts if part) == 2
+    assert len(ledger.paid()) == 2
 
 
 def test_provider_score_rewards_hits_and_penalises_latency():

@@ -18,5 +18,6 @@ def search_key(
     nearby: bool,
     live: bool,
     currency: str = "USD",
+    return_date: str | None = None,
 ) -> tuple:
-    return (origin.upper(), dest.upper(), date, adults, cabin, nearby, live, "USD", "v8")
+    return (origin.upper(), dest.upper(), date, return_date or "", adults, cabin, nearby, live, "USD", "v9")

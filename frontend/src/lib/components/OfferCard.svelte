@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { airlineName, duration, hm, itineraryBookers, money, plusDays, stopovers } from '$lib/api';
+  import { airlineName, duration, hm, itineraryBookers, money, outboundEndIndex, plusDays, stopovers } from '$lib/api';
   import type { Cabin, Offer } from '$lib/types';
 
   let {
@@ -29,8 +29,11 @@
   } = $props();
 
   const first = $derived(offer.segments[0]);
-  const last = $derived(offer.segments[offer.segments.length - 1]);
-  const days = $derived(first && last ? plusDays(first.dep, last.arr) : '');
+  const outEnd = $derived(outboundEndIndex(offer));
+  const destSeg = $derived(offer.segments[outEnd]);
+  const outboundSegs = $derived(offer.segments.slice(0, outEnd + 1));
+  const inboundSegs = $derived(offer.segments.slice(outEnd + 1));
+  const days = $derived(first && destSeg ? plusDays(first.dep, destSeg.arr) : '');
   const waits = $derived(stopovers(offer));
   const isSelf = $derived(offer.kind === 'self-transfer');
   const carriers = $derived.by(() => {
@@ -44,18 +47,19 @@
   const fromLabel = $derived(
     first ? (fromCity ? `${first.origin} ${fromCity}` : first.origin) : ''
   );
-  const toLabel = $derived(last ? (toCity ? `${last.dest} ${toCity}` : last.dest) : '');
+  const toLabel = $derived(destSeg ? (toCity ? `${destSeg.dest} ${toCity}` : destSeg.dest) : '');
   const tickets = $derived(offer.separate_tickets ?? []);
 </script>
 
 <article class="offer" class:pick={featured}>
   <div class="row">
     <div class="offer-main">
-      {#if isSelf || cheapest || fastest || best || tag}
+      {#if isSelf || cheapest || fastest || best || tag || offer.return_date}
         <div class="chips">
           {#if cheapest}<span class="chip good">Cheapest</span>{/if}
           {#if best}<span class="chip good">Best</span>{/if}
           {#if fastest}<span class="chip">Fastest</span>{/if}
+          {#if offer.return_date}<span class="chip">Round trip</span>{/if}
           {#if isSelf}<span class="chip hot">Self-transfer hack</span>{/if}
           {#if tag}<span class="chip">{tag}</span>{/if}
         </div>
@@ -63,9 +67,9 @@
       {#if carriers.length}
         <p class="airline-name">{carriers.join(', ')}</p>
       {/if}
-      {#if first && last}
+      {#if first && destSeg}
         <p class="flight-times">
-          {hm(first.dep)} – {hm(last.arr)}{#if days}<sup class="day-plus">{days}</sup>{/if}
+          {hm(first.dep)} – {hm(destSeg.arr)}{#if days}<sup class="day-plus">{days}</sup>{/if}
         </p>
       {/if}
       <p class="flight-path">{fromLabel} – {toLabel}</p>
@@ -83,7 +87,15 @@
           {/each}
         </div>
         <div class="legs flights">
-          {#each offer.segments as s}
+          {#each outboundSegs as s}
+            <span>{s.flight_number} {s.origin}→{s.dest} {hm(s.dep)}–{hm(s.arr)}</span>
+          {/each}
+        </div>
+      {/if}
+      {#if inboundSegs.length}
+        <p class="stops-count">Return {offer.return_date}</p>
+        <div class="legs flights">
+          {#each inboundSegs as s}
             <span>{s.flight_number} {s.origin}→{s.dest} {hm(s.dep)}–{hm(s.arr)}</span>
           {/each}
         </div>

@@ -113,7 +113,7 @@
   </div>
 
   <p class="note anatomy-note">
-    Prices appear only from Amadeus or Duffel. Without those keys, we still send you to Google Flights and Kayak. This
+    Prices appear only from Duffel. Without a live token, we still send you to Google Flights and Kayak. This
     page does not analyse court cases or tell anyone how to avoid airline review.
   </p>
 </div>

@@ -399,7 +399,7 @@ h3 {
 .search-grid {
   --label-block: calc(0.75rem * 1.5 + 6px);
   display: grid;
-  grid-template-columns: 1fr auto 1fr 0.85fr 0.7fr auto;
+  grid-template-columns: 1fr auto 1fr 0.75fr 0.75fr 0.65fr auto;
   gap: 10px;
   align-items: start;
 }
@@ -411,7 +411,7 @@ h3 {
 }
 
 .search-card.compact .search-grid {
-  grid-template-columns: 1fr auto 1fr 0.75fr 0.65fr auto;
+  grid-template-columns: 1fr auto 1fr 0.7fr 0.7fr 0.6fr auto;
 }
 
 @media (max-width: 860px) {
@@ -420,8 +420,9 @@ h3 {
     grid-template-columns: 1fr 42px 1fr;
   }
 
-  .span-date {
-    grid-column: 1;
+  .span-date,
+  .span-return {
+    grid-column: 1 / -1;
   }
 
   .span-cabin {

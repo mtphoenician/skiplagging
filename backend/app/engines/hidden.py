@@ -32,6 +32,9 @@ def _intended_set(intended: str | set[str]) -> set[str]:
 def ticketed_destination(offer: Offer) -> str:
     if not offer.segments:
         return ""
+    if offer.return_date and offer.outbound_end is not None:
+        idx = min(max(offer.outbound_end, 0), len(offer.segments) - 1)
+        return offer.segments[idx].dest.upper()
     return offer.segments[-1].dest.upper()
 
 
@@ -39,7 +42,10 @@ def detect_hidden_city(offer: Offer, intended: str | set[str]) -> HiddenCityHit 
     """A hidden-city candidate is a complete ticket that continues past the intended stop.
 
     The priced itinerary is never rewritten into a fake A→B fare.
+    Round-trip tickets are never hidden-city — that only works as a one-way.
     """
+    if offer.return_date:
+        return None
     segs = offer.segments
     if len(segs) < 2:
         return None

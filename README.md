@@ -8,17 +8,17 @@ Hidden-city fare discovery with a **PostgreSQL** airport/route database and laye
 | Historical route map | Who used to publish A→B | Current schedule or inventory | [OpenFlights](https://openflights.org/data.php) (~2014–2017, stale) |
 | Live track | Transponder state (ADS-B/MLAT/…) | A ticket or a future flight | [OpenSky](https://opensky-network.org) + FR24 / FlightAware links |
 | Schedule / FIDS | Scheduled, estimated, actual board | A fare or ADS-B | [AeroDataBox](https://aerodatabox.com) if `RAPIDAPI_KEY` |
-| Priced offer | Shopped itinerary + tax + RBD | A PNR | [Amadeus](https://developers.amadeus.com) GDS and/or [Duffel](https://duffel.com/docs) NDC |
+| Priced offer | Shopped itinerary + tax + RBD | A PNR | [Duffel](https://duffel.com/docs) NDC |
 | Booker | Outbound search URL | A reservation this app created | Google Flights, Kayak, Skyscanner (meta); Expedia (OTA); airline.com |
 | Order / PNR | Reservation + coupons | — | **Not implemented.** We never call Create Orders. |
 
 Hidden-city rows are **complete priced tickets** that continue past the intended city (ticketed `C`, intended stop `B`). The engine never rewrites `A→B→C` into a fake `A→B` fare, and never prices a hidden-city trip by adding `P(A,B)+P(B,C)`.
 
-Offers are stored and indexed by **ticketed destination and connection airports**. A later search for A→B can reuse a previously shopped A→B→C ticket and skip shopping C again. Fresh A→B results in the offer index skip a live shop; cheaper hidden-city already on hand skips destination expansion. Live traffic never blocks priced results. Sources are partner adapters only (mock, Duffel, Amadeus) — this app does not collect airline websites. OpenFlights spokes are **connection hints**, not savings. Duffel is asked for up to **2 connections** (the most their API accepts). We never drop a longer ticket if Amadeus returns one; hidden-city is “ticketed C, get off at B”, not “exactly one stop”.
+Offers are stored and indexed by **ticketed destination and connection airports**. A later search for A→B can reuse a previously shopped A→B→C ticket and skip shopping C again. Fresh unexpired A→B results in the offer index skip a live shop; cheaper hidden-city already on hand skips destination expansion. Live traffic never blocks priced results. Sources are partner adapters only (mock, Duffel) — this app does not collect airline websites. OpenFlights spokes are **connection hints**, not savings. Duffel is asked for up to **2 connections** (the most their API accepts). Hidden-city is “ticketed C, get off at B”, not “exactly one stop”. Round-trip searches compare honest return tickets; hidden-city stays one-way.
 
 ## Buy the fares, build the search
 
-The supplier (Duffel/Amadeus) is asked only for ordinary A→C offers. Everything that decides *which* C to pay for, and what we learn from the answer, is ours:
+The supplier (Duffel) is asked only for ordinary A→C offers. Everything that decides *which* C to pay for, and what we learn from the answer, is ours:
 
 | Module | Where | What it owns |
 | --- | --- | --- |
@@ -70,11 +70,9 @@ Copy `.env.example` to `.env`. `MOCK_ENABLED` defaults on. Search **JFK → ORD*
 - Hidden city JFK→ORD→SEA **$185**
 - JFK→DFW→LAX is rejected (does not pass through ORD)
 
-Without Amadeus/Duffel keys, other city pairs stay empty except those mock fixtures. Live shops never invent segment-sum prices.
+Without a Duffel token, other city pairs stay empty except those mock fixtures. Live shops never invent segment-sum prices.
 
 ```
-AMADEUS_CLIENT_ID=
-AMADEUS_CLIENT_SECRET=
 DUFFEL_TOKEN=
 RAPIDAPI_KEY=
 ```

@@ -21,6 +21,7 @@ from app.engines.candidates import (
     record_offer,
     select_candidates,
 )
+from app.engines.expiry import offer_unexpired, unexpired
 from app.engines.hidden import (
     detect_hidden_city,
     hidden_city_savings,
@@ -53,7 +54,6 @@ from app.models import (
     SearchResponse,
 )
 from app.providers.aerodatabox import AeroDataBoxProvider
-from app.providers.amadeus import AmadeusProvider
 from app.providers.base import ShopRequest
 from app.providers.bookers import booker_links
 from app.providers.duffel import DuffelProvider
@@ -76,7 +76,7 @@ async def search_all_ways(
     """Two-speed search. `fast`: index + direct A→B + top candidates, return quickly.
     `deep`: reuse the index, shop the remaining ranked candidates, return the fuller set."""
     t0 = time.perf_counter()
-    ledger = start_ledger(settings.search_cost_usd)
+    ledger = start_ledger(settings.search_cost_usd, settings.max_provider_calls)
     origin, dest = query.origin, query.destination
     query = query.model_copy(update={"currency": "USD"})
 
@@ -89,11 +89,11 @@ async def search_all_ways(
     if _same_place(o_ap, d_ap):
         raise ValueError("Origin and destination must differ.")
 
-    amadeus = AmadeusProvider(settings, client) if settings.amadeus_enabled else None
     duffel = DuffelProvider(settings, client) if settings.duffel_enabled else None
     mock = MockProvider() if settings.mock_enabled else None
     opensky = OpenSkyProvider(settings, client)
     box = AeroDataBoxProvider(settings, client) if settings.aerodatabox_enabled else None
+    round_trip = bool(query.return_date)
 
     o_tokens = shop_tokens(o_ap)
     d_tokens = shop_tokens(d_ap)
@@ -111,6 +111,7 @@ async def search_all_ways(
         cabin=query.cabin,
         currency="USD",
         max_offers=20,
+        return_date=query.return_date,
     )
 
     indexed: list[Offer] = []
@@ -125,7 +126,11 @@ async def search_all_ways(
         )
     except Exception:
         indexed = []
-    indexed = [o for o in offers_in_usd(indexed) if not _is_self_transfer(o)]
+    indexed = [o for o in offers_in_usd(indexed) if not _is_self_transfer(o) and offer_unexpired(o)]
+    if query.return_date:
+        indexed = [o for o in indexed if o.return_date == query.return_date]
+    else:
+        indexed = [o for o in indexed if not o.return_date]
     indexed_honest = [
         o
         for o in indexed
@@ -146,7 +151,7 @@ async def search_all_ways(
         shop_local = await _shop_mock_only(req, o_ap, d_ap, mock)
     else:
         gathered = await asyncio.gather(
-            _shop_place(req, o_ap, d_ap, amadeus, duffel, mock),
+            _shop_place(req, o_ap, d_ap, duffel, mock),
             _capped(opensky.traffic_near(o_ap), SIDE_TIMEOUT),
             _capped(opensky.traffic_near(d_ap), SIDE_TIMEOUT),
             _capped(box.board((o_ap.members or [o_ap.iata])[0], "Departure"), SIDE_TIMEOUT)
@@ -177,11 +182,12 @@ async def search_all_ways(
     if (
         query.include_nearby
         and not city_search
-        and (amadeus or duffel)
+        and duffel
         and len(priced) < 3
+        and not round_trip
     ):
         nearby_offers = await _shop_nearby(
-            req, query, session, amadeus, duffel, o_members, d_members, mock
+            req, query, session, duffel, o_members, d_members, mock
         )
         nearby_offers = [
             o for o in _dedupe(nearby_offers) if not _on_route(o, route_origins, route_dests)
@@ -202,7 +208,7 @@ async def search_all_ways(
 
     rejected: list[str] = []
     hidden_from_local: list[HiddenCityMatch] = []
-    if honest_pick:
+    if honest_pick and not round_trip:
         hidden_from_local, rejected = _classify_hidden(
             raw_local, route_dests, honest_pick.offer, o_ap, settings.min_hidden_saving
         )
@@ -214,17 +220,16 @@ async def search_all_ways(
     covered = ticketed_dests_through(raw_local, route_dests)
     skipped = sorted(covered)
     excluded = {c.upper() for c in (exclude or [])} | covered
-    can_shop = bool(amadeus or duffel or mock)
+    can_shop = bool(duffel or mock) and not round_trip
     self_transfer_offers: list[Offer] = []
     transfer_legs: list[Offer] = []
     mock_covered = bool(mock and any(o.source == "mock" for o in priced))
-    if (amadeus or duffel) and not mock_covered:
+    if duffel and not mock_covered and not round_trip:
         try:
             self_transfer_offers, transfer_legs = await _shop_self_transfers(
                 req,
                 settings,
                 session,
-                amadeus,
                 duffel,
                 o_ap,
                 d_ap,
@@ -239,7 +244,7 @@ async def search_all_ways(
         budget = settings.fast_candidates if mode == "fast" else settings.max_hidden_candidates
         try:
             ranked = await _plan_candidates(
-                session, settings, route_origins, route_dests, d_members, amadeus
+                session, settings, route_origins, route_dests, d_members
             )
         except Exception:
             ranked = []
@@ -274,7 +279,6 @@ async def search_all_ways(
                 extra, probe_offers = await _probe_candidates(
                     req,
                     settings,
-                    amadeus,
                     duffel,
                     mock,
                     o_ap,
@@ -351,8 +355,8 @@ async def search_all_ways(
         await session.rollback()
     hidden_if_cheaper = _hidden_if_cheaper(hidden_matches, honest_pick)
     search_debug = SearchDebug(
-        providers=[p for p, on in (("mock", mock), ("duffel", duffel), ("amadeus", amadeus)) if on],
-        standard_query=f"{req.origin}→{req.dest}",
+        providers=[p for p, on in (("mock", mock), ("duffel", duffel)) if on],
+        standard_query=f"{req.origin}→{req.dest}" + (f"→{req.origin}" if round_trip else ""),
         mode=mode,
         expanded_destinations=expanded,
         pending_candidates=pending,
@@ -363,7 +367,7 @@ async def search_all_ways(
         reused_from_index=len(indexed),
         rejected=rejected[:24],
         cache=_cache_state(indexed, shop_local),
-        pending_self_transfer=bool((amadeus or duffel) and not mock_covered and mode == "fast"),
+        pending_self_transfer=bool(duffel and not mock_covered and not round_trip and mode == "fast"),
     )
     compare_ccy = honest_pick.offer.currency if honest_pick else None
     local_cmp = [o for o in priced if compare_ccy is None or o.currency == compare_ccy]
@@ -399,6 +403,7 @@ async def search_all_ways(
         airline_pairs[:6],
         currency=book_ccy,
         cabin=query.cabin,
+        return_date=query.return_date,
     )
     ticketed_aps = await repo.airports_by_iata(
         session,
@@ -421,7 +426,7 @@ async def search_all_ways(
         ticketed_ap = ticketed_aps.get(ticketed)
         if ticketed_ap:
             match.hidden_city_name = f"{ticketed_ap.city} ({ticketed})"
-    if hidden_matches:
+    if hidden_matches and not round_trip:
         await repo.persist_hidden_deals(
             session,
             hidden_matches,
@@ -487,8 +492,6 @@ async def search_all_ways(
         "despegar",
         "skiplagged-com",
     ]
-    if amadeus:
-        sources_used.append("amadeus")
     if duffel:
         sources_used.append("duffel")
     if mock:
@@ -514,14 +517,14 @@ async def search_all_ways(
             aircraft=[],
             trackers=[],
         )
-    gaps = _gaps(amadeus, duffel, box, priced, hidden_matches, traffic_o, board, mock)
+    gaps = _gaps(settings, duffel, box, priced, hidden_matches, traffic_o, board, mock, round_trip)
     notes = [
         "Reference / track / schedule / priced-offer / booker are different layers. A tracker is not a ticket. A metasearch link is not a PNR.",
         "Ranking: this is a price comparator first. Cheapest regular ticket, then the best (fewest stops) and fastest. Self-transfer and hidden-city rows are additions shown only when they cost less than the cheapest regular ticket.",
-        "Hidden-city rows are complete tickets that continue past the intended city. The priced itinerary is never rewritten into a fake A→B fare.",
+        "Hidden-city rows are complete one-way tickets that continue past the intended city. The priced itinerary is never rewritten into a fake A→B fare. Round-trip searches compare honest return tickets only.",
         "Every priced row is converted to USD before ranking, so GBP and other airline quotes never mix with dollar fares.",
         "Self-transfer rows are separate tickets stitched at a hub, at most five flights. The sum is not one PNR and is not hidden-city.",
-        "This API never calls Amadeus Flight Create Orders or Duffel Orders.",
+        "This API never calls Duffel Orders.",
     ]
 
     elapsed = round((time.perf_counter() - t0) * 1000, 1)
@@ -708,7 +711,6 @@ async def _shop_place(
     req: ShopRequest,
     origin: object,
     dest: object,
-    amadeus: AmadeusProvider | None,
     duffel: DuffelProvider | None,
     mock: MockProvider | None = None,
 ) -> list[Offer]:
@@ -725,7 +727,6 @@ async def _shop_place(
             shop = replace(req, origin=o, dest=d)
             return await _shop_providers(
                 shop,
-                amadeus,
                 duffel,
                 extra_nonstop=_needs_city_nonstop(origin, dest, idx),
                 mock=mock,
@@ -745,7 +746,6 @@ async def _shop_pairs(
     req: ShopRequest,
     origins: list[str],
     dests: list[str],
-    amadeus: AmadeusProvider | None,
     duffel: DuffelProvider | None,
 ) -> list[Offer]:
     pairs = _route_pairs(origins, dests)
@@ -753,7 +753,7 @@ async def _shop_pairs(
         return []
 
     async def one(o: str, d: str) -> list[Offer]:
-        return await _shop_providers(replace(req, origin=o, dest=d), amadeus, duffel)
+        return await _shop_providers(replace(req, origin=o, dest=d), duffel)
 
     parts = await asyncio.gather(*(one(o, d) for o, d in pairs), return_exceptions=True)
     out: list[Offer] = []
@@ -765,7 +765,6 @@ async def _shop_pairs(
 
 async def _shop_providers(
     req: ShopRequest,
-    amadeus: AmadeusProvider | None,
     duffel: DuffelProvider | None,
     extra_nonstop: bool = False,
     mock: MockProvider | None = None,
@@ -781,11 +780,6 @@ async def _shop_providers(
     def paid(provider: str, r: ShopRequest, coro: Awaitable[list[Offer]]) -> Awaitable[list[Offer]]:
         return timed_shop(provider, r.origin, r.dest, r.date, purpose, coro)
 
-    if amadeus:
-        tasks.append(paid("amadeus", req, amadeus.shop(req)))
-        if extra_nonstop and not req.nonstop:
-            r = replace(req, nonstop=True, max_offers=8)
-            tasks.append(paid("amadeus", r, amadeus.shop(r)))
     if duffel:
         tasks.append(paid("duffel", req, duffel.shop(req)))
         if extra_nonstop and not req.nonstop:
@@ -798,14 +792,13 @@ async def _shop_providers(
     for part in parts:
         if isinstance(part, list):
             out.extend(part)
-    return offers_in_usd(_drop_sandbox(out))
+    return offers_in_usd(_drop_sandbox(unexpired(out)))
 
 
 async def _shop_nearby(
     req: ShopRequest,
     query: SearchQuery,
     session: AsyncSession,
-    amadeus: AmadeusProvider | None,
     duffel: DuffelProvider | None,
     origin_members: list[str] | None = None,
     dest_members: list[str] | None = None,
@@ -823,12 +816,12 @@ async def _shop_nearby(
             if (o, d) != (req.origin, req.dest) and o != d:
                 pairs.append((o, d))
     pairs = pairs[:2]
-    if not pairs or (not amadeus and not duffel):
+    if not pairs or not duffel:
         return []
 
     async def one(o: str, d: str) -> list[Offer]:
         r = replace(req, origin=o, dest=d, nonstop=True, max_offers=5)
-        offers = await _shop_providers(r, amadeus, duffel, mock=mock, purpose="nearby")
+        offers = await _shop_providers(r, duffel, mock=mock, purpose="nearby")
         for offer in offers:
             offer.kind = "nearby"
         return offers
@@ -845,7 +838,6 @@ async def _shop_self_transfers(
     req: ShopRequest,
     settings: Settings,
     session: AsyncSession,
-    amadeus: AmadeusProvider | None,
     duffel: DuffelProvider | None,
     origin_place,
     dest_place,
@@ -870,8 +862,7 @@ async def _shop_self_transfers(
     continents = await repo.continents_for(session, [origin, dest, *from_origin, *into, *extra])
     n_hubs = 2 if mode == "fast" else 3
     ledger = current_ledger()
-    paid = len(ledger.paid()) if ledger else 0
-    left = max(0, settings.max_provider_calls - paid)
+    left = ledger.remaining() if ledger else settings.max_provider_calls
     per_hub = 2 if mode == "fast" else 3
     n_hubs = min(n_hubs, left // per_hub) if per_hub else 0
     if n_hubs < 1:
@@ -890,7 +881,7 @@ async def _shop_self_transfers(
 
     async def leg(o: str, d: str, date: str) -> list[Offer]:
         r = replace(req, origin=o, dest=d, date=date, nonstop=False, max_offers=8)
-        return await _shop_providers(r, amadeus, duffel, mock=None, purpose="interline")
+        return await _shop_providers(r, duffel, mock=None, purpose="interline")
 
     def keep_legs(offers: list[Offer], dest_ok) -> list[Offer]:
         kept = _prefer_real_carriers(
@@ -948,7 +939,6 @@ async def _plan_candidates(
     route_origins: set[str],
     route_dests: set[str],
     dest_members: list[str],
-    amadeus: AmadeusProvider | None,
 ) -> list[Candidate]:
     """CandidateGenerator: pool every plausible C, score it, rank it. No paid calls here."""
     origin = sorted(route_origins)[0] if route_origins else ""
@@ -966,14 +956,6 @@ async def _plan_candidates(
         any_date=True,
     ):
         pool.setdefault(c, "index")
-    if amadeus:
-        parts = await asyncio.gather(
-            *(amadeus.direct_destinations(d) for d in dest_members[:3]), return_exceptions=True
-        )
-        for part in parts:
-            if isinstance(part, list):
-                for c in part:
-                    pool.setdefault(c.upper(), "amadeus")
     route_map = await repo.route_map_from(session, dest_members[:4])
     for b, spokes in route_map.items():
         for c in sorted(spokes):
@@ -986,7 +968,6 @@ async def _plan_candidates(
 async def _probe_candidates(
     req: ShopRequest,
     settings: Settings,
-    amadeus: AmadeusProvider | None,
     duffel: DuffelProvider | None,
     mock: MockProvider | None,
     origin_place,
@@ -996,15 +977,14 @@ async def _probe_candidates(
 ) -> tuple[list[HiddenCityMatch], list[Offer]]:
     """Pay for A→C on the chosen candidates and classify what comes back against A→B.
     Returns (matches, every complete offer seen) so the learner can record misses too."""
-    if not candidates or not (amadeus or duffel or mock):
+    if not candidates or not (duffel or mock):
         return [], []
     sem = asyncio.Semaphore(settings.max_concurrency)
 
     async def probe(c: str) -> tuple[list[HiddenCityMatch], list[Offer]]:
         async with sem:
             throughs = await _shop_providers(
-                replace(req, dest=c, nonstop=False, max_offers=20),
-                amadeus,
+                replace(req, dest=c, nonstop=False, max_offers=20, return_date=None),
                 duffel,
                 mock=mock,
                 purpose="expand",
@@ -1102,7 +1082,7 @@ def _on_route(offer: Offer, origins: set[str], dests: set[str]) -> bool:
         return False
     allowed_o = {c.upper() for c in origins}
     allowed_d = {c.upper() for c in dests}
-    return offer.segments[0].origin.upper() in allowed_o and offer.segments[-1].dest.upper() in allowed_d
+    return offer.segments[0].origin.upper() in allowed_o and ticketed_destination(offer) in allowed_d
 
 
 def _keep_on_route(offers: list[Offer], origins: set[str], dests: set[str]) -> list[Offer]:
@@ -1283,7 +1263,7 @@ def _hidden_if_cheaper(
 
 
 def _gaps(
-    amadeus: AmadeusProvider | None,
+    settings: Settings,
     duffel: DuffelProvider | None,
     box: AeroDataBoxProvider | None,
     priced: list[Offer],
@@ -1291,15 +1271,23 @@ def _gaps(
     traffic: LiveTraffic,
     board: list[BoardFlight] | object,
     mock: MockProvider | None = None,
+    round_trip: bool = False,
 ) -> list[str]:
     gaps: list[str] = []
-    if not amadeus and not duffel and not mock:
+    if settings.duffel_sandbox:
         gaps.append(
-            "No shop API keys and mock is off. Priced offers stay empty until AMADEUS_CLIENT_ID/SECRET, DUFFEL_TOKEN, or MOCK_ENABLED."
+            "Your Duffel key is sandbox (duffel_test_…). Offers with live_mode=False are dropped. "
+            "A duffel_live_… token is required for real fares."
+        )
+    elif not duffel and not mock:
+        gaps.append(
+            "No Duffel token and mock is off. Priced offers stay empty until DUFFEL_TOKEN or MOCK_ENABLED."
         )
     elif not priced:
-        gaps.append("Shop APIs are configured but returned no priced offers for this city-pair/date (test inventory, date, or airline coverage).")
-    if not hidden:
+        gaps.append("Duffel returned no priced offers for this city-pair/date (coverage or date).")
+    if round_trip:
+        gaps.append("Hidden-city is one-way only. This search compares honest round-trip tickets.")
+    elif not hidden:
         gaps.append("No priced inversion P(A,B,C)<P(A,B) in the current shop. Connection hints are not savings.")
     if not traffic.aircraft:
         gaps.append(traffic.note)

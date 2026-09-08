@@ -3,10 +3,13 @@
   import type { HiddenDeal } from '$lib/types';
 
   let { deal, compact = false }: { deal: HiddenDeal; compact?: boolean } = $props();
+  let open = $state(false);
   const through = $derived(deal.through_offer);
   const getOff = $derived(deal.dest);
   const href = $derived(`/results?origin=${deal.origin}&destination=${deal.dest}&date=${deal.date}&nearby=0`);
   const bookers = $derived((deal.bookers ?? []).filter((b) => !b.id.startsWith('carrier-')).slice(0, 4));
+  const risk = $derived(deal.risk);
+  const warnings = $derived(deal.warnings ?? []);
 </script>
 
 <article class="hc deal-card">
@@ -47,4 +50,41 @@
       {/each}
     </div>
   {/if}
+  {#if risk}
+    {#if warnings.length && (!compact || open)}
+      <ul class="hc-warnings">
+        {#each warnings as w}
+          <li>{w}</li>
+        {/each}
+      </ul>
+    {/if}
+    <div class="risk">
+      <button class="ghost" type="button" onclick={() => (open = !open)}>
+        {open ? 'Hide risks' : 'Risks of getting off early'}
+      </button>
+      {#if open}
+        <p class="note" style="margin:10px 0 8px">{risk.headline}</p>
+        <div class="risk-grid">
+          {#each risk.items as item}
+            <div>
+              <div class="chip bad">{item.severity}</div>
+              <strong style="display:block;margin:6px 0 4px">{item.label}</strong>
+              <p class="note" style="margin:0">{item.why}</p>
+            </div>
+          {/each}
+        </div>
+      {:else if compact}
+        <p class="note" style="margin:10px 0 0">{risk.headline}</p>
+      {/if}
+    </div>
+  {/if}
 </article>
+
+<style>
+  .hc-warnings {
+    margin: 12px 0 0;
+    padding-left: 18px;
+    color: var(--muted);
+    font-size: 0.85rem;
+  }
+</style>

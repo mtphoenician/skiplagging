@@ -29,7 +29,9 @@ from app.db.tables import (
     SearchRow,
     TrackRow,
 )
-from app.engines.hidden import hidden_city_savings, meaningful_saving
+from app.engines.expiry import offer_unexpired, unexpired
+from app.engines.hidden import HIDDEN_CITY_WARNINGS, hidden_city_savings, meaningful_saving
+from app.engines.risk import assess
 from app.fx import offer_in_usd, offers_in_usd, to_usd
 from app.models import Airport, Country, HiddenDeal, HiddenCityMatch, Navaid, Offer, Region, Runway
 from app.providers.bookers import booker_links
@@ -1048,7 +1050,7 @@ async def recall_offers(
             out.append(Offer.model_validate(row.payload))
         except (TypeError, ValueError, KeyError):
             continue
-    return offers_in_usd(out)
+    return unexpired(offers_in_usd(out))
 
 
 async def recall_candidate_dests(
@@ -1186,6 +1188,7 @@ async def persist_hidden_deals(
             or local.price is None
             or through.price is None
             or through.price >= local.price
+            or not offer_unexpired(through)
         ):
             continue
         saving = hidden_city_savings(local.price, through.price)
@@ -1255,6 +1258,8 @@ def _payload_offer(payload: dict | None) -> Offer | None:
 
 def _deal_from_row(row: HiddenDealRow) -> HiddenDeal | None:
     # Always rebuild booker URLs so saved deals never keep a dead Google `#flt=` link.
+    if (row.source or "").lower() not in {"", "duffel"}:
+        return None
     raw_through = _payload_offer(row.through_payload)
     raw_local = _payload_offer(row.local_payload)
     if raw_through is not None and not is_live_fare(raw_through):
@@ -1275,6 +1280,13 @@ def _deal_from_row(row: HiddenDealRow) -> HiddenDeal | None:
     bookers = booker_links(row.origin, row.hidden_city, row.date, 1, currency="USD")
     local = offer_in_usd(raw_local) if raw_local is not None else None
     through_offer = offer_in_usd(raw_through) if raw_through is not None else None
+    if through_offer is not None and not offer_unexpired(through_offer):
+        return None
+    risk = None
+    warnings: list[str] = []
+    if local is not None and through_offer is not None:
+        risk = assess(local, through_offer, row.hidden_city, row.destination)
+        warnings = list(HIDDEN_CITY_WARNINGS)
     return HiddenDeal(
         id=row.id,
         origin=row.origin,
@@ -1294,6 +1306,8 @@ def _deal_from_row(row: HiddenDealRow) -> HiddenDeal | None:
         bookers=bookers,
         local_offer=local,
         through_offer=through_offer,
+        risk=risk,
+        warnings=warnings,
     )
 
 

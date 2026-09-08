@@ -14,10 +14,13 @@ def observation_meta(offer: Offer) -> dict | None:
     if not offer.segments or offer.price is None:
         return None
     first, last = offer.segments[0], offer.segments[-1]
+    ticketed = ticketed_destination(offer)
+    idx = offer.outbound_end if offer.outbound_end is not None else len(offer.segments) - 1
+    idx = min(max(idx, 0), len(offer.segments) - 1)
     return {
         "origin": first.origin.upper(),
-        "ticketed": last.dest.upper(),
-        "connections": [s.dest.upper() for s in offer.segments[:-1]],
+        "ticketed": ticketed,
+        "connections": [s.dest.upper() for s in offer.segments[:idx]],
         "fingerprint": itinerary_fingerprint(offer),
         "price": offer.price,
         "currency": offer.currency,

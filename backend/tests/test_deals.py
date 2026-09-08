@@ -96,6 +96,8 @@ async def test_hidden_deals_persist_and_list():
         assert top.honest_price == 400
         assert top.saving == 180
         assert top.currency == "USD"
+        assert top.risk is not None
+        assert top.risk.items
     finally:
         async with session_factory()() as session:
             await session.execute(
@@ -105,6 +107,64 @@ async def test_hidden_deals_persist_and_list():
                     HiddenDealRow.hidden_city == "BOS",
                     HiddenDealRow.date == "2026-10-28",
                     HiddenDealRow.first_flight == "BA1",
+                )
+            )
+            await session.commit()
+
+
+async def test_expired_through_is_not_persisted_or_listed():
+    await init_db()
+    local = _offer("n-exp", 400, [_seg("MIA", "ATL", "DL9")], 0)
+    through = _offer(
+        "h-exp",
+        200,
+        [_seg("MIA", "ATL", "DL9"), _seg("ATL", "BOS", "DL8")],
+        1,
+    ).model_copy(update={"expires_at": "2020-01-01T00:00:00Z"})
+    try:
+        async with session_factory()() as session:
+            n = await repo.persist_hidden_deals(
+                session,
+                [_match(local, through, "BOS", 200, 50)],
+                origin="MIA",
+                origin_city="Miami",
+                dest="ATL",
+                dest_city="Atlanta",
+                date="2026-10-28",
+            )
+            assert n == 0
+            session.add(
+                HiddenDealRow(
+                    origin="MIA",
+                    destination="ATL",
+                    hidden_city="BOS",
+                    origin_city="Miami",
+                    dest_city="Atlanta",
+                    hidden_city_name="Boston (BOS)",
+                    date="2026-10-28",
+                    honest_price=400,
+                    through_price=200,
+                    currency="USD",
+                    saving=200,
+                    saving_pct=50,
+                    first_flight="DL9",
+                    source="duffel",
+                    local_payload=local.model_dump(),
+                    through_payload=through.model_dump(),
+                )
+            )
+            await session.commit()
+            deals = await repo.list_hidden_deals(session, origin="MIA", dest="ATL")
+        assert not any(d.first_flight == "DL9" for d in deals)
+    finally:
+        async with session_factory()() as session:
+            await session.execute(
+                delete(HiddenDealRow).where(
+                    HiddenDealRow.origin == "MIA",
+                    HiddenDealRow.destination == "ATL",
+                    HiddenDealRow.hidden_city == "BOS",
+                    HiddenDealRow.date == "2026-10-28",
+                    HiddenDealRow.first_flight == "DL9",
                 )
             )
             await session.commit()
@@ -135,7 +195,7 @@ async def test_persist_converts_to_usd_and_skips_sandbox():
         [_seg("JFK", "BOS", "AA1"), _seg("BOS", "MIA", "AA2")],
         1,
         source="mock",
-        live=None,
+        live=True,
     )
     try:
         async with session_factory()() as session:
@@ -189,24 +249,24 @@ async def test_persist_converts_to_usd_and_skips_sandbox():
 
 async def test_list_ranks_usd_and_hides_sandbox_rows():
     await init_db()
-    krw_local = _offer("n-krw", 80000, [_seg("ICN", "NRT", "KE1")], 0, currency="KRW", source="amadeus", live=None)
+    krw_local = _offer("n-krw", 80000, [_seg("ICN", "NRT", "KE1")], 0, currency="KRW")
     krw_through = _offer(
         "h-krw",
         10000,
         [_seg("ICN", "NRT", "KE1"), _seg("NRT", "HNL", "KE2")],
         1,
         currency="KRW",
-        source="amadeus",
-        live=None,
+        source="duffel",
+        live=True,
     )
-    usd_local = _offer("n-usd", 400, [_seg("ICN", "NRT", "DL1")], 0, source="amadeus", live=None)
+    usd_local = _offer("n-usd", 400, [_seg("ICN", "NRT", "DL1")], 0)
     usd_through = _offer(
         "h-usd",
         150,
         [_seg("ICN", "NRT", "DL1"), _seg("NRT", "LAX", "DL2")],
         1,
-        source="amadeus",
-        live=None,
+        source="duffel",
+        live=True,
     )
     fake = _offer(
         "h-sand",
@@ -232,7 +292,7 @@ async def test_list_ranks_usd_and_hides_sandbox_rows():
                     saving=70000,
                     saving_pct=87,
                     first_flight="KE1",
-                    source="amadeus",
+                    source="duffel",
                     local_payload=krw_local.model_dump(),
                     through_payload=krw_through.model_dump(),
                 )
@@ -252,7 +312,7 @@ async def test_list_ranks_usd_and_hides_sandbox_rows():
                     saving=250,
                     saving_pct=62,
                     first_flight="DL1",
-                    source="amadeus",
+                    source="duffel",
                     local_payload=usd_local.model_dump(),
                     through_payload=usd_through.model_dump(),
                 )

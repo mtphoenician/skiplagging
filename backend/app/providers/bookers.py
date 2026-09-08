@@ -50,13 +50,17 @@ def google_tfs(
     date: str,
     adults: int = 1,
     cabin: int = 1,
+    return_date: str | None = None,
 ) -> str:
-    """URL-safe protobuf `tfs` for a one-way Google Flights search."""
-    leg = _str(2, date) + _ld(13, _place(origin)) + _ld(14, _place(dest))
+    """URL-safe protobuf `tfs` for a Google Flights search (one-way or round-trip)."""
+    outbound = _str(2, date) + _ld(13, _place(origin)) + _ld(14, _place(dest))
     body = bytearray()
     body += _var(1, 28)
     body += _var(2, 2)
-    body += _ld(3, leg)
+    body += _ld(3, outbound)
+    if return_date:
+        inbound = _str(2, return_date) + _ld(13, _place(dest)) + _ld(14, _place(origin))
+        body += _ld(3, inbound)
     for _ in range(max(1, min(adults, 9))):
         body += _var(8, 1)
     body += _var(9, cabin)
@@ -73,9 +77,10 @@ def google_flights_url(
     currency: str = "USD",
     adults: int = 1,
     cabin: str = "ECONOMY",
+    return_date: str | None = None,
 ) -> str:
     o, d, ccy = origin.upper(), dest.upper(), (currency or "USD").upper()
-    tfs = google_tfs(o, d, date, adults, _google_cabin(cabin))
+    tfs = google_tfs(o, d, date, adults, _google_cabin(cabin), return_date)
     return f"https://www.google.com/travel/flights/search?tfs={tfs}&hl=en&curr={ccy}"
 
 
@@ -110,7 +115,7 @@ _META = (
         "meta-search",
         "Metasearch. Booking completes on an airline or OTA, not on this link alone.",
         False,
-        "https://www.kayak.com/flights/{o}-{d}/{date}{kayak_adults}?sort=bestflight_a",
+        "https://www.kayak.com/flights/{o}-{d}/{kayak_dates}{kayak_adults}?sort=bestflight_a",
     ),
     (
         "skyscanner",
@@ -118,7 +123,7 @@ _META = (
         "meta-search",
         "Metasearch. Date path is YYMMDD. Not the validating carrier.",
         False,
-        "https://www.skyscanner.com/transport/flights/{ol}/{dl}/{yymmdd}/?adultsv2={adults}&cabinclass={sky_cabin}&rtn=0&preferdirects=false",
+        "https://www.skyscanner.com/transport/flights/{ol}/{dl}/{sky_path}?adultsv2={adults}&cabinclass={sky_cabin}&rtn={sky_rtn}&preferdirects=false",
     ),
     (
         "momondo",
@@ -126,7 +131,7 @@ _META = (
         "meta-search",
         "Kayak-family metasearch. Often wider international OTA coverage.",
         False,
-        "https://www.momondo.com/flight-search/{o}-{d}/{date}{kayak_adults}?sort=bestflight_a",
+        "https://www.momondo.com/flight-search/{o}-{d}/{kayak_dates}{kayak_adults}?sort=bestflight_a",
     ),
     (
         "cheapflights",
@@ -134,7 +139,7 @@ _META = (
         "meta-search",
         "Kayak-family metasearch. US-facing comparison.",
         False,
-        "https://www.cheapflights.com/flight-search/{o}-{d}/{date}{kayak_adults}?sort=bestflight_a",
+        "https://www.cheapflights.com/flight-search/{o}-{d}/{kayak_dates}{kayak_adults}?sort=bestflight_a",
     ),
     (
         "wego",
@@ -158,7 +163,7 @@ _META = (
         "ota",
         "OTA. Flight checkout on Booking.com can issue the ticket if you finish there.",
         True,
-        "https://flights.booking.com/flights/{ob}-{db}/?type=ONEWAY&adults={adults}&cabinClass={book_cabin}&depart={date}&from={o}&to={d}&sort=BEST",
+        "https://flights.booking.com/flights/{ob}-{db}/?type={book_type}&adults={adults}&cabinClass={book_cabin}&depart={date}&from={o}&to={d}&sort=BEST",
     ),
     (
         "trip-com",
@@ -182,7 +187,7 @@ _META = (
         "ota",
         "OTA. Virtual interlining / self-transfer specialist. Issues if you finish there.",
         True,
-        "https://www.kiwi.com/en/search/results/{ol}/{dl}/{date}/no-return?adults={adults}",
+        "https://www.kiwi.com/en/search/results/{ol}/{dl}/{date}/{kiwi_ret}?adults={adults}",
     ),
     (
         "cheapoair",
@@ -243,10 +248,12 @@ def booker_links(
     airlines: list[tuple[str, str]] | None = None,
     currency: str = "USD",
     cabin: str = "ECONOMY",
+    return_date: str | None = None,
 ) -> list[BookerLink]:
     o, d = origin.upper(), dest.upper()
     ccy = (currency or "USD").upper()
     cabin_u = (cabin or "ECONOMY").upper()
+    ret = return_date or ""
     ctx = {
         "o": o,
         "d": d,
@@ -255,13 +262,24 @@ def booker_links(
         "ob": _booking_point(o),
         "db": _booking_point(d),
         "date": date,
+        "ret": ret,
         "yymmdd": date[2:].replace("-", ""),
+        "ret_yymmdd": ret[2:].replace("-", "") if ret else "",
         "ymd": date.replace("-", ""),
+        "ret_ymd": ret.replace("-", "") if ret else "",
         "dmon": _dmon(date),
         "mmt": _mmt(date),
         "tvldt": _tvldt(date),
         "adults": adults,
         "kayak_adults": "" if adults <= 1 else f"/{adults}adults",
+        "kayak_dates": f"{date}/{ret}" if ret else date,
+        "sky_rtn": "1" if ret else "0",
+        "sky_path": f"{date[2:].replace('-', '')}/{ret[2:].replace('-', '')}/" if ret else f"{date[2:].replace('-', '')}/",
+        "trip": "roundtrip" if ret else "oneway",
+        "wego_trip": "rt" if ret else "ow",
+        "book_type": "ROUNDTRIP" if ret else "ONEWAY",
+        "kiwi_ret": ret if ret else "no-return",
+        "flighttype": "rt" if ret else "ow",
         "sky_cabin": {
             "ECONOMY": "economy",
             "PREMIUM_ECONOMY": "premiumeconomy",
@@ -270,15 +288,25 @@ def booker_links(
         }.get(cabin_u, "economy"),
         "book_cabin": cabin_u,
         "us": _us(date),
-        "q": quote(f"one way flights from {o} to {d} on {date}"),
+        "ret_us": _us(ret) if ret else "",
+        "q": quote(
+            f"{'round trip' if ret else 'one way'} flights from {o} to {d} on {date}"
+            + (f" returning {ret}" if ret else "")
+        ),
     }
     links: list[BookerLink] = []
     for sid, name, layer, role, issues, tmpl in _META:
-        url = (
-            google_flights_url(o, d, date, ccy, adults, cabin_u)
-            if sid == "google-flights"
-            else tmpl.format(**ctx)
-        )
+        if sid == "google-flights":
+            url = google_flights_url(o, d, date, ccy, adults, cabin_u, return_date)
+        elif sid == "expedia" and ret:
+            url = (
+                "https://www.expedia.com/Flights-Search?flight-type=on&mode=search&trip=roundtrip"
+                f"&leg1=from:{o},to:{d},departure:{ctx['us']}TANYT"
+                f"&leg2=from:{d},to:{o},departure:{ctx['ret_us']}TANYT"
+                f"&passengers=adults:{adults},children:0,infantinlap:N"
+            )
+        else:
+            url = tmpl.format(**ctx)
         links.append(
             BookerLink(
                 id=sid,
@@ -289,7 +317,7 @@ def booker_links(
                 issues_ticket=issues,
             )
         )
-    google = google_flights_url(o, d, date, ccy, adults, cabin_u)
+    google = google_flights_url(o, d, date, ccy, adults, cabin_u, return_date)
     for iata, name in airlines or []:
         iata = iata.upper()
         if len(iata) < 2 or iata in TEST_CARRIERS:

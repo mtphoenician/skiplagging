@@ -104,7 +104,10 @@ export interface Offer {
   stops: number;
   first_flight: string;
   retrieved_at?: string | null;
+  expires_at?: string | null;
   live?: boolean | null;
+  return_date?: string | null;
+  outbound_end?: number | null;
   self_transfer_airports?: string[];
   separate_tickets?: { origin: string; dest: string; date: string; price: number; currency: string; carrier: string }[];
 }
@@ -270,6 +273,7 @@ export interface SearchQuery {
   origin: string;
   destination: string;
   date: string;
+  return_date?: string | null;
   adults: number;
   cabin: Cabin;
   currency: string;
@@ -296,6 +300,8 @@ export interface HiddenDeal {
   bookers: BookerLink[];
   local_offer?: Offer | null;
   through_offer?: Offer | null;
+  risk?: RiskAssessment | null;
+  warnings?: string[];
 }
 
 export interface SearchResponse {

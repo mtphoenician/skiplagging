@@ -15,6 +15,13 @@ def test_search_query_forces_usd():
     assert q.currency == "USD"
 
 
+def test_search_query_round_trip_order():
+    q = SearchQuery(origin="JFK", destination="ORD", date="2026-10-10", return_date="2026-10-17")
+    assert q.return_date == "2026-10-17"
+    with pytest.raises(Exception):
+        SearchQuery(origin="JFK", destination="ORD", date="2026-10-17", return_date="2026-10-10")
+
+
 def test_to_usd_identity_and_gbp():
     assert to_usd(240, "USD") == 240
     converted = to_usd(80, "GBP")

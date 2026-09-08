@@ -17,6 +17,7 @@
     origin = $bindable(''),
     destination = $bindable(''),
     date = $bindable(''),
+    return_date = $bindable(''),
     adults = $bindable(1),
     cabin = $bindable<Cabin>('ECONOMY'),
     include_nearby = $bindable(true),
@@ -25,6 +26,7 @@
     origin: string;
     destination: string;
     date: string;
+    return_date?: string;
     adults: number;
     cabin: Cabin;
     include_nearby: boolean;
@@ -56,6 +58,10 @@
       error = 'Choose a date.';
       return;
     }
+    if (return_date && return_date < date) {
+      error = 'Return date must be on or after the outbound date.';
+      return;
+    }
     submitting = true;
     try {
       const [o, d] = await Promise.all([resolveIata(origin), resolveIata(destination)]);
@@ -77,6 +83,7 @@
         cabin,
         nearby: include_nearby ? '1' : '0'
       });
+      if (return_date) q.set('return', return_date);
       await goto(`/results?${q.toString()}`);
     } catch (err) {
       error = err instanceof Error ? err.message : 'Airport lookup failed.';
@@ -96,7 +103,10 @@
     </button>
     <AirportInput bind:value={destination} label="To" />
     <div class="span-date">
-      <DatePicker bind:value={date} />
+      <DatePicker bind:value={date} label="Depart" />
+    </div>
+    <div class="span-return">
+      <DatePicker bind:value={return_date} label="Return (optional)" />
     </div>
     <div class="span-cabin">
       <SelectMenu bind:value={cabin} label="Cabin" options={cabins} />

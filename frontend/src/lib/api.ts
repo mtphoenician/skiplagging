@@ -241,10 +241,15 @@ export function googleTfs(
   dest: string,
   date: string,
   adults = 1,
-  cabin = 'ECONOMY'
+  cabin = 'ECONOMY',
+  returnDate?: string | null
 ): string {
-  const leg = [...pstr(2, date), ...ld(13, place(origin)), ...ld(14, place(dest))];
-  const body: number[] = [...vint(1, 28), ...vint(2, 2), ...ld(3, leg)];
+  const outbound = [...pstr(2, date), ...ld(13, place(origin)), ...ld(14, place(dest))];
+  const body: number[] = [...vint(1, 28), ...vint(2, 2), ...ld(3, outbound)];
+  if (returnDate) {
+    const inbound = [...pstr(2, returnDate), ...ld(13, place(dest)), ...ld(14, place(origin))];
+    body.push(...ld(3, inbound));
+  }
   for (let i = 0; i < Math.max(1, Math.min(adults, 9)); i++) body.push(...vint(8, 1));
   body.push(...vint(9, GOOGLE_CABIN[cabin] ?? 1), ...vint(14, 1), ...ld(16, vint(1, -1)), ...vint(19, 2));
   const b64 = btoa(String.fromCharCode(...body));
@@ -257,11 +262,22 @@ export function googleFlightsUrl(
   date: string,
   currency = 'USD',
   adults = 1,
-  cabin = 'ECONOMY'
+  cabin = 'ECONOMY',
+  returnDate?: string | null
 ): string {
-  const tfs = googleTfs(origin, dest, date, adults, cabin);
+  const tfs = googleTfs(origin, dest, date, adults, cabin, returnDate);
   const ccy = (currency || 'USD').toUpperCase();
   return `https://www.google.com/travel/flights/search?tfs=${tfs}&hl=en&curr=${ccy}`;
+}
+
+export function outboundEndIndex(offer: Offer): number {
+  if (offer.outbound_end != null && offer.outbound_end >= 0) return offer.outbound_end;
+  return Math.max(0, offer.segments.length - 1);
+}
+
+export function outboundDest(offer: Offer): string {
+  const idx = outboundEndIndex(offer);
+  return offer.segments[idx]?.dest || '';
 }
 
 export function itineraryBookers(
@@ -270,13 +286,16 @@ export function itineraryBookers(
   date: string,
   adults = 1,
   currency = 'USD',
-  cabin = 'ECONOMY'
+  cabin = 'ECONOMY',
+  returnDate?: string | null
 ): { id: string; name: string; url: string }[] {
   const o = origin.toUpperCase();
   const d = dest.toUpperCase();
   const yymmdd = date.slice(2).replace(/-/g, '');
+  const retYymmdd = returnDate ? returnDate.slice(2).replace(/-/g, '') : '';
   const us = `${date.slice(5, 7)}/${date.slice(8, 10)}/${date.slice(0, 4)}`;
   const adultsPath = adults > 1 ? `/${adults}adults` : '';
+  const kayakDates = returnDate ? `${date}/${returnDate}` : date;
   const skyCabin =
     cabin === 'PREMIUM_ECONOMY'
       ? 'premiumeconomy'
@@ -285,27 +304,30 @@ export function itineraryBookers(
         : cabin === 'FIRST'
           ? 'first'
           : 'economy';
+  const skyPath = returnDate ? `${yymmdd}/${retYymmdd}/` : `${yymmdd}/`;
   return [
-    { id: 'google-flights', name: 'Google Flights', url: googleFlightsUrl(o, d, date, currency, adults, cabin) },
+    { id: 'google-flights', name: 'Google Flights', url: googleFlightsUrl(o, d, date, currency, adults, cabin, returnDate) },
     {
       id: 'kayak',
       name: 'Kayak',
-      url: `https://www.kayak.com/flights/${o}-${d}/${date}${adultsPath}?sort=bestflight_a`
+      url: `https://www.kayak.com/flights/${o}-${d}/${kayakDates}${adultsPath}?sort=bestflight_a`
     },
     {
       id: 'skyscanner',
       name: 'Skyscanner',
-      url: `https://www.skyscanner.com/transport/flights/${o.toLowerCase()}/${d.toLowerCase()}/${yymmdd}/?adultsv2=${adults}&cabinclass=${skyCabin}&rtn=0&preferdirects=false`
+      url: `https://www.skyscanner.com/transport/flights/${o.toLowerCase()}/${d.toLowerCase()}/${skyPath}?adultsv2=${adults}&cabinclass=${skyCabin}&rtn=${returnDate ? 1 : 0}&preferdirects=false`
     },
     {
       id: 'booking-com',
       name: 'Booking.com',
-      url: `https://flights.booking.com/flights/${o}.AIRPORT-${d}.AIRPORT/?type=ONEWAY&adults=${adults}&cabinClass=${cabin}&depart=${date}&from=${o}&to=${d}&sort=BEST`
+      url: `https://flights.booking.com/flights/${o}.AIRPORT-${d}.AIRPORT/?type=${returnDate ? 'ROUNDTRIP' : 'ONEWAY'}&adults=${adults}&cabinClass=${cabin}&depart=${date}&from=${o}&to=${d}&sort=BEST`
     },
     {
       id: 'expedia',
       name: 'Expedia',
-      url: `https://www.expedia.com/Flights-Search?flight-type=on&mode=search&trip=oneway&leg1=from:${o},to:${d},departure:${us}TANYT&passengers=adults:${adults},children:0,infantinlap:N`
+      url: returnDate
+        ? `https://www.expedia.com/Flights-Search?flight-type=on&mode=search&trip=roundtrip&leg1=from:${o},to:${d},departure:${us}TANYT&leg2=from:${d},to:${o},departure:${returnDate.slice(5, 7)}/${returnDate.slice(8, 10)}/${returnDate.slice(0, 4)}TANYT&passengers=adults:${adults},children:0,infantinlap:N`
+        : `https://www.expedia.com/Flights-Search?flight-type=on&mode=search&trip=oneway&leg1=from:${o},to:${d},departure:${us}TANYT&passengers=adults:${adults},children:0,infantinlap:N`
     }
   ];
 }
@@ -347,7 +369,8 @@ export function stopovers(
 ): { code: string; minutes: number; selfTransfer: boolean }[] {
   const marked = new Set((offer.self_transfer_airports ?? []).map((c) => c.toUpperCase()));
   const out: { code: string; minutes: number; selfTransfer: boolean }[] = [];
-  for (let i = 0; i < offer.segments.length - 1; i++) {
+  const lastOutbound = outboundEndIndex(offer);
+  for (let i = 0; i < lastOutbound; i++) {
     const arr = Date.parse(offer.segments[i].arr);
     const dep = Date.parse(offer.segments[i + 1].dep);
     const minutes =

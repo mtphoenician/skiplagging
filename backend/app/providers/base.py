@@ -16,6 +16,7 @@ class ShopRequest:
     currency: str = "USD"
     nonstop: bool = False
     max_offers: int = 20
+    return_date: str | None = None
 
 
 class FareProvider(Protocol):

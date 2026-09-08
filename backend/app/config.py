@@ -5,9 +5,6 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     database_url: str = "postgresql+asyncpg://matthieutohme@127.0.0.1:5432/skiplagging"
-    amadeus_client_id: str = ""
-    amadeus_client_secret: str = ""
-    amadeus_hostname: str = "test"
     duffel_token: str = ""
     rapidapi_key: str = ""
     opensky_client_id: str = ""
@@ -41,10 +38,6 @@ class Settings(BaseSettings):
         return {c.strip().upper() for c in self.discover_skip_dests.split(",") if c.strip()}
 
     @property
-    def amadeus_enabled(self) -> bool:
-        return bool(self.amadeus_client_id and self.amadeus_client_secret)
-
-    @property
     def duffel_enabled(self) -> bool:
         return bool(self.duffel_token)
 
@@ -53,22 +46,17 @@ class Settings(BaseSettings):
         return self.duffel_token.startswith("duffel_live_")
 
     @property
-    def amadeus_live(self) -> bool:
-        return self.amadeus_enabled and self.amadeus_hostname == "production"
+    def duffel_sandbox(self) -> bool:
+        return self.duffel_enabled and not self.duffel_live
 
     @property
     def publish_deals(self) -> bool:
-        """Homepage /deals is live inventory only — not Duffel test or Amadeus test."""
-        return self.duffel_live or self.amadeus_live
+        """Homepage /deals is live Duffel inventory only — not test-token junk."""
+        return self.duffel_live
 
     @property
     def aerodatabox_enabled(self) -> bool:
         return bool(self.rapidapi_key)
-
-    @property
-    def amadeus_base(self) -> str:
-        host = "api.amadeus.com" if self.amadeus_hostname == "production" else "test.api.amadeus.com"
-        return f"https://{host}"
 
 
 @lru_cache(maxsize=1)

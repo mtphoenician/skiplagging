@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 Cabin = Literal["ECONOMY", "PREMIUM_ECONOMY", "BUSINESS", "FIRST"]
 Channel = Literal["gds", "airline-direct", "ota", "ndc", "meta-search", "specialist-meta"]
@@ -26,6 +26,7 @@ class SearchQuery(BaseModel):
     origin: str = Field(..., min_length=3, max_length=8)
     destination: str = Field(..., min_length=3, max_length=8)
     date: str = Field(..., pattern=r"^\d{4}-\d{2}-\d{2}$")
+    return_date: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
     adults: int = Field(1, ge=1, le=9)
     cabin: Cabin = "ECONOMY"
     currency: str = "USD"
@@ -43,6 +44,19 @@ class SearchQuery(BaseModel):
     @classmethod
     def _usd_only(cls, v: str) -> str:
         return "USD"
+
+    @field_validator("return_date", mode="before")
+    @classmethod
+    def _blank_return(cls, v):
+        if v is None or v == "":
+            return None
+        return v
+
+    @model_validator(mode="after")
+    def _return_after_outbound(self):
+        if self.return_date and self.return_date < self.date:
+            raise ValueError("Return date must be on or after the outbound date.")
+        return self
 
 
 class Country(BaseModel):
@@ -171,6 +185,8 @@ class Offer(BaseModel):
     expires_at: str | None = None
     note: str | None = None
     live: bool | None = None
+    return_date: str | None = None
+    outbound_end: int | None = None
     self_transfer_airports: list[str] = Field(default_factory=list)
     separate_tickets: list[SeparateTicket] = Field(default_factory=list)
 
@@ -369,6 +385,8 @@ class HiddenDeal(BaseModel):
     bookers: list[BookerLink] = Field(default_factory=list)
     local_offer: Offer | None = None
     through_offer: Offer | None = None
+    risk: RiskAssessment | None = None
+    warnings: list[str] = Field(default_factory=list)
 
 
 class SearchResponse(BaseModel):

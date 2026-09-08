@@ -45,7 +45,7 @@
   {:else if !deals.length}
     <p class="empty">
       No published inversions. This list is live shop inventory only — Duffel test tokens and mock
-      fixtures are not shown. Add a <code>duffel_live_…</code> token (or Amadeus production), then run
+      fixtures are not shown. Add a <code>duffel_live_…</code> token, then run
       <code>python -m app.engines.discover --wipe</code> from the API folder.
     </p>
   {:else}
