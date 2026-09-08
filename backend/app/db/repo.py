@@ -29,7 +29,8 @@ from app.db.tables import (
     SearchRow,
     TrackRow,
 )
-from app.models import Airport, BookerLink, Country, HiddenDeal, HiddenCityMatch, Navaid, Offer, Region, Runway
+from app.models import Airport, Country, HiddenDeal, HiddenCityMatch, Navaid, Offer, Region, Runway
+from app.providers.bookers import booker_links
 
 
 _CONTINENTS: dict[str, str] | None = None
@@ -1177,7 +1178,8 @@ async def persist_hidden_deals(
 
 
 def _deal_from_row(row: HiddenDealRow) -> HiddenDeal:
-    bookers = [BookerLink.model_validate(b) for b in (row.bookers or [])]
+    # Always rebuild booker URLs so saved deals never keep a dead Google `#flt=` link.
+    bookers = booker_links(row.origin, row.hidden_city, row.date, 1, currency=row.currency or "USD")
     local = Offer.model_validate(row.local_payload) if row.local_payload else None
     through = Offer.model_validate(row.through_payload) if row.through_payload else None
     return HiddenDeal(

@@ -31,6 +31,9 @@
     compact?: boolean;
   } = $props();
 
+  let error = $state('');
+  let submitting = $state(false);
+
   function swap() {
     const a = origin;
     origin = destination;
@@ -48,19 +51,38 @@
 
   async function submit(e: Event) {
     e.preventDefault();
-    const [o, d] = await Promise.all([resolveIata(origin), resolveIata(destination)]);
-    if (!o || !d || !date || o === d) return;
-    origin = o;
-    destination = d;
-    const q = new URLSearchParams({
-      origin: o,
-      destination: d,
-      date,
-      adults: String(adults),
-      cabin,
-      nearby: include_nearby ? '1' : '0'
-    });
-    goto(`/results?${q.toString()}`);
+    error = '';
+    if (!date) {
+      error = 'Choose a date.';
+      return;
+    }
+    submitting = true;
+    try {
+      const [o, d] = await Promise.all([resolveIata(origin), resolveIata(destination)]);
+      if (!o || !d) {
+        error = 'Choose a from and to city or airport.';
+        return;
+      }
+      if (o === d) {
+        error = 'From and to must be different.';
+        return;
+      }
+      origin = o;
+      destination = d;
+      const q = new URLSearchParams({
+        origin: o,
+        destination: d,
+        date,
+        adults: String(adults),
+        cabin,
+        nearby: include_nearby ? '1' : '0'
+      });
+      await goto(`/results?${q.toString()}`);
+    } catch (err) {
+      error = err instanceof Error ? err.message : 'Airport lookup failed.';
+    } finally {
+      submitting = false;
+    }
   }
 </script>
 
@@ -79,7 +101,7 @@
     <div class="span-cabin">
       <SelectMenu bind:value={cabin} label="Cabin" options={cabins} />
     </div>
-    <button class="go" type="submit">Search</button>
+    <button class="go" type="submit" disabled={submitting}>{submitting ? 'Searching…' : 'Search'}</button>
   </div>
   <div class="toggles">
     <button class="check" type="button" aria-pressed={include_nearby} onclick={() => (include_nearby = !include_nearby)}>
@@ -97,4 +119,18 @@
       <em>Adults</em>
     </div>
   </div>
+  {#if error}
+    <p class="search-error" role="alert">{error}</p>
+  {/if}
 </form>
+
+<style>
+  .search-error {
+    margin: 8px 2px 0;
+    color: var(--muted);
+    font-size: 0.85rem;
+  }
+  .go:disabled {
+    opacity: 0.6;
+  }
+</style>

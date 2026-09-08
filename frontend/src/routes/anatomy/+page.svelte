@@ -25,18 +25,19 @@
     <section class="anatomy-card">
       <h2>The idea</h2>
       <p>
-        You want A→B. Sometimes A→B→C is cheaper, on the same first flight. You would get off at B. That only works as a
-        one-way, carry-on trip. Checked bags go to C. Missed connections and irregular operations can send you past B.
+        You want A→B. Sometimes a complete A→B→C ticket is cheaper than a ticket that ends at B. You would get off at
+        B. That only works as a one-way, carry-on trip. Checked bags go to C. Missed connections and irregular operations
+        can send you past B.
       </p>
     </section>
     <section class="anatomy-card">
       <h2>How we search</h2>
       <ol>
         <li>Price A→B (nonstop and connecting).</li>
-        <li>Price nearby airports.</li>
-        <li>Find cities C that historically connect from B.</li>
-        <li>Price A→C and keep trips whose first flight is A→B.</li>
-        <li>Show only cases where the through ticket is cheaper.</li>
+        <li>Optionally price nearby airports when the city pair is thin.</li>
+        <li>Find cities C that historically connect from B, then learn from tickets we actually priced.</li>
+        <li>Price complete A→C trips and keep those that stop at your city B on the way.</li>
+        <li>Show a hidden-city fare only when that through-ticket is cheaper than the cheapest honest A→B, in the same currency.</li>
       </ol>
     </section>
   </div>

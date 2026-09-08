@@ -2,6 +2,21 @@ import type { Airport, Country, HiddenDeal, Offer, SearchQuery, SearchResponse, 
 
 const prefix = '/api';
 
+function apiDetail(body: unknown, fallback: string): string {
+  if (!body || typeof body !== 'object') return fallback;
+  const detail = (body as { detail?: unknown }).detail;
+  if (typeof detail === 'string' && detail) return detail;
+  if (Array.isArray(detail) && detail.length) {
+    const first = detail[0];
+    if (typeof first === 'string' && first) return first;
+    if (first && typeof first === 'object' && 'msg' in first) {
+      const msg = (first as { msg: unknown }).msg;
+      if (typeof msg === 'string' && msg) return msg;
+    }
+  }
+  return fallback;
+}
+
 export async function fetchAirport(iata: string): Promise<Airport | null> {
   const r = await fetch(`${prefix}/airports/${encodeURIComponent(iata)}`);
   if (r.status === 404) return null;
@@ -13,7 +28,7 @@ export async function searchAirports(q: string): Promise<Airport[]> {
   const r = await fetch(`${prefix}/airports?q=${encodeURIComponent(q)}`);
   if (!r.ok) {
     const body = await r.json().catch(() => ({ detail: r.statusText }));
-    throw new Error(body.detail || 'Airport lookup failed');
+    throw new Error(apiDetail(body, 'Airport lookup failed'));
   }
   return r.json();
 }
@@ -26,7 +41,7 @@ export async function searchFares(query: SearchQuery): Promise<SearchResponse> {
   });
   if (!r.ok) {
     const body = await r.json().catch(() => ({ detail: r.statusText }));
-    throw new Error(body.detail || 'Search failed');
+    throw new Error(apiDetail(body, 'Search failed'));
   }
   return r.json();
 }
@@ -40,29 +55,21 @@ export async function expandSearch(query: SearchQuery, exclude: string[]): Promi
   });
   if (!r.ok) {
     const body = await r.json().catch(() => ({ detail: r.statusText }));
-    throw new Error(body.detail || 'Deep search failed');
+    throw new Error(apiDetail(body, 'Deep search failed'));
   }
   return r.json();
 }
 
-/** Merge a deep response over a fast one. The deep pass reuses the fast pass's
- *  indexed offers, so it is normally a superset; fall back field by field when not. */
+/** Merge a deep response over a fast one. Hidden-city picks come from the deep
+ *  pass only: if a cheaper honest fare appeared, a stale fast match must not win. */
 export function mergeSearch(fast: SearchResponse, deep: SearchResponse): SearchResponse {
-  const seen = new Set<string>();
-  const hidden = [...deep.hidden_city, ...fast.hidden_city].filter((m) => {
-    const id = m.through_offer.id;
-    if (seen.has(id)) return false;
-    seen.add(id);
-    return true;
-  });
-  hidden.sort((a, b) => (b.gross_saving ?? 0) - (a.gross_saving ?? 0));
   const deepHasFlights = deep.channels.some((c) => c.kind !== 'hidden-city' && c.offers.length);
   return {
     ...deep,
     honest_pick: deep.honest_pick ?? fast.honest_pick,
     best_pick: deep.best_pick ?? fast.best_pick,
-    hidden_if_cheaper: deep.hidden_if_cheaper ?? fast.hidden_if_cheaper,
-    hidden_city: hidden,
+    hidden_if_cheaper: deep.hidden_if_cheaper,
+    hidden_city: deep.hidden_city,
     channels: deepHasFlights ? deep.channels : fast.channels,
     bookers: deep.bookers?.length ? deep.bookers : fast.bookers,
     airline_names: { ...(fast.airline_names ?? {}), ...(deep.airline_names ?? {}) },
@@ -106,8 +113,7 @@ export async function fetchCountries(q = ''): Promise<Country[]> {
   const r = await fetch(`${prefix}/countries?q=${encodeURIComponent(q)}`);
   if (!r.ok) {
     const body = await r.json().catch(() => ({ detail: r.statusText }));
-    const detail = body.detail;
-    throw new Error(typeof detail === 'string' ? detail : 'Country lookup failed');
+    throw new Error(apiDetail(body, 'Country lookup failed'));
   }
   return r.json();
 }

@@ -35,3 +35,43 @@ def test_all_bookers_carry_route_and_date():
             continue
         assert "JFK" in url.upper() and "ORD" in url.upper(), sid
         assert "2026" in url or "261010" in url or "10Oct26" in url, sid
+
+
+def test_stale_deal_google_hash_is_replaced_on_read():
+    from app.db.repo import _deal_from_row
+    from app.db.tables import HiddenDealRow
+
+    row = HiddenDealRow(
+        id=1,
+        origin="JFK",
+        destination="ORD",
+        hidden_city="DEN",
+        origin_city="New York",
+        dest_city="Chicago",
+        hidden_city_name="Denver (DEN)",
+        date="2026-11-18",
+        honest_price=240,
+        through_price=170,
+        currency="USD",
+        saving=70,
+        saving_pct=29,
+        first_flight="AA123",
+        source="mock",
+        bookers=[
+            {
+                "id": "google-flights",
+                "name": "Google Flights",
+                "layer": "meta-search",
+                "role": "compare",
+                "url": "https://www.google.com/travel/flights#flt=JFK.DEN.2026-11-18",
+                "issues_ticket": False,
+            }
+        ],
+        local_payload=None,
+        through_payload=None,
+    )
+    deal = _deal_from_row(row)
+    google = next(b.url for b in deal.bookers if b.id == "google-flights")
+    assert "tfs=" in google
+    assert "#flt=" not in google
+    assert "JFK-DEN" in next(b.url for b in deal.bookers if b.id == "kayak")

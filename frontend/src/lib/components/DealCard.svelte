@@ -1,11 +1,14 @@
 <script lang="ts">
-  import { duration, money, timeRange } from '$lib/api';
+  import { duration, itineraryBookers, money, timeRange } from '$lib/api';
   import type { HiddenDeal } from '$lib/types';
 
   let { deal, compact = false }: { deal: HiddenDeal; compact?: boolean } = $props();
   const through = $derived(deal.through_offer);
   const getOff = $derived(through?.segments[0]?.dest || deal.dest);
   const href = $derived(`/results?origin=${deal.origin}&destination=${deal.dest}&date=${deal.date}&nearby=0`);
+  const bookers = $derived(
+    itineraryBookers(deal.origin, deal.hidden_city, deal.date, 1, deal.currency).slice(0, 4)
+  );
 </script>
 
 <article class="hc deal-card">
@@ -39,9 +42,9 @@
       </div>
     </div>
   </a>
-  {#if !compact && deal.bookers?.length}
+  {#if !compact && bookers.length}
     <div class="book-row" style="margin-top:12px">
-      {#each deal.bookers.slice(0, 4) as b}
+      {#each bookers as b}
         <a class="book-btn" href={b.url} target="_blank" rel="noreferrer">{b.name}</a>
       {/each}
     </div>

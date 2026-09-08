@@ -76,12 +76,15 @@
             const merged = mergeSearch(fast, deep);
             data = merged;
             const after = merged.hidden_if_cheaper?.through_offer.price ?? null;
+            const probed = deep.search_debug?.expanded_destinations?.length ?? pending.length;
             if (after != null && (before == null || after < before)) {
               deepNote = 'We found a cheaper option.';
             } else if (merged.hidden_city.length > beforeCount) {
               deepNote = `${merged.hidden_city.length - beforeCount} more hidden-city ticket(s) found.`;
             } else {
-              deepNote = `Checked ${pending.length} more destination(s). Nothing cheaper.`;
+              deepNote = probed
+                ? `Checked ${probed} more destination(s). Nothing cheaper.`
+                : 'Deep search finished. Nothing cheaper.';
             }
           })
           .catch(() => {
