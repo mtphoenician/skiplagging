@@ -1,5 +1,5 @@
 export type Cabin = 'ECONOMY' | 'PREMIUM_ECONOMY' | 'BUSINESS' | 'FIRST';
-export type ItineraryKind = 'nonstop' | 'connecting' | 'nearby' | 'hidden-city';
+export type ItineraryKind = 'nonstop' | 'connecting' | 'nearby' | 'hidden-city' | 'self-transfer';
 
 export interface Country {
   iso2: string;
@@ -105,6 +105,8 @@ export interface Offer {
   first_flight: string;
   retrieved_at?: string | null;
   live?: boolean | null;
+  self_transfer_airports?: string[];
+  separate_tickets?: { origin: string; dest: string; date: string; price: number; currency: string; carrier: string }[];
 }
 
 export interface RiskItem {
@@ -187,6 +189,7 @@ export interface SearchDebug {
   reused_from_index?: number;
   rejected: string[];
   cache: string;
+  pending_self_transfer?: boolean;
 }
 
 export interface HonestPick {

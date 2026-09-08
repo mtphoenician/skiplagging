@@ -1,4 +1,4 @@
-import type { Airport, Country, HiddenDeal, Offer, SearchQuery, SearchResponse, SourceDef } from './types';
+import type { Airport, ChannelGroup, Country, HiddenDeal, Offer, SearchQuery, SearchResponse, SourceDef } from './types';
 
 const prefix = '/api';
 
@@ -62,15 +62,51 @@ export async function expandSearch(query: SearchQuery, exclude: string[]): Promi
 
 /** Merge a deep response over a fast one. Hidden-city picks come from the deep
  *  pass only: if a cheaper honest fare appeared, a stale fast match must not win. */
+function offerKey(offer: Offer): string {
+  return offer.segments
+    .map((s) => `${s.origin}|${s.dest}|${s.flight_number}|${(s.dep || '').slice(0, 16)}`)
+    .join('>');
+}
+
+function mergeSelfTransfer(fast?: ChannelGroup, deep?: ChannelGroup): ChannelGroup | undefined {
+  const offers = [...(fast?.offers ?? []), ...(deep?.offers ?? [])].sort(
+    (a, b) => (a.price ?? 1e12) - (b.price ?? 1e12)
+  );
+  const seen = new Set<string>();
+  const uniq: Offer[] = [];
+  for (const offer of offers) {
+    const key = offerKey(offer);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    uniq.push(offer);
+    if (uniq.length >= 8) break;
+  }
+  const base = deep?.offers.length ? deep : fast;
+  if (!base) return undefined;
+  return { ...base, offers: uniq };
+}
+
 export function mergeSearch(fast: SearchResponse, deep: SearchResponse): SearchResponse {
-  const deepHasFlights = deep.channels.some((c) => c.kind !== 'hidden-city' && c.offers.length);
+  const fastMap = new Map(fast.channels.map((c) => [c.kind, c]));
+  const deepMap = new Map(deep.channels.map((c) => [c.kind, c]));
+  const kinds = [...new Set([...deep.channels.map((c) => c.kind), ...fast.channels.map((c) => c.kind)])];
+  const channels = kinds
+    .map((kind) => {
+      const d = deepMap.get(kind);
+      const f = fastMap.get(kind);
+      if (kind === 'hidden-city') return d ?? f;
+      if (kind === 'self-transfer') return mergeSelfTransfer(f, d);
+      if (d && d.offers.length) return d;
+      return f ?? d;
+    })
+    .filter((c): c is ChannelGroup => Boolean(c));
   return {
     ...deep,
     honest_pick: deep.honest_pick ?? fast.honest_pick,
     best_pick: deep.best_pick ?? fast.best_pick,
     hidden_if_cheaper: deep.hidden_if_cheaper,
     hidden_city: deep.hidden_city,
-    channels: deepHasFlights ? deep.channels : fast.channels,
+    channels,
     bookers: deep.bookers?.length ? deep.bookers : fast.bookers,
     airline_names: { ...(fast.airline_names ?? {}), ...(deep.airline_names ?? {}) },
     traffic_origin: deep.traffic_origin?.aircraft?.length ? deep.traffic_origin : fast.traffic_origin,
@@ -173,6 +209,10 @@ const AIRLINES: Record<string, string> = {
   U2: 'easyJet',
   UX: 'Air Europa',
   VS: 'Virgin Atlantic',
+  VA: 'Virgin Australia',
+  AK: 'AirAsia',
+  G9: 'Air Arabia',
+  QF: 'Qantas',
   WN: 'Southwest'
 };
 
@@ -322,6 +362,33 @@ export function layoverMinutes(offer: { segments: { arr: string; dep: string }[]
     total += Math.round((dep - arr) / 60000);
   }
   return total;
+}
+
+export function plusDays(dep: string, arr: string): string {
+  const a = dep.slice(0, 10);
+  const b = arr.slice(0, 10);
+  if (!a || !b || a === b) return '';
+  const n = Math.round((Date.parse(b) - Date.parse(a)) / 86400000);
+  return n > 0 ? `+${n}` : '';
+}
+
+export function stopovers(
+  offer: Offer
+): { code: string; minutes: number; selfTransfer: boolean }[] {
+  const marked = new Set((offer.self_transfer_airports ?? []).map((c) => c.toUpperCase()));
+  const out: { code: string; minutes: number; selfTransfer: boolean }[] = [];
+  for (let i = 0; i < offer.segments.length - 1; i++) {
+    const arr = Date.parse(offer.segments[i].arr);
+    const dep = Date.parse(offer.segments[i + 1].dep);
+    const minutes =
+      Number.isNaN(arr) || Number.isNaN(dep) || dep <= arr ? 0 : Math.round((dep - arr) / 60000);
+    out.push({
+      code: offer.segments[i].dest,
+      minutes,
+      selfTransfer: marked.has(offer.segments[i].dest.toUpperCase())
+    });
+  }
+  return out;
 }
 
 export function defaultDate(): string {

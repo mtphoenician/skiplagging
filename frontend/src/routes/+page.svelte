@@ -28,9 +28,12 @@
 
 <div class="wrap">
   <header class="hero">
-    <p class="eyebrow">A → B, sometimes via C</p>
-    <h1>Find cheaper flights</h1>
-    <p class="lede">A ticket that continues past your city can cost less than one that ends there.</p>
+    <p class="eyebrow">Compare every priced flight — plus the hidden-city ticket, when one exists</p>
+    <h1>Find the cheapest flight</h1>
+    <p class="lede">
+      Nonstop, connecting, nearby airports and self-transfers, sorted by price. When a ticket that continues past your
+      city costs less, we show that too.
+    </p>
     <FlightArc a={origin || 'A'} b={destination || 'B'} c="C" />
   </header>
 
@@ -60,7 +63,7 @@
     </article>
     <article>
       <b><span class="step">2</span> Compare</b>
-      <p>The cheapest ticket and the best itinerary on your city pair. A hidden-city fare only if it costs less than the cheapest honest ticket.</p>
+      <p>Cheapest, best and fastest regular tickets first. Self-transfers and a hidden-city fare appear only when they cost less.</p>
     </article>
     <article>
       <b><span class="step">3</span> Book there</b>

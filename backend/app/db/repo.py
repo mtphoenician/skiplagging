@@ -617,6 +617,21 @@ async def destinations_from_many(
     return out
 
 
+async def origins_into(session: AsyncSession, dest: str, limit: int = 40) -> list[str]:
+    """Historical OpenFlights origins that published a nonstop into dest. Not a schedule."""
+    code = dest.upper()[:3]
+    if not code:
+        return []
+    stmt = (
+        select(RouteRow.origin_iata, func.count())
+        .where(RouteRow.dest_iata == code, RouteRow.stops == 0)
+        .group_by(RouteRow.origin_iata)
+        .order_by(func.count().desc())
+        .limit(limit)
+    )
+    return [row[0] for row in (await session.execute(stmt)).all() if row[0]]
+
+
 async def airline_by_icao(session: AsyncSession, icao: str) -> AirlineRow | None:
     stmt = select(AirlineRow).where(AirlineRow.icao == icao.upper()).limit(1)
     return (await session.execute(stmt)).scalars().first()

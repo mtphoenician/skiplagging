@@ -4,7 +4,7 @@
 
   let { deal, compact = false }: { deal: HiddenDeal; compact?: boolean } = $props();
   const through = $derived(deal.through_offer);
-  const getOff = $derived(through?.segments[0]?.dest || deal.dest);
+  const getOff = $derived(deal.dest);
   const href = $derived(`/results?origin=${deal.origin}&destination=${deal.dest}&date=${deal.date}&nearby=0`);
   const bookers = $derived(
     itineraryBookers(deal.origin, deal.hidden_city, deal.date, 1, deal.currency).slice(0, 4)

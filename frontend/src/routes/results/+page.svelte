@@ -4,16 +4,19 @@
   import OfferCard from '$lib/components/OfferCard.svelte';
   import SearchForm from '$lib/components/SearchForm.svelte';
   import TrafficPanel from '$lib/components/TrafficPanel.svelte';
-  import { expandSearch, itineraryBookers, mergeSearch, searchFares } from '$lib/api';
-  import type { Cabin, SearchQuery, SearchResponse } from '$lib/types';
+  import { duration, expandSearch, itineraryBookers, mergeSearch, money, searchFares } from '$lib/api';
+  import type { Cabin, Offer, SearchQuery, SearchResponse } from '$lib/types';
 
   const params = $derived(page.url.searchParams);
   let data = $state<SearchResponse | null>(null);
   let error = $state('');
   let loading = $state(true);
   let deepPending = $state<string[]>([]);
+  let deepSelf = $state(false);
   let deepNote = $state('');
   let tab = $state<'flights' | 'hidden' | 'live' | 'debug'>('flights');
+  let sort = $state<'cheapest' | 'best' | 'fastest'>('cheapest');
+  let maxStops = $state<number>(-1);
 
   let origin = $state('');
   let destination = $state('');
@@ -40,6 +43,7 @@
     error = '';
     data = null;
     deepPending = [];
+    deepSelf = false;
     deepNote = '';
 
     if (!/^(CITY-)?[A-Z]{3}$/.test(o) || !/^(CITY-)?[A-Z]{3}$/.test(d) || !dt) {
@@ -66,10 +70,13 @@
         data = fast;
         loading = false;
         const pending = fast.search_debug?.pending_candidates ?? [];
-        if (!pending.length) return;
+        const pendingSelf = Boolean(fast.search_debug?.pending_self_transfer);
+        if (!pending.length && !pendingSelf) return;
         deepPending = pending;
+        deepSelf = pendingSelf && !pending.length;
         const before = fast.hidden_if_cheaper?.through_offer.price ?? null;
         const beforeCount = fast.hidden_city.length;
+        const beforeSelf = fast.channels.find((c) => c.kind === 'self-transfer')?.offers[0]?.price ?? null;
         return expandSearch(query, fast.search_debug?.expanded_destinations ?? [])
           .then((deep) => {
             if (cancelled) return;
@@ -77,8 +84,11 @@
             data = merged;
             const after = merged.hidden_if_cheaper?.through_offer.price ?? null;
             const probed = deep.search_debug?.expanded_destinations?.length ?? pending.length;
+            const afterSelf = merged.channels.find((c) => c.kind === 'self-transfer')?.offers[0]?.price ?? null;
             if (after != null && (before == null || after < before)) {
               deepNote = 'We found a cheaper option.';
+            } else if (afterSelf != null && (beforeSelf == null || afterSelf < beforeSelf)) {
+              deepNote = 'We found a cheaper self-transfer (separate tickets).';
             } else if (merged.hidden_city.length > beforeCount) {
               deepNote = `${merged.hidden_city.length - beforeCount} more hidden-city ticket(s) found.`;
             } else {
@@ -91,7 +101,10 @@
             if (!cancelled) deepNote = 'Deep search did not finish. Results above are the fast pass.';
           })
           .finally(() => {
-            if (!cancelled) deepPending = [];
+            if (!cancelled) {
+              deepPending = [];
+              deepSelf = false;
+            }
           });
       })
       .catch((e: Error) => {
@@ -118,36 +131,91 @@
         data.honest_pick.offer.id !== data.best_pick.offer.id
     )
   );
-  const pick = $derived(
-    data?.hidden_if_cheaper?.through_offer ?? data?.best_pick?.offer ?? data?.honest_pick?.offer ?? null
-  );
+  // Page-level booker links always search the honest city pair A → B. The
+  // hidden-city card carries its own links to the ticketed A → C trip.
   const confirmIds = ['google-flights', 'kayak', 'skyscanner', 'booking-com', 'expedia'];
   const confirms = $derived.by(() => {
     if (!data) return [];
-    const source = data.hidden_if_cheaper?.bookers?.length
-      ? data.hidden_if_cheaper.bookers
-      : (data.bookers ?? []);
-    const fromApi = source.filter((b) => confirmIds.includes(b.id));
+    const fromApi = (data.bookers ?? []).filter((b) => confirmIds.includes(b.id));
     if (fromApi.length) return fromApi;
-    const o = pick?.segments[0]?.origin || data.origin.iata;
-    const d = pick?.segments[pick.segments.length - 1]?.dest || data.destination.iata;
     return itineraryBookers(
-      o,
-      d,
+      data.origin.iata,
+      data.destination.iata,
       data.query.date,
       data.query.adults,
-      pick?.currency || data.query.currency,
+      data.honest_pick?.offer.currency || data.query.currency,
       data.query.cabin
     );
   });
-  const confirmNote = $derived.by(() => {
-    if (!data) return '';
-    const hidden = data.hidden_if_cheaper;
-    if (!hidden) return 'Confirm this city-pair on another site. We do not copy their prices.';
-    const ticketed = hidden.ticketed_destination || hidden.hidden_city;
-    const origin = hidden.through_offer.segments[0]?.origin || data.origin.iata;
-    return `These links search the ticketed trip ${origin} → ${ticketed}, not ${data.origin.iata} → ${data.destination.iata}. Hidden-city is the full itinerary.`;
+  const confirmNote = $derived(
+    data
+      ? `Compare ${data.origin.iata} → ${data.destination.iata} on other sites. We do not copy their prices.`
+      : ''
+  );
+  const selfTransfers = $derived(data?.channels.find((c) => c.kind === 'self-transfer')?.offers ?? []);
+  const cheapestSelf = $derived(selfTransfers[0] ?? null);
+  const showSelf = $derived.by(() => {
+    const self = cheapestSelf;
+    if (self?.price == null) return false;
+    const honest = data?.honest_pick?.offer.price;
+    return honest == null || self.price < honest;
   });
+
+  const hiddenSaving = $derived.by(() => {
+    const h = data?.hidden_if_cheaper;
+    const honest = data?.honest_pick?.offer.price;
+    if (!h || honest == null || h.through_offer.price == null) return 0;
+    return honest - h.through_offer.price;
+  });
+
+  // Comparator list: every priced flight to B in one list, like a metasearch.
+  // Hidden-city tickets are not in here; they are a separate, labeled addition.
+  const allOffers = $derived.by(() => {
+    const seen = new Set<string>();
+    const out: Offer[] = [];
+    for (const ch of lists) {
+      for (const o of ch.offers) {
+        if (o.price == null || seen.has(o.id)) continue;
+        seen.add(o.id);
+        out.push(o);
+      }
+    }
+    return out;
+  });
+  const minPrice = $derived(Math.min(...allOffers.map((o) => o.price ?? Infinity)));
+  const minDuration = $derived(Math.min(...allOffers.map((o) => o.duration_min || Infinity)));
+  function bestScore(o: Offer): number {
+    // Kayak-style blend: price, then time and stops as a mild penalty.
+    return (o.price ?? 1e9) + o.duration_min * 0.15 + o.stops * 20 + (o.kind === 'self-transfer' ? 40 : 0);
+  }
+  const shown = $derived.by(() => {
+    const rows = allOffers.filter((o) => maxStops < 0 || o.stops <= maxStops);
+    const by: Record<typeof sort, (a: Offer, b: Offer) => number> = {
+      cheapest: (a, b) => (a.price ?? 1e9) - (b.price ?? 1e9) || a.duration_min - b.duration_min,
+      fastest: (a, b) => a.duration_min - b.duration_min || (a.price ?? 1e9) - (b.price ?? 1e9),
+      best: (a, b) => bestScore(a) - bestScore(b)
+    };
+    return [...rows].sort(by[sort]);
+  });
+  const bestId = $derived(allOffers.length ? [...allOffers].sort((a, b) => bestScore(a) - bestScore(b))[0].id : '');
+  const stopCounts = $derived({
+    nonstop: allOffers.filter((o) => o.stops === 0).length,
+    one: allOffers.filter((o) => o.stops <= 1).length
+  });
+
+  function tagFor(o: Offer): string {
+    if (o.kind === 'nearby') return 'Nearby airport';
+    return '';
+  }
+
+  function cities(offer: Offer): { fromCity: string; toCity: string } {
+    if (!data) return { fromCity: '', toCity: '' };
+    const last = offer.segments[offer.segments.length - 1];
+    return {
+      fromCity: offer.segments[0]?.origin === data.origin.iata ? data.origin.city : '',
+      toCity: last?.dest === data.destination.iata ? data.destination.city : ''
+    };
+  }
 </script>
 
 <svelte:head>
@@ -191,40 +259,81 @@
         Fares below are live. Still checking {deepPending.length} more ticketed destination{deepPending.length === 1 ? '' : 's'}
         ({deepPending.join(', ')}) for a cheaper through-ticket…
       </p>
+    {:else if deepSelf}
+      <p class="note deep-status" aria-live="polite">
+        Fares below are live. Still checking extra self-transfer connections…
+      </p>
     {:else if deepNote}
       <p class="note deep-status" aria-live="polite">{deepNote}</p>
     {/if}
 
+    <!-- Comparator first: the cheapest and best regular tickets to B. -->
+    {#if data.honest_pick || data.best_pick}
+      <div class="picks-row">
+        {#if data.honest_pick}
+          <div>
+            <p class="pick-kicker">{data.honest_pick.reason}</p>
+            <OfferCard
+              offer={data.honest_pick.offer}
+              featured
+              cheapest={!showSelf}
+              names={names}
+              adults={data.query.adults}
+              cabin={data.query.cabin}
+              {...cities(data.honest_pick.offer)}
+            />
+          </div>
+        {/if}
+        {#if showHonest && data.best_pick}
+          <div>
+            <p class="pick-kicker">{data.best_pick.reason}</p>
+            <OfferCard
+              offer={data.best_pick.offer}
+              best
+              names={names}
+              adults={data.query.adults}
+              cabin={data.query.cabin}
+              {...cities(data.best_pick.offer)}
+            />
+          </div>
+        {:else if !data.honest_pick && data.best_pick}
+          <div>
+            <p class="pick-kicker">{data.best_pick.reason}</p>
+            <OfferCard
+              offer={data.best_pick.offer}
+              featured
+              best
+              names={names}
+              adults={data.query.adults}
+              cabin={data.query.cabin}
+              {...cities(data.best_pick.offer)}
+            />
+          </div>
+        {/if}
+      </div>
+    {/if}
+
+    {#if showSelf && cheapestSelf}
+      <p class="pick-kicker">Cheaper with separate tickets — self-transfer</p>
+      <OfferCard
+        offer={cheapestSelf}
+        cheapest
+        names={names}
+        adults={data.query.adults}
+        cabin={data.query.cabin}
+        {...cities(cheapestSelf)}
+      />
+    {/if}
+
+    <!-- Addition: a hidden-city ticket, only when one exists and it saves money. -->
     {#if data.hidden_if_cheaper}
-      <p class="pick-kicker">Best — cheapest hidden-city</p>
+      <p class="pick-kicker">
+        Also: hidden-city ticket{hiddenSaving > 0 ? ` — saves ${money(hiddenSaving, data.hidden_if_cheaper.currency)}` : ''}
+      </p>
       <HiddenCityCard match={data.hidden_if_cheaper} names={names} />
     {/if}
 
-    {#if data.best_pick || showHonest}
-      <div class="picks-row">
-        {#if data.best_pick}
-          <div>
-            <p class="pick-kicker">{data.best_pick.reason}</p>
-            <OfferCard offer={data.best_pick.offer} featured names={names} />
-          </div>
-        {/if}
-        {#if showHonest && data.honest_pick}
-          <div>
-            <p class="pick-kicker">{data.honest_pick.reason}</p>
-            <OfferCard offer={data.honest_pick.offer} names={names} />
-          </div>
-        {/if}
-      </div>
-    {:else if data.honest_pick}
-      <div class="picks-row">
-        <div>
-          <p class="pick-kicker">{data.honest_pick.reason}</p>
-          <OfferCard offer={data.honest_pick.offer} featured names={names} />
-        </div>
-      </div>
-    {/if}
-
-    {#if !data.honest_pick && !data.best_pick && !data.hidden_if_cheaper && !listedCount}
+    {#if !data.honest_pick && !data.best_pick && !data.hidden_if_cheaper && !showSelf && !listedCount}
       <p class="empty">
         {noShop
           ? 'No priced flights here — this app is not connected to a fare shop.'
@@ -253,17 +362,44 @@
     </div>
 
     {#if tab === 'flights'}
-      {#if listedCount}
-        {#each lists as ch}
-          {#if ch.offers.length}
-            <h2 class="section-title">
-              {ch.kind === 'nonstop' ? 'Nonstop' : ch.kind === 'connecting' ? 'Connecting' : 'Nearby airports'}
-            </h2>
-            {#each ch.offers as offer}
-              <OfferCard {offer} names={names} />
-            {/each}
-          {/if}
-        {/each}
+      {#if allOffers.length}
+        <div class="toolbar">
+          <div class="seg-ctl" role="group" aria-label="Sort">
+            <button class:on={sort === 'cheapest'} type="button" onclick={() => (sort = 'cheapest')}>
+              Cheapest {money(minPrice, allOffers[0].currency)}
+            </button>
+            <button class:on={sort === 'best'} type="button" onclick={() => (sort = 'best')}>Best</button>
+            <button class:on={sort === 'fastest'} type="button" onclick={() => (sort = 'fastest')}>
+              Fastest {duration(minDuration)}
+            </button>
+          </div>
+          <div class="seg-ctl" role="group" aria-label="Stops">
+            <button class:on={maxStops < 0} type="button" onclick={() => (maxStops = -1)}>Any stops</button>
+            <button class:on={maxStops === 0} type="button" disabled={!stopCounts.nonstop} onclick={() => (maxStops = 0)}>
+              Nonstop
+            </button>
+            <button class:on={maxStops === 1} type="button" disabled={!stopCounts.one} onclick={() => (maxStops = 1)}>
+              ≤ 1 stop
+            </button>
+          </div>
+        </div>
+        {#if shown.length}
+          {#each shown as offer (offer.id)}
+            <OfferCard
+              {offer}
+              cheapest={offer.price === minPrice}
+              fastest={offer.duration_min === minDuration}
+              best={offer.id === bestId}
+              tag={tagFor(offer)}
+              names={names}
+              adults={data.query.adults}
+              cabin={data.query.cabin}
+              {...cities(offer)}
+            />
+          {/each}
+        {:else}
+          <p class="empty">No flight matches that stop filter.</p>
+        {/if}
       {:else}
         <p class="empty">No priced flights on this city pair for that date.</p>
       {/if}
@@ -342,6 +478,36 @@
 </div>
 
 <style>
+  .toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px 18px;
+    margin: 4px 0 10px;
+  }
+  .seg-ctl {
+    display: inline-flex;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    overflow: hidden;
+    background: var(--surface);
+  }
+  .seg-ctl button {
+    border: 0;
+    background: transparent;
+    color: var(--muted);
+    padding: 7px 12px;
+    font-size: 0.85rem;
+    font-weight: 600;
+    white-space: nowrap;
+  }
+  .seg-ctl button.on {
+    background: var(--ink);
+    color: #fff;
+  }
+  .seg-ctl button:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+  }
   .deep-status {
     margin: 10px 0 4px;
     padding: 8px 12px;

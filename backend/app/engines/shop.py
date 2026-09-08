@@ -13,7 +13,7 @@ from typing import Literal
 
 from app.config import Settings
 from app.db import repo
-from app.engines.budget import start_ledger, timed_shop
+from app.engines.budget import start_ledger, timed_shop, current_ledger
 from app.engines.candidates import (
     HUB_ONWARD,
     Candidate,
@@ -32,6 +32,12 @@ from app.engines.hidden import (
 from app.engines.index import classify_for_search, ticketed_dests_through
 from app.engines.learn import build_batch
 from app.engines.risk import attach_risk
+from app.engines.self_transfer import (
+    bridge_pairs,
+    combine_at_hubs,
+    next_day,
+    pick_transfer_hubs,
+)
 from app.models import (
     BoardFlight,
     CandidateTrace,
@@ -116,6 +122,7 @@ async def search_all_ways(
         )
     except Exception:
         indexed = []
+    indexed = [o for o in indexed if not _is_self_transfer(o)]
     indexed_honest = [
         o
         for o in indexed
@@ -159,6 +166,7 @@ async def search_all_ways(
     local_offers = _prefer_real_carriers(
         _dedupe_itineraries(_keep_on_route(raw_local, route_origins, route_dests))
     )
+    local_offers = [o for o in local_offers if not _is_self_transfer(o)]
     priced = _priced_in_currency(
         [o for o in local_offers if o.price is not None], query.currency
     )
@@ -203,6 +211,26 @@ async def search_all_ways(
     skipped = sorted(covered)
     excluded = {c.upper() for c in (exclude or [])} | covered
     can_shop = bool(amadeus or duffel or mock)
+    self_transfer_offers: list[Offer] = []
+    transfer_legs: list[Offer] = []
+    mock_covered = bool(mock and any(o.source == "mock" for o in priced))
+    if (amadeus or duffel) and not mock_covered:
+        try:
+            self_transfer_offers, transfer_legs = await _shop_self_transfers(
+                req,
+                settings,
+                session,
+                amadeus,
+                duffel,
+                o_ap,
+                d_ap,
+                route_dests,
+                mode,
+            )
+            self_transfer_offers = _drop_sandbox(self_transfer_offers)
+            transfer_legs = _drop_sandbox(transfer_legs)
+        except Exception:
+            self_transfer_offers, transfer_legs = [], []
     if can_shop and honest_pick:
         budget = settings.fast_candidates if mode == "fast" else settings.max_hidden_candidates
         try:
@@ -267,17 +295,20 @@ async def search_all_ways(
     )
     hidden_matches.sort(key=lambda m: (-(m.gross_saving or 0), -m.risk.net_saving_estimate))
     # One learning row per distinct offer: a through-ticket sits in both raw_local and
-    # hidden_matches, and must not be counted twice.
+    # hidden_matches, and must not be counted twice. Never learn a stitched self-transfer
+    # as if it were one PNR; component tickets are real and may be remembered.
     learned_offers = _dedupe(
         _drop_sandbox(
             [
                 *raw_local,
                 *probe_offers,
                 *nearby_offers,
+                *transfer_legs,
                 *[m.through_offer for m in hidden_matches],
             ]
         )
     )
+    learned_offers = [o for o in learned_offers if not _is_self_transfer(o)]
     try:
         await repo.remember_offers(
             session,
@@ -323,6 +354,7 @@ async def search_all_ways(
         reused_from_index=len(indexed),
         rejected=rejected[:24],
         cache=_cache_state(indexed, shop_local),
+        pending_self_transfer=bool((amadeus or duffel) and not mock_covered and mode == "fast"),
     )
     compare_ccy = honest_pick.offer.currency if honest_pick else None
     local_cmp = [o for o in priced if compare_ccy is None or o.currency == compare_ccy]
@@ -333,6 +365,8 @@ async def search_all_ways(
         m.through_offer
         for m in hidden_matches
         if m.through_offer.price is not None and (compare_ccy is None or m.through_offer.currency == compare_ccy)
+    ] + [
+        o for o in self_transfer_offers if o.price is not None and (compare_ccy is None or o.currency == compare_ccy)
     ]
     cheapest_any = min((o.price for o in pool if o.price is not None), default=None)
 
@@ -342,6 +376,8 @@ async def search_all_ways(
         *(s.carrier for o in priced for s in o.segments if s.carrier),
         *(m.through_offer.carrier for m in hidden_matches if m.through_offer.carrier),
         *(o.carrier for o in nearby_offers if o.carrier),
+        *(o.carrier for o in self_transfer_offers if o.carrier),
+        *(s.carrier for o in self_transfer_offers for s in o.segments if s.carrier),
     }
     airline_pairs = await repo.airlines_by_iata(session, list(name_codes))
     airline_names = {code: name for code, name in airline_pairs}
@@ -407,6 +443,12 @@ async def search_all_ways(
             offers=sorted([o for o in nearby_offers if o.price is not None], key=_honest_rank),
         ),
         ChannelGroup(
+            kind="self-transfer",
+            label="Self-transfer (separate tickets)",
+            blurb="Two or three independently priced tickets you buy yourself. A missed connection is not protected. Not hidden-city.",
+            offers=self_transfer_offers,
+        ),
+        ChannelGroup(
             kind="hidden-city",
             label="Priced hidden-city inversions",
             blurb="Complete tickets that continue past the intended city. The priced itinerary is never rewritten.",
@@ -466,8 +508,9 @@ async def search_all_ways(
     gaps = _gaps(amadeus, duffel, box, priced, hidden_matches, traffic_o, board, mock)
     notes = [
         "Reference / track / schedule / priced-offer / booker are different layers. A tracker is not a ticket. A metasearch link is not a PNR.",
-        "Best for this app: cheapest hidden-city first when it saves, then the cheapest nonstop, otherwise the cheapest trip with the fewest stops, then the cheapest connecting fare.",
+        "Ranking: this is a price comparator first. Cheapest regular ticket, then the best (fewest stops) and fastest. Self-transfer and hidden-city rows are additions shown only when they cost less than the cheapest regular ticket.",
         "Hidden-city rows are complete tickets that continue past the intended city. The priced itinerary is never rewritten into a fake A→B fare.",
+        "Self-transfer rows are separate tickets stitched at a hub. The sum is not one PNR and is not hidden-city.",
         "This API never calls Amadeus Flight Create Orders or Duffel Orders.",
     ]
 
@@ -788,6 +831,88 @@ async def _shop_nearby(
     return out
 
 
+async def _shop_self_transfers(
+    req: ShopRequest,
+    settings: Settings,
+    session: AsyncSession,
+    amadeus: AmadeusProvider | None,
+    duffel: DuffelProvider | None,
+    origin_place,
+    dest_place,
+    intended: set[str],
+    mode: Literal["fast", "deep"],
+) -> tuple[list[Offer], list[Offer]]:
+    """Shop A→H and H→B, then stitch unprotected self-transfers. Not hidden-city."""
+    origin = (origin_place.members or [origin_place.iata])[0]
+    dest = (dest_place.members or [dest_place.iata])[0]
+    from_origin = {
+        code
+        for code, _, _ in await repo.destinations_from_many(
+            session, list(origin_place.members or [origin])[:3], per_origin=24
+        )
+    }
+    into: set[str] = set()
+    for code in list(dest_place.members or [dest])[:3]:
+        into.update(await repo.origins_into(session, code, limit=24))
+    n_hubs = 3 if mode == "fast" else 4
+    ledger = current_ledger()
+    paid = len(ledger.paid()) if ledger else 0
+    left = max(0, settings.max_provider_calls - paid)
+    per_hub = 2 if mode == "fast" else 3
+    n_hubs = min(n_hubs, left // per_hub) if per_hub else 0
+    if n_hubs < 1:
+        return [], []
+    hubs = pick_transfer_hubs(origin, dest, from_origin, into, limit=n_hubs)
+    if not hubs:
+        return [], []
+
+    async def leg(o: str, d: str, date: str) -> list[Offer]:
+        r = replace(req, origin=o, dest=d, date=date, nonstop=False, max_offers=8)
+        return await _shop_providers(r, amadeus, duffel, mock=None, purpose="interline")
+
+    def keep_legs(offers: list[Offer], dest_ok) -> list[Offer]:
+        kept = _prefer_real_carriers(
+            [o for o in offers if dest_ok(o) and detect_hidden_city(o, intended) is None]
+        )
+        kept.sort(key=lambda o: (o.price or 1e12, o.duration_min, o.stops))
+        return kept[:4]
+
+    async def inbound_hub(hub: str) -> tuple[str, list[Offer]]:
+        offers = await leg(req.origin, hub, req.date)
+        return hub, keep_legs(offers, lambda o: is_standard_to(o, hub))
+
+    async def outbound_hub(hub: str) -> tuple[str, list[Offer]]:
+        dates = [req.date] if mode == "fast" else [req.date, next_day(req.date)]
+        parts = await asyncio.gather(*(leg(hub, req.dest, d) for d in dates), return_exceptions=True)
+        pooled: list[Offer] = []
+        for part in parts:
+            if isinstance(part, list):
+                pooled.extend(part)
+        return hub, keep_legs(pooled, lambda o: is_standard_to(o, intended))
+
+    inbound_rows = await asyncio.gather(*(inbound_hub(h) for h in hubs), return_exceptions=True)
+    outbound_rows = await asyncio.gather(*(outbound_hub(h) for h in hubs), return_exceptions=True)
+    inbound: dict[str, list[Offer]] = {}
+    outbound: dict[str, list[Offer]] = {}
+    for row in inbound_rows:
+        if isinstance(row, tuple):
+            inbound[row[0]] = row[1]
+    for row in outbound_rows:
+        if isinstance(row, tuple):
+            outbound[row[0]] = row[1]
+
+    mids: dict[tuple[str, str], list[Offer]] = {}
+    for h1, h2 in bridge_pairs(hubs, dest, limit=2 if mode == "deep" else 1):
+        mid = await leg(h1, h2, req.date)
+        kept_mid = keep_legs(mid, lambda o, dest_h=h2: is_standard_to(o, dest_h))
+        if kept_mid:
+            mids[(h1, h2)] = kept_mid
+    legs: list[Offer] = []
+    for group in (*inbound.values(), *outbound.values(), *mids.values()):
+        legs.extend(group)
+    return combine_at_hubs(inbound, outbound, intended, mids=mids, limit=8), _dedupe(legs)
+
+
 async def _plan_candidates(
     session: AsyncSession,
     settings: Settings,
@@ -935,6 +1060,10 @@ def _is_sandbox(offer: Offer) -> bool:
         return True
     note = offer.note or ""
     return offer.source == "duffel" and "live_mode=False" in note
+
+
+def _is_self_transfer(offer: Offer) -> bool:
+    return offer.kind == "self-transfer" or offer.source == "self-transfer"
 
 
 def _drop_sandbox(offers: list[Offer]) -> list[Offer]:

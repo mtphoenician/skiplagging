@@ -6,7 +6,7 @@ from pydantic import BaseModel, Field, field_validator
 
 Cabin = Literal["ECONOMY", "PREMIUM_ECONOMY", "BUSINESS", "FIRST"]
 Channel = Literal["gds", "airline-direct", "ota", "ndc", "meta-search", "specialist-meta"]
-ItineraryKind = Literal["nonstop", "connecting", "nearby", "hidden-city"]
+ItineraryKind = Literal["nonstop", "connecting", "nearby", "hidden-city", "self-transfer"]
 DataLayer = Literal[
     "reference",
     "historical-route-map",
@@ -128,6 +128,17 @@ class Segment(BaseModel):
     aircraft: str = ""
 
 
+class SeparateTicket(BaseModel):
+    """One independently priced coupon in a self-transfer row. Not a hidden-city leg."""
+
+    origin: str
+    dest: str
+    date: str
+    price: float
+    currency: str
+    carrier: str
+
+
 class Offer(BaseModel):
     id: str
     kind: ItineraryKind
@@ -155,6 +166,8 @@ class Offer(BaseModel):
     expires_at: str | None = None
     note: str | None = None
     live: bool | None = None
+    self_transfer_airports: list[str] = Field(default_factory=list)
+    separate_tickets: list[SeparateTicket] = Field(default_factory=list)
 
 
 class RiskItem(BaseModel):
@@ -231,6 +244,7 @@ class SearchDebug(BaseModel):
     reused_from_index: int = 0
     rejected: list[str] = Field(default_factory=list)
     cache: str = "miss"
+    pending_self_transfer: bool = False
 
 
 class SearchExpandRequest(BaseModel):
