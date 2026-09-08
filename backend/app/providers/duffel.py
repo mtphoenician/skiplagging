@@ -123,6 +123,7 @@ def _one(raw: dict[str, Any], req: ShopRequest, now: str) -> Offer | None:
         stops=max(len(segments) - 1, 0),
         first_flight=segments[0].flight_number,
         retrieved_at=now,
+        expires_at=raw.get("expires_at"),
         live=live,
         note=(
             "Duffel offer. live_mode="

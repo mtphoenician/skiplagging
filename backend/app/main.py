@@ -22,6 +22,7 @@ from app.models import (
     OfferRefreshRequest,
     OfferRefreshResponse,
     Region,
+    SearchExpandRequest,
     SearchQuery,
     SearchResponse,
 )
@@ -195,9 +196,8 @@ async def deals(
         return await repo.list_hidden_deals(session, limit=limit, origin=origin, dest=dest)
 
 
-@app.post("/search", response_model=SearchResponse)
-async def search(query: SearchQuery) -> SearchResponse:
-    key = search_key(
+def _key(query: SearchQuery) -> tuple:
+    return search_key(
         query.origin,
         query.destination,
         query.date,
@@ -207,6 +207,13 @@ async def search(query: SearchQuery) -> SearchResponse:
         False,
         query.currency,
     )
+
+
+@app.post("/search", response_model=SearchResponse)
+async def search(query: SearchQuery) -> SearchResponse:
+    """Fast pass: cache → index → direct A→B → top candidates. Returns `pending_candidates`
+    for the deep pass so the browser can show fares before every probe has run."""
+    key = _key(query)
     cached = app.state.cache.get(key)
     if cached is not None:
         if cached.search_debug:
@@ -214,7 +221,28 @@ async def search(query: SearchQuery) -> SearchResponse:
         return cached
     async with session_factory()() as session:
         try:
-            result = await search_all_ways(query, app.state.settings, app.state.http, session)
+            result = await search_all_ways(query, app.state.settings, app.state.http, session, mode="fast")
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    app.state.cache[key] = result
+    return result
+
+
+@app.post("/search/expand", response_model=SearchResponse)
+async def search_expand(body: SearchExpandRequest) -> SearchResponse:
+    """Deep pass: reuse everything the fast pass indexed, shop the remaining ranked
+    candidates (minus `exclude`, the ones already probed), and replace the cached result."""
+    key = _key(body.query)
+    async with session_factory()() as session:
+        try:
+            result = await search_all_ways(
+                body.query,
+                app.state.settings,
+                app.state.http,
+                session,
+                mode="deep",
+                exclude=body.exclude,
+            )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
     app.state.cache[key] = result
@@ -243,5 +271,41 @@ async def refresh_offer(body: OfferRefreshRequest) -> OfferRefreshResponse:
 
 
 @app.get("/debug/route-graph")
-async def debug_route_graph() -> dict:
-    return {"edges": graph_snapshot()}
+async def debug_route_graph(
+    origin: str = Query("", max_length=3),
+    intended: str = Query("", max_length=3),
+    limit: int = Query(100, ge=1, le=500),
+) -> dict:
+    """What the planner has learned: (A, B, C) statistics and the flights seen inside tickets."""
+    async with session_factory()() as session:
+        stats = await repo.route_stats_snapshot(session, origin=origin, intended=intended, limit=limit)
+        edges = await repo.route_edges_snapshot(session, origin=origin, limit=limit)
+    return {
+        "hidden_city_route_stats": stats,
+        "route_edges": edges,
+        "session_edges": graph_snapshot(),
+        "note": "Learned from priced itineraries we actually saw. Not a licensed schedule, never a summed price.",
+    }
+
+
+@app.get("/debug/budget")
+async def debug_budget(
+    hours: int = Query(24, ge=1, le=24 * 30),
+    origin: str = Query("", max_length=3),
+    dest: str = Query("", max_length=3),
+) -> dict:
+    """Search budget: paid provider calls, cost, calls per search, and per-route provider scores."""
+    async with session_factory()() as session:
+        summary = await repo.budget_summary(session, hours=hours)
+        if origin and dest:
+            summary["provider_scores"] = await repo.provider_route_scores(session, origin, dest)
+    summary["cost_per_call_usd"] = app.state.settings.search_cost_usd
+    return summary
+
+
+@app.get("/debug/price-history")
+async def debug_price_history(fingerprint: str = Query(..., min_length=3, max_length=240)) -> dict:
+    """Append-only fare observations for one itinerary fingerprint."""
+    async with session_factory()() as session:
+        rows = await repo.price_history(session, fingerprint)
+    return {"fingerprint": fingerprint, "observations": rows}

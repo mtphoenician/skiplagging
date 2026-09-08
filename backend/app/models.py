@@ -152,6 +152,7 @@ class Offer(BaseModel):
     stops: int
     first_flight: str
     retrieved_at: str | None = None
+    expires_at: str | None = None
     note: str | None = None
     live: bool | None = None
 
@@ -205,14 +206,36 @@ class OfferRefreshResponse(BaseModel):
     reason: str
 
 
+class CandidateTrace(BaseModel):
+    code: str
+    score: float
+    source: str
+    observations: int = 0
+    successful_connections: int = 0
+    cheaper_than_direct_count: int = 0
+    median_saving: float = 0
+    parts: dict[str, float] = Field(default_factory=dict)
+    selected: bool = False
+
+
 class SearchDebug(BaseModel):
     providers: list[str] = Field(default_factory=list)
     standard_query: str = ""
+    mode: Literal["fast", "deep"] = "fast"
     expanded_destinations: list[str] = Field(default_factory=list)
+    pending_candidates: list[str] = Field(default_factory=list)
     skipped_expansion: list[str] = Field(default_factory=list)
+    candidates: list[CandidateTrace] = Field(default_factory=list)
+    provider_calls: int = 0
+    provider_cost_usd: float = 0
     reused_from_index: int = 0
     rejected: list[str] = Field(default_factory=list)
     cache: str = "miss"
+
+
+class SearchExpandRequest(BaseModel):
+    query: SearchQuery
+    exclude: list[str] = Field(default_factory=list)
 
 
 class HonestPick(BaseModel):

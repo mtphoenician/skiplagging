@@ -204,6 +204,104 @@ class OfferObservationRow(Base):
     observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+class FareObservationRow(Base):
+    """Append-only price history. One row per priced offer per time we saw it. Never overwritten."""
+
+    __tablename__ = "fare_observations"
+    __table_args__ = (
+        Index("ix_fare_obs_itin", "fingerprint", "observed_at"),
+        Index("ix_fare_obs_pair", "origin", "ticketed", "date"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    offer_uid: Mapped[str] = mapped_column(String(80), index=True)
+    fingerprint: Mapped[str] = mapped_column(String(240))
+    origin: Mapped[str] = mapped_column(String(3))
+    ticketed: Mapped[str] = mapped_column(String(3))
+    connections: Mapped[list] = mapped_column(JSONB, default=list)
+    stops: Mapped[int] = mapped_column(Integer, default=0)
+    carrier: Mapped[str] = mapped_column(String(8), default="")
+    provider: Mapped[str] = mapped_column(String(32), index=True)
+    price: Mapped[float] = mapped_column(Float)
+    currency: Mapped[str] = mapped_column(String(8), default="USD")
+    date: Mapped[str] = mapped_column(String(10))
+    adults: Mapped[int] = mapped_column(Integer, default=1)
+    cabin: Mapped[str] = mapped_column(String(24), default="ECONOMY")
+    fare_brand: Mapped[str | None] = mapped_column(String(64))
+    expires_at: Mapped[str | None] = mapped_column(String(40))
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class RouteEdgeRow(Base):
+    """Flights we have actually seen inside priced itineraries. Learned, not licensed schedule data."""
+
+    __tablename__ = "route_edges"
+    __table_args__ = (
+        UniqueConstraint("origin", "dest", "carrier", "flight_number", name="uq_route_edge"),
+        Index("ix_route_edge_pair", "origin", "dest"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    origin: Mapped[str] = mapped_column(String(3))
+    dest: Mapped[str] = mapped_column(String(3))
+    carrier: Mapped[str] = mapped_column(String(8), default="")
+    flight_number: Mapped[str] = mapped_column(String(16), default="")
+    observation_count: Mapped[int] = mapped_column(Integer, default=0)
+    days_seen: Mapped[int] = mapped_column(Integer, default=0)
+    travel_dates: Mapped[list] = mapped_column(JSONB, default=list)
+    first_seen: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    last_seen: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class HiddenCityRouteStatRow(Base):
+    """The planner's memory: for A→B, how often a ticket to C routes via B and undercuts A→B."""
+
+    __tablename__ = "hidden_city_route_stats"
+    __table_args__ = (
+        UniqueConstraint("origin", "intended", "ticketed", name="uq_hc_route_stat"),
+        Index("ix_hc_stat_lookup", "origin", "intended", "score"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    origin: Mapped[str] = mapped_column(String(3))
+    intended: Mapped[str] = mapped_column(String(3))
+    ticketed: Mapped[str] = mapped_column(String(3))
+    observations: Mapped[int] = mapped_column(Integer, default=0)
+    successful_connections: Mapped[int] = mapped_column(Integer, default=0)
+    cheaper_than_direct_count: Mapped[int] = mapped_column(Integer, default=0)
+    success_rate: Mapped[float] = mapped_column(Float, default=0)
+    average_saving: Mapped[float] = mapped_column(Float, default=0)
+    median_saving: Mapped[float] = mapped_column(Float, default=0)
+    maximum_saving: Mapped[float] = mapped_column(Float, default=0)
+    average_saving_percent: Mapped[float] = mapped_column(Float, default=0)
+    savings: Mapped[list] = mapped_column(JSONB, default=list)
+    currency: Mapped[str] = mapped_column(String(8), default="")
+    best_through_price: Mapped[float | None] = mapped_column(Float)
+    score: Mapped[float] = mapped_column(Float, default=0, index=True)
+    last_success_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_cheaper_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_checked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class ProviderCallRow(Base):
+    """Search budget ledger. Every paid shop request, what it was for, and what came back."""
+
+    __tablename__ = "provider_calls"
+    __table_args__ = (Index("ix_provider_call_route", "provider", "origin", "dest"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    provider: Mapped[str] = mapped_column(String(32))
+    origin: Mapped[str] = mapped_column(String(3))
+    dest: Mapped[str] = mapped_column(String(3))
+    date: Mapped[str] = mapped_column(String(10), default="")
+    purpose: Mapped[str] = mapped_column(String(16), default="direct")
+    ok: Mapped[bool] = mapped_column(Boolean, default=True)
+    offers: Mapped[int] = mapped_column(Integer, default=0)
+    latency_ms: Mapped[float] = mapped_column(Float, default=0)
+    cost_usd: Mapped[float] = mapped_column(Float, default=0)
+    called_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+
+
 class HiddenDealRow(Base):
     __tablename__ = "hidden_deals"
     __table_args__ = (

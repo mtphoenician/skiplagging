@@ -152,6 +152,7 @@ class AmadeusProvider:
             stops=max(len(segments) - 1, 0),
             first_flight=segments[0].flight_number,
             retrieved_at=now,
+            expires_at=raw.get("lastTicketingDate"),
             note="Amadeus Flight Offers Search priced itinerary. Not a PNR. Confirm with Flight Offers Price before any booking API.",
         )
 

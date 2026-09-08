@@ -15,6 +15,9 @@ class Settings(BaseSettings):
     cache_ttl_seconds: int = 180
     offer_ttl_seconds: int = 900
     max_hidden_candidates: int = 8
+    fast_candidates: int = 3
+    candidate_min_score: float = 0.35
+    search_cost_usd: float = 0.005
     max_concurrency: int = 4
     mock_enabled: bool = True
     min_hidden_saving: float = 20.0

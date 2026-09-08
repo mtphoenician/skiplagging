@@ -31,6 +31,48 @@ export async function searchFares(query: SearchQuery): Promise<SearchResponse> {
   return r.json();
 }
 
+/** Deep pass: shop the ranked candidates the fast pass left pending. */
+export async function expandSearch(query: SearchQuery, exclude: string[]): Promise<SearchResponse> {
+  const r = await fetch(`${prefix}/search/expand`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ query, exclude })
+  });
+  if (!r.ok) {
+    const body = await r.json().catch(() => ({ detail: r.statusText }));
+    throw new Error(body.detail || 'Deep search failed');
+  }
+  return r.json();
+}
+
+/** Merge a deep response over a fast one. The deep pass reuses the fast pass's
+ *  indexed offers, so it is normally a superset; fall back field by field when not. */
+export function mergeSearch(fast: SearchResponse, deep: SearchResponse): SearchResponse {
+  const seen = new Set<string>();
+  const hidden = [...deep.hidden_city, ...fast.hidden_city].filter((m) => {
+    const id = m.through_offer.id;
+    if (seen.has(id)) return false;
+    seen.add(id);
+    return true;
+  });
+  hidden.sort((a, b) => (b.gross_saving ?? 0) - (a.gross_saving ?? 0));
+  const deepHasFlights = deep.channels.some((c) => c.kind !== 'hidden-city' && c.offers.length);
+  return {
+    ...deep,
+    honest_pick: deep.honest_pick ?? fast.honest_pick,
+    best_pick: deep.best_pick ?? fast.best_pick,
+    hidden_if_cheaper: deep.hidden_if_cheaper ?? fast.hidden_if_cheaper,
+    hidden_city: hidden,
+    channels: deepHasFlights ? deep.channels : fast.channels,
+    bookers: deep.bookers?.length ? deep.bookers : fast.bookers,
+    airline_names: { ...(fast.airline_names ?? {}), ...(deep.airline_names ?? {}) },
+    traffic_origin: deep.traffic_origin?.aircraft?.length ? deep.traffic_origin : fast.traffic_origin,
+    traffic_destination: deep.traffic_destination?.aircraft?.length
+      ? deep.traffic_destination
+      : fast.traffic_destination
+  };
+}
+
 export async function fetchDeals(opts: { limit?: number; origin?: string; dest?: string } = {}): Promise<HiddenDeal[]> {
   const q = new URLSearchParams();
   if (opts.limit) q.set('limit', String(opts.limit));

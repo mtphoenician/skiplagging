@@ -162,11 +162,28 @@ export interface HiddenCityMatch {
   result_type?: 'hidden_city';
 }
 
+export interface CandidateTrace {
+  code: string;
+  score: number;
+  source: string;
+  observations: number;
+  successful_connections: number;
+  cheaper_than_direct_count: number;
+  median_saving: number;
+  parts: Record<string, number>;
+  selected: boolean;
+}
+
 export interface SearchDebug {
   providers: string[];
   standard_query: string;
+  mode?: 'fast' | 'deep';
   expanded_destinations: string[];
+  pending_candidates?: string[];
   skipped_expansion?: string[];
+  candidates?: CandidateTrace[];
+  provider_calls?: number;
+  provider_cost_usd?: number;
   reused_from_index?: number;
   rejected: string[];
   cache: string;

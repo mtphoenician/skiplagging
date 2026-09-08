@@ -96,7 +96,7 @@ async def _shop(
 ) -> list[Offer]:
     async with sem:
         try:
-            offers = await _shop_providers(req, amadeus, duffel)
+            offers = await _shop_providers(req, amadeus, duffel, purpose="discover")
         except Exception as exc:
             print(f"  shop error {req.origin}->{req.dest} {req.date}: {exc}", flush=True)
             return []

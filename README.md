@@ -16,6 +16,20 @@ Hidden-city rows are **complete priced tickets** that continue past the intended
 
 Offers are stored and indexed by **ticketed destination and connection airports**. A later search for A→B can reuse a previously shopped A→B→C ticket and skip shopping C again. Fresh A→B results in the offer index skip a live shop; cheaper hidden-city already on hand skips destination expansion. Live traffic never blocks priced results. Sources are partner adapters only (mock, Duffel, Amadeus) — this app does not collect airline websites. OpenFlights spokes are **connection hints**, not savings.
 
+## Buy the fares, build the search
+
+The supplier (Duffel/Amadeus) is asked only for ordinary A→C offers. Everything that decides *which* C to pay for, and what we learn from the answer, is ours:
+
+| Module | Where | What it owns |
+| --- | --- | --- |
+| Search planner | `engines/shop.py` | Two-speed search: `POST /search` (index → direct A→B → top candidates) then `POST /search/expand` (remaining ranked candidates, reusing the index) |
+| CandidateGenerator | `engines/candidates.py` | `score = 0.30·connection + 0.25·savings probability + 0.20·expected saving + 0.10·freshness + 0.10·hub + 0.05·supplier`; shop those ≥ 0.35 up to `MAX_HIDDEN_CANDIDATES`, always 3 on a cold start, never one that failed 5 checks |
+| Route learner | `engines/learn.py` | Every response updates `fare_observations` (append-only, never overwritten), `route_edges` (flights seen inside tickets) and `hidden_city_route_stats` (A, B, C → observations, via-B successes, cheaper-than-direct count, avg/median/max saving, freshness, score) |
+| Search budget | `engines/budget.py` | Every paid supplier call is timed and logged to `provider_calls`; `GET /debug/budget` gives cost, calls per search and `ProviderScore(route, provider)` |
+| Hidden-city detector, dedupe, rank | `engines/hidden.py`, `engines/shop.py` | Complete tickets only; same currency; never `P(A,B)+P(B,C)` |
+
+Inspect what the planner has learned at `GET /debug/route-graph?origin=JFK&intended=ORD` and a fare's history at `GET /debug/price-history?fingerprint=…`. The database starts empty; each search makes the next one cheaper. Redis, OAG/Cirium schedules and a second GDS are later phases — the interfaces above do not change for them.
+
 ## Database
 
 Local PostgreSQL (`skiplagging`). Create once, then ingest official files:
@@ -70,9 +84,12 @@ RAPIDAPI_KEY=
 - `GET /health` — DB counts and which shop/track keys are on
 - `GET /sources` — full capability matrix
 - `GET /airports?q=` — OurAirports
-- `POST /search` — all layers for A, B, date (persisted in `searches` / `offers`)
+- `POST /search` — fast pass: all layers for A, B, date; returns `search_debug.pending_candidates` for the deep pass
+- `POST /search/expand` — deep pass: `{query, exclude}`; shops the remaining ranked candidates and replaces the cached result
 - `POST /offers/refresh` — reprice a mock offer; invalidates hidden-city if the path no longer stops at B
-- `GET /debug/route-graph` — observed A→B→C candidate edges
+- `GET /debug/route-graph` — learned `hidden_city_route_stats` and `route_edges` (filter `origin`, `intended`)
+- `GET /debug/budget` — paid supplier calls, cost, calls per search; add `origin`+`dest` for per-route provider scores
+- `GET /debug/price-history?fingerprint=` — append-only fare observations for one itinerary
 - `GET /track/{iata}` — OpenSky box + tracker links
 - `GET /board/{iata}` — AeroDataBox FIDS if keyed
 

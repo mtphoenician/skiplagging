@@ -9,9 +9,19 @@ from datetime import datetime
 import httpx
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from typing import Literal
+
 from app.config import Settings
 from app.db import repo
-from app.engines.candidates import plan_expansion, record_offer
+from app.engines.budget import start_ledger, timed_shop
+from app.engines.candidates import (
+    HUB_ONWARD,
+    Candidate,
+    hub_probabilities,
+    rank_candidates,
+    record_offer,
+    select_candidates,
+)
 from app.engines.hidden import (
     detect_hidden_city,
     hidden_city_savings,
@@ -20,9 +30,11 @@ from app.engines.hidden import (
     ticketed_destination,
 )
 from app.engines.index import classify_for_search, ticketed_dests_through
+from app.engines.learn import build_batch
 from app.engines.risk import attach_risk
 from app.models import (
     BoardFlight,
+    CandidateTrace,
     ChannelGroup,
     ConnectionHint,
     HiddenCityMatch,
@@ -49,8 +61,14 @@ async def search_all_ways(
     settings: Settings,
     client: httpx.AsyncClient,
     session: AsyncSession,
+    *,
+    mode: Literal["fast", "deep"] = "fast",
+    exclude: list[str] | None = None,
 ) -> SearchResponse:
+    """Two-speed search. `fast`: index + direct A→B + top candidates, return quickly.
+    `deep`: reuse the index, shop the remaining ranked candidates, return the fuller set."""
     t0 = time.perf_counter()
+    ledger = start_ledger(settings.search_cost_usd)
     origin, dest = query.origin, query.destination
 
     o_ap = await repo.get_place(session, origin)
@@ -178,68 +196,130 @@ async def search_all_ways(
         )
     hidden_matches: list[HiddenCityMatch] = list(hidden_from_local)
     expanded: list[str] = []
-    skipped: list[str] = []
+    pending: list[str] = []
+    probe_offers: list[Offer] = []
+    trace: list[CandidateTrace] = []
     covered = ticketed_dests_through(raw_local, route_dests)
-    if hidden_from_local or covered:
-        skipped = sorted(covered)
-    elif (amadeus or duffel or mock) and honest_pick:
+    skipped = sorted(covered)
+    excluded = {c.upper() for c in (exclude or [])} | covered
+    can_shop = bool(amadeus or duffel or mock)
+    if can_shop and honest_pick:
+        budget = settings.fast_candidates if mode == "fast" else settings.max_hidden_candidates
         try:
-            extra_spokes = await _c_candidates(
-                session, route_origins, d_members, settings.max_hidden_candidates, amadeus
+            ranked = await _plan_candidates(
+                session, settings, route_origins, route_dests, d_members, amadeus
             )
-            extra_spokes.extend(
-                await repo.recall_candidate_dests(
-                    session,
-                    origins=route_origins,
-                    intended=route_dests,
-                    date=query.date,
-                    adults=query.adults,
-                    cabin=query.cabin,
-                    max_age_seconds=max(settings.offer_ttl_seconds, 7 * 24 * 3600),
-                    limit=settings.max_hidden_candidates,
-                )
-            )
-            extra, expanded, skipped = await _shop_hidden(
-                req,
-                settings,
-                amadeus,
-                duffel,
-                o_ap,
-                d_ap,
-                priced,
-                mock,
-                reused=raw_local,
-                extra_spokes=extra_spokes,
-            )
-            hidden_matches.extend(extra)
         except Exception:
-            skipped = []
+            ranked = []
+        if mode == "fast" and hidden_from_local:
+            # A cheaper through-ticket is already on hand: answer now, let the deep
+            # pass spend money looking for a better one.
+            pass
+        else:
+            chosen = select_candidates(
+                ranked, budget, settings.candidate_min_score, exclude=excluded
+            )
+            expanded = [c.code for c in chosen]
+        if mode == "fast":
+            # Exactly what the deep pass will pay for, so the UI can say "N more".
+            preview = select_candidates(
+                ranked,
+                settings.max_hidden_candidates,
+                settings.candidate_min_score,
+                exclude=excluded | set(expanded),
+            )
+            pending = [c.code for c in preview]
+            chosen_codes = set(expanded)
+            for c in ranked:
+                c.selected = c.code in chosen_codes
+        if expanded:
+            try:
+                extra, probe_offers = await _probe_candidates(
+                    req,
+                    settings,
+                    amadeus,
+                    duffel,
+                    mock,
+                    o_ap,
+                    route_dests,
+                    honest_pick.offer,
+                    expanded,
+                )
+                hidden_matches.extend(extra)
+            except Exception:
+                probe_offers = []
+        trace = [
+            CandidateTrace(
+                code=c.code,
+                score=c.score,
+                source=c.source,
+                observations=c.observations,
+                successful_connections=c.successful_connections,
+                cheaper_than_direct_count=c.cheaper_than_direct_count,
+                median_saving=c.median_saving,
+                parts=c.parts,
+                selected=c.selected,
+            )
+            for c in ranked[:20]
+        ]
     hidden_matches = _clean_hidden_matches(
         [m for m in hidden_matches if not _is_sandbox(m.through_offer)]
     )
     hidden_matches.sort(key=lambda m: (-(m.gross_saving or 0), -m.risk.net_saving_estimate))
+    # One learning row per distinct offer: a through-ticket sits in both raw_local and
+    # hidden_matches, and must not be counted twice.
+    learned_offers = _dedupe(
+        _drop_sandbox(
+            [
+                *raw_local,
+                *probe_offers,
+                *nearby_offers,
+                *[m.through_offer for m in hidden_matches],
+            ]
+        )
+    )
     try:
         await repo.remember_offers(
             session,
-            _drop_sandbox(
-                [
-                    *raw_local,
-                    *nearby_offers,
-                    *[m.through_offer for m in hidden_matches],
-                ]
-            ),
+            learned_offers,
             date=query.date,
             adults=query.adults,
             cabin=query.cabin,
         )
     except Exception:
         pass
+    try:
+        batch = build_batch(
+            learned_offers,
+            origins=route_origins,
+            intended=route_dests,
+            honest_price=honest_pick.offer.price if honest_pick else None,
+            honest_currency=honest_pick.offer.currency if honest_pick else None,
+            probed=expanded,
+            date=query.date,
+            adults=query.adults,
+            cabin=query.cabin,
+            probe_origin=req.origin,
+            probe_intended=req.dest,
+        )
+        await repo.apply_learning(session, batch)
+    except Exception:
+        await session.rollback()
+    try:
+        await repo.persist_provider_calls(session, ledger.calls)
+    except Exception:
+        await session.rollback()
     hidden_if_cheaper = _hidden_if_cheaper(hidden_matches, honest_pick)
     search_debug = SearchDebug(
         providers=[p for p, on in (("mock", mock), ("duffel", duffel), ("amadeus", amadeus)) if on],
         standard_query=f"{req.origin}→{req.dest}",
+        mode=mode,
         expanded_destinations=expanded,
+        pending_candidates=pending,
         skipped_expansion=skipped,
+        candidates=trace,
+        provider_calls=len(ledger.paid()),
+        provider_cost_usd=ledger.total_cost,
         reused_from_index=len(indexed),
         rejected=rejected[:24],
         cache=_cache_state(indexed, shop_local),
@@ -636,21 +716,28 @@ async def _shop_providers(
     duffel: DuffelProvider | None,
     extra_nonstop: bool = False,
     mock: MockProvider | None = None,
+    purpose: str = "direct",
 ) -> list[Offer]:
     tasks: list[Awaitable[list[Offer]]] = []
     # Partner adapters only. No airline-website collection.
     if mock:
-        mocked = await mock.shop(req)
+        mocked = await timed_shop("mock", req.origin, req.dest, req.date, purpose, mock.shop(req))
         if mocked:
             return mocked
+
+    def paid(provider: str, r: ShopRequest, coro: Awaitable[list[Offer]]) -> Awaitable[list[Offer]]:
+        return timed_shop(provider, r.origin, r.dest, r.date, purpose, coro)
+
     if amadeus:
-        tasks.append(amadeus.shop(req))
+        tasks.append(paid("amadeus", req, amadeus.shop(req)))
         if extra_nonstop and not req.nonstop:
-            tasks.append(amadeus.shop(replace(req, nonstop=True, max_offers=8)))
+            r = replace(req, nonstop=True, max_offers=8)
+            tasks.append(paid("amadeus", r, amadeus.shop(r)))
     if duffel:
-        tasks.append(duffel.shop(req))
+        tasks.append(paid("duffel", req, duffel.shop(req)))
         if extra_nonstop and not req.nonstop:
-            tasks.append(duffel.shop(replace(req, nonstop=True, max_offers=12)))
+            r = replace(req, nonstop=True, max_offers=12)
+            tasks.append(paid("duffel", r, duffel.shop(r)))
     if not tasks:
         return []
     parts = await asyncio.gather(*tasks, return_exceptions=True)
@@ -688,7 +775,7 @@ async def _shop_nearby(
 
     async def one(o: str, d: str) -> list[Offer]:
         r = replace(req, origin=o, dest=d, nonstop=True, max_offers=5)
-        offers = await _shop_providers(r, amadeus, duffel, mock=mock)
+        offers = await _shop_providers(r, amadeus, duffel, mock=mock, purpose="nearby")
         for offer in offers:
             offer.kind = "nearby"
         return offers
@@ -701,59 +788,89 @@ async def _shop_nearby(
     return out
 
 
-async def _shop_hidden(
+async def _plan_candidates(
+    session: AsyncSession,
+    settings: Settings,
+    route_origins: set[str],
+    route_dests: set[str],
+    dest_members: list[str],
+    amadeus: AmadeusProvider | None,
+) -> list[Candidate]:
+    """CandidateGenerator: pool every plausible C, score it, rank it. No paid calls here."""
+    origin = sorted(route_origins)[0] if route_origins else ""
+    stats = await repo.load_route_stats(session, route_origins, route_dests)
+    pool: dict[str, str] = {}
+    for c in await repo.recall_candidate_dests(
+        session,
+        origins=route_origins,
+        intended=route_dests,
+        date="",  # any date: a C seen through B on another day is still a good guess
+        adults=0,
+        cabin="",
+        max_age_seconds=30 * 24 * 3600,
+        limit=settings.max_hidden_candidates * 3,
+        any_date=True,
+    ):
+        pool.setdefault(c, "index")
+    if amadeus:
+        parts = await asyncio.gather(
+            *(amadeus.direct_destinations(d) for d in dest_members[:3]), return_exceptions=True
+        )
+        for part in parts:
+            if isinstance(part, list):
+                for c in part:
+                    pool.setdefault(c.upper(), "amadeus")
+    route_map = await repo.route_map_from(session, dest_members[:4])
+    for b in dest_members[:4]:
+        for c in HUB_ONWARD.get(b.upper(), []):
+            pool.setdefault(c, "hub")
+    for b, spokes in route_map.items():
+        for c in sorted(spokes):
+            pool.setdefault(c, "openflights")
+    hub_prob = hub_probabilities(route_dests, route_map)
+    provider_rate = await repo.provider_rates_for(session, route_origins, [*pool, *stats])
+    return rank_candidates(origin, route_dests, stats, pool, hub_prob, provider_rate)
+
+
+async def _probe_candidates(
     req: ShopRequest,
     settings: Settings,
     amadeus: AmadeusProvider | None,
     duffel: DuffelProvider | None,
-    origin_place=None,
-    dest_place=None,
-    local_offers: list[Offer] | None = None,
-    mock: MockProvider | None = None,
-    reused: list[Offer] | None = None,
-    extra_spokes: list[str] | None = None,
-) -> tuple[list[HiddenCityMatch], list[str], list[str]]:
-    if not amadeus and not duffel and not mock:
-        return [], [], []
-    dest_members = list((dest_place.members if dest_place else None) or [req.dest])
-    dests = set(dest_members)
-    local_priced = [o for o in (local_offers or []) if o.price is not None]
-    local = _best_local_honest(local_priced, req.currency)
-    if local is None:
-        return [], [], []
-
-    budget = max(1, min(4, settings.max_hidden_candidates, settings.max_provider_calls))
-    candidates, skipped = plan_expansion(
-        req.origin,
-        dest_members,
-        budget,
-        extra=extra_spokes,
-        reused=reused or [],
-        already_hidden=False,
-    )
-    if not candidates:
-        return [], [], skipped
+    mock: MockProvider | None,
+    origin_place,
+    intended: set[str],
+    local: Offer,
+    candidates: list[str],
+) -> tuple[list[HiddenCityMatch], list[Offer]]:
+    """Pay for A→C on the chosen candidates and classify what comes back against A→B.
+    Returns (matches, every complete offer seen) so the learner can record misses too."""
+    if not candidates or not (amadeus or duffel or mock):
+        return [], []
     sem = asyncio.Semaphore(settings.max_concurrency)
 
-    async def probe(c: str) -> list[HiddenCityMatch]:
+    async def probe(c: str) -> tuple[list[HiddenCityMatch], list[Offer]]:
         async with sem:
             throughs = await _shop_providers(
                 replace(req, dest=c, nonstop=False, max_offers=10),
                 amadeus,
                 duffel,
                 mock=mock,
+                purpose="expand",
             )
             matches, _ = _classify_hidden(
-                throughs, dests, local, origin_place, settings.min_hidden_saving
+                throughs, intended, local, origin_place, settings.min_hidden_saving
             )
-            return matches
+            return matches, throughs
 
     parts = await asyncio.gather(*(probe(c) for c in candidates), return_exceptions=True)
-    out: list[HiddenCityMatch] = []
+    matches: list[HiddenCityMatch] = []
+    seen: list[Offer] = []
     for part in parts:
-        if isinstance(part, list):
-            out.extend(part)
-    return out, candidates, skipped
+        if isinstance(part, tuple):
+            matches.extend(part[0])
+            seen.extend(part[1])
+    return matches, seen
 
 
 def _classify_hidden(
@@ -795,38 +912,6 @@ def _classify_hidden(
         )
         record_offer(offer.segments[0].origin, hit.exit_airport, ticketed, offer.price)
     return matches, rejected
-
-
-async def _c_candidates(
-    session: AsyncSession,
-    origin: str | set[str],
-    dests: str | list[str],
-    limit: int,
-    amadeus: AmadeusProvider | None,
-) -> list[str]:
-    dest_list = [dests] if isinstance(dests, str) else list(dests)
-    origin_codes = {origin} if isinstance(origin, str) else set(origin)
-    seen = {c.upper() for c in origin_codes} | {d.upper() for d in dest_list}
-    ranked: list[str] = []
-
-    def push(codes: list[str]) -> None:
-        for c in codes:
-            c = c.upper()
-            if len(c) == 3 and c not in seen:
-                seen.add(c)
-                ranked.append(c)
-
-    if amadeus:
-        parts = await asyncio.gather(
-            *(amadeus.direct_destinations(dest) for dest in dest_list[:3]),
-            return_exceptions=True,
-        )
-        for part in parts:
-            if isinstance(part, list):
-                push(part)
-    spokes = await repo.destinations_from_many(session, dest_list[:4], per_origin=limit)
-    push([d for d, _, _ in spokes])
-    return ranked[:limit]
 
 
 def _via_b(offer: Offer, origin: str | set[str], dest_b: str | set[str], dest_c: str) -> bool:

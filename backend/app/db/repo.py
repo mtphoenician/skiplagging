@@ -4,7 +4,7 @@ import re
 import unicodedata
 from math import asin, cos, radians, sin, sqrt
 
-from sqlalchemy import Select, func, or_, select, text
+from sqlalchemy import Select, and_, case, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.metros import METROS, catalog_code_for_member, normalize_place_id
@@ -15,10 +15,14 @@ from app.db.tables import (
     AirportRow,
     ContinentRow,
     CountryRow,
+    FareObservationRow,
+    HiddenCityRouteStatRow,
     NavaidRow,
     OfferObservationRow,
     OfferRow,
+    ProviderCallRow,
     RegionRow,
+    RouteEdgeRow,
     RouteRow,
     RunwayRow,
     HiddenDealRow,
@@ -856,6 +860,10 @@ async def counts(session: AsyncSession) -> dict[str, int]:
         "airlines": await c(AirlineRow),
         "routes": await c(RouteRow),
         "hidden_deals": await c(HiddenDealRow),
+        "fare_observations": await c(FareObservationRow),
+        "route_edges": await c(RouteEdgeRow),
+        "hidden_city_route_stats": await c(HiddenCityRouteStatRow),
+        "provider_calls": await c(ProviderCallRow),
     }
 
 
@@ -998,6 +1006,7 @@ async def recall_candidate_dests(
     cabin: str,
     max_age_seconds: int,
     limit: int,
+    any_date: bool = False,
 ) -> list[str]:
     """Ticketed destinations seen on A→B→C trips, even after the price is stale."""
     if not origins:
@@ -1005,17 +1014,17 @@ async def recall_candidate_dests(
     cutoff = datetime.now(timezone.utc) - timedelta(seconds=max_age_seconds)
     codes = [o.upper()[:3] for o in origins]
     want = {c.upper() for c in intended}
-    rows = (
-        await session.execute(
-            select(OfferObservationRow.ticketed, OfferObservationRow.connections).where(
-                OfferObservationRow.origin.in_(codes),
-                OfferObservationRow.date == date,
-                OfferObservationRow.adults == adults,
-                OfferObservationRow.cabin == cabin,
-                OfferObservationRow.observed_at >= cutoff,
-            )
+    stmt = select(OfferObservationRow.ticketed, OfferObservationRow.connections).where(
+        OfferObservationRow.origin.in_(codes),
+        OfferObservationRow.observed_at >= cutoff,
+    )
+    if not any_date:
+        stmt = stmt.where(
+            OfferObservationRow.date == date,
+            OfferObservationRow.adults == adults,
+            OfferObservationRow.cabin == cabin,
         )
-    ).all()
+    rows = (await session.execute(stmt.order_by(OfferObservationRow.observed_at.desc()).limit(2000))).all()
     ranked: list[str] = []
     seen: set[str] = set()
     for ticketed, connections in rows:
@@ -1207,6 +1216,413 @@ async def list_hidden_deals(
         stmt = stmt.where(HiddenDealRow.destination == dest.upper())
     rows = (await session.execute(stmt.limit(min(limit, 120)))).scalars().all()
     return [_deal_from_row(r) for r in rows]
+
+
+# ── learned search intelligence ────────────────────────────────────────────────
+
+
+async def route_map_from(session: AsyncSession, codes: list[str], per_origin: int = 60) -> dict[str, set[str]]:
+    """Historical OpenFlights nonstop spokes B→C, keyed by B. A hint for the scorer, not a schedule."""
+    want = [c.upper()[:3] for c in codes if c]
+    if not want:
+        return {}
+    stmt = (
+        select(RouteRow.origin_iata, RouteRow.dest_iata, func.count())
+        .where(RouteRow.origin_iata.in_(want), RouteRow.stops == 0)
+        .group_by(RouteRow.origin_iata, RouteRow.dest_iata)
+        .order_by(func.count().desc())
+    )
+    rows = (await session.execute(stmt)).all()
+    out: dict[str, set[str]] = {c: set() for c in want}
+    for origin, dest, _n in rows:
+        bucket = out.setdefault(origin, set())
+        if len(bucket) < per_origin:
+            bucket.add(dest)
+    return out
+
+
+async def load_route_stats(session: AsyncSession, origins: set[str], intended: set[str]):
+    """hidden_city_route_stats rows for (A∈origins, B∈intended), merged per ticketed C."""
+    from app.engines.candidates import RouteStat
+
+    a_codes = [o.upper()[:3] for o in origins if o]
+    b_codes = [b.upper()[:3] for b in intended if b]
+    if not a_codes or not b_codes:
+        return {}
+    rows = (
+        await session.execute(
+            select(HiddenCityRouteStatRow).where(
+                HiddenCityRouteStatRow.origin.in_(a_codes),
+                HiddenCityRouteStatRow.intended.in_(b_codes),
+            )
+        )
+    ).scalars().all()
+    merged: dict[str, RouteStat] = {}
+    weights: dict[str, int] = {}
+    for row in rows:
+        c = row.ticketed.upper()
+        cur = merged.get(c)
+        if cur is None:
+            merged[c] = RouteStat(
+                origin=row.origin,
+                intended=row.intended,
+                ticketed=c,
+                observations=row.observations,
+                successful_connections=row.successful_connections,
+                cheaper_than_direct_count=row.cheaper_than_direct_count,
+                median_saving=row.median_saving,
+                average_saving_percent=row.average_saving_percent,
+                last_success_at=row.last_success_at,
+                last_cheaper_at=row.last_cheaper_at,
+            )
+            weights[c] = max(row.cheaper_than_direct_count, 0)
+            continue
+        cur.observations += row.observations
+        cur.successful_connections += row.successful_connections
+        w_old, w_new = weights[c], max(row.cheaper_than_direct_count, 0)
+        if w_old + w_new > 0:
+            cur.average_saving_percent = (
+                cur.average_saving_percent * w_old + row.average_saving_percent * w_new
+            ) / (w_old + w_new)
+        weights[c] = w_old + w_new
+        cur.cheaper_than_direct_count += row.cheaper_than_direct_count
+        cur.median_saving = max(cur.median_saving, row.median_saving)
+        for attr in ("last_success_at", "last_cheaper_at"):
+            a, b = getattr(cur, attr), getattr(row, attr)
+            if b is not None and (a is None or b > a):
+                setattr(cur, attr, b)
+    return merged
+
+
+async def provider_rates_for(session: AsyncSession, origins: set[str], dests: list[str]) -> dict[str, float]:
+    """Per candidate C: how often our suppliers answered A→C with offers (all providers pooled)."""
+    from app.engines.budget import provider_score
+
+    a_codes = [o.upper()[:3] for o in origins if o]
+    d_codes = list({d.upper()[:3] for d in dests if d})
+    if not a_codes or not d_codes:
+        return {}
+    stmt = (
+        select(
+            ProviderCallRow.dest,
+            func.count(),
+            func.sum(case((and_(ProviderCallRow.ok.is_(True), ProviderCallRow.offers > 0), 1), else_=0)),
+            func.avg(ProviderCallRow.latency_ms),
+        )
+        .where(
+            ProviderCallRow.origin.in_(a_codes),
+            ProviderCallRow.dest.in_(d_codes),
+            ProviderCallRow.cost_usd > 0,
+        )
+        .group_by(ProviderCallRow.dest)
+    )
+    rows = (await session.execute(stmt)).all()
+    return {
+        dest: provider_score(int(ok or 0), int(total or 0), float(avg or 0.0))
+        for dest, total, ok, avg in rows
+    }
+
+
+async def provider_route_scores(session: AsyncSession, origin: str, dest: str) -> list[dict]:
+    """ProviderScore(route, provider) — which supplier answers this pair best."""
+    from app.engines.budget import provider_score
+
+    stmt = (
+        select(
+            ProviderCallRow.provider,
+            func.count(),
+            func.sum(case((and_(ProviderCallRow.ok.is_(True), ProviderCallRow.offers > 0), 1), else_=0)),
+            func.avg(ProviderCallRow.latency_ms),
+            func.avg(ProviderCallRow.offers),
+        )
+        .where(ProviderCallRow.origin == origin.upper()[:3], ProviderCallRow.dest == dest.upper()[:3])
+        .group_by(ProviderCallRow.provider)
+    )
+    rows = (await session.execute(stmt)).all()
+    out = [
+        {
+            "provider": provider,
+            "calls": int(total or 0),
+            "with_offers": int(ok or 0),
+            "avg_latency_ms": round(float(lat or 0.0), 1),
+            "avg_offers": round(float(avg_offers or 0.0), 1),
+            "score": provider_score(int(ok or 0), int(total or 0), float(lat or 0.0)),
+        }
+        for provider, total, ok, lat, avg_offers in rows
+    ]
+    out.sort(key=lambda r: -r["score"])
+    return out
+
+
+async def persist_provider_calls(session: AsyncSession, calls: list) -> int:
+    if not calls:
+        return 0
+    for c in calls:
+        session.add(
+            ProviderCallRow(
+                provider=c.provider,
+                origin=c.origin[:3],
+                dest=c.dest[:3],
+                date=c.date,
+                purpose=c.purpose,
+                ok=c.ok,
+                offers=c.offers,
+                latency_ms=c.latency_ms,
+                cost_usd=c.cost_usd,
+            )
+        )
+    await session.commit()
+    return len(calls)
+
+
+async def budget_summary(session: AsyncSession, hours: int = 24) -> dict:
+    since = datetime.now(timezone.utc) - timedelta(hours=hours)
+    base = select(
+        ProviderCallRow.provider,
+        ProviderCallRow.purpose,
+        func.count(),
+        func.sum(ProviderCallRow.cost_usd),
+        func.sum(case((and_(ProviderCallRow.ok.is_(True), ProviderCallRow.offers > 0), 1), else_=0)),
+        func.avg(ProviderCallRow.latency_ms),
+    ).where(ProviderCallRow.called_at >= since)
+    rows = (await session.execute(base.group_by(ProviderCallRow.provider, ProviderCallRow.purpose))).all()
+    by_row = [
+        {
+            "provider": p,
+            "purpose": purpose,
+            "calls": int(n or 0),
+            "cost_usd": round(float(cost or 0.0), 4),
+            "with_offers": int(ok or 0),
+            "avg_latency_ms": round(float(lat or 0.0), 1),
+        }
+        for p, purpose, n, cost, ok, lat in rows
+    ]
+    searches = int(
+        (
+            await session.execute(
+                select(func.count()).select_from(SearchRow).where(SearchRow.created_at >= since)
+            )
+        ).scalar_one()
+    )
+    total_calls = sum(r["calls"] for r in by_row)
+    paid_calls = sum(r["calls"] for r in by_row if r["cost_usd"] > 0)
+    return {
+        "window_hours": hours,
+        "searches": searches,
+        "provider_calls": total_calls,
+        "paid_calls": paid_calls,
+        "cost_usd": round(sum(r["cost_usd"] for r in by_row), 4),
+        "paid_calls_per_search": round(paid_calls / searches, 2) if searches else 0.0,
+        "bookings": 0,
+        "note": "This app never books; bookings stay 0. Booker clicks are outbound links.",
+        "rows": by_row,
+    }
+
+
+async def apply_learning(session: AsyncSession, batch) -> dict[str, int]:
+    """Persist a LearnBatch: append fares, upsert edges, fold stats. Never overwrite a price."""
+    from app.engines.candidates import score_candidate, RouteStat
+    from app.engines.learn import merge_savings, summarize_savings
+
+    now = batch.observed_at
+    written = {"fares": 0, "edges": 0, "stats": 0}
+
+    for f in batch.fares:
+        session.add(
+            FareObservationRow(
+                offer_uid=f.offer_uid[:80],
+                fingerprint=f.fingerprint[:240],
+                origin=f.origin[:3],
+                ticketed=f.ticketed[:3],
+                connections=f.connections,
+                stops=f.stops,
+                carrier=f.carrier[:8],
+                provider=f.provider[:32],
+                price=f.price,
+                currency=f.currency[:8],
+                date=f.date,
+                adults=f.adults,
+                cabin=f.cabin,
+                fare_brand=(f.fare_brand or None) and f.fare_brand[:64],
+                expires_at=(f.expires_at or None) and f.expires_at[:40],
+                observed_at=now,
+            )
+        )
+        written["fares"] += 1
+
+    if batch.edges:
+        origins = list({k[0] for k in batch.edges})
+        dests = list({k[1] for k in batch.edges})
+        existing = (
+            await session.execute(
+                select(RouteEdgeRow).where(RouteEdgeRow.origin.in_(origins), RouteEdgeRow.dest.in_(dests))
+            )
+        ).scalars().all()
+        by_key = {(r.origin, r.dest, r.carrier, r.flight_number): r for r in existing}
+        for key, edge in batch.edges.items():
+            row = by_key.get(key)
+            if row is None:
+                session.add(
+                    RouteEdgeRow(
+                        origin=edge.origin[:3],
+                        dest=edge.dest[:3],
+                        carrier=edge.carrier[:8],
+                        flight_number=edge.flight_number[:16],
+                        observation_count=edge.count,
+                        days_seen=len(edge.travel_dates),
+                        travel_dates=sorted(edge.travel_dates),
+                        first_seen=now,
+                        last_seen=now,
+                    )
+                )
+            else:
+                dates = sorted(set(row.travel_dates or []) | edge.travel_dates)[-60:]
+                row.observation_count = (row.observation_count or 0) + edge.count
+                row.travel_dates = dates
+                row.days_seen = len(dates)
+                row.last_seen = now
+            written["edges"] += 1
+
+    if batch.stats:
+        a_codes = list({k[0] for k in batch.stats})
+        b_codes = list({k[1] for k in batch.stats})
+        c_codes = list({k[2] for k in batch.stats})
+        existing = (
+            await session.execute(
+                select(HiddenCityRouteStatRow).where(
+                    HiddenCityRouteStatRow.origin.in_(a_codes),
+                    HiddenCityRouteStatRow.intended.in_(b_codes),
+                    HiddenCityRouteStatRow.ticketed.in_(c_codes),
+                )
+            )
+        ).scalars().all()
+        by_key = {(r.origin, r.intended, r.ticketed): r for r in existing}
+        for key, d in batch.stats.items():
+            row = by_key.get(key)
+            if row is None:
+                row = HiddenCityRouteStatRow(origin=d.origin[:3], intended=d.intended[:3], ticketed=d.ticketed[:3])
+                session.add(row)
+                by_key[key] = row
+            prev_cheaper = row.cheaper_than_direct_count or 0
+            row.observations = (row.observations or 0) + d.observations
+            row.successful_connections = (row.successful_connections or 0) + d.successful_connections
+            row.cheaper_than_direct_count = prev_cheaper + d.cheaper_than_direct_count
+            row.observations = max(row.observations, row.successful_connections)
+            row.successful_connections = max(row.successful_connections, row.cheaper_than_direct_count)
+            row.success_rate = round(row.successful_connections / row.observations, 4) if row.observations else 0.0
+            if d.savings:
+                row.savings = merge_savings(list(row.savings or []), d.savings)
+                avg, med, mx = summarize_savings(row.savings)
+                row.average_saving, row.median_saving, row.maximum_saving = avg, med, mx
+                n_new = len(d.saving_pcts)
+                total = prev_cheaper + n_new
+                row.average_saving_percent = round(
+                    ((row.average_saving_percent or 0.0) * prev_cheaper + sum(d.saving_pcts)) / total, 2
+                ) if total else 0.0
+                row.currency = d.currency or row.currency
+                row.last_cheaper_at = now
+            if d.best_through_price is not None and (
+                row.best_through_price is None or d.best_through_price < row.best_through_price
+            ):
+                row.best_through_price = d.best_through_price
+            if d.success:
+                row.last_success_at = now
+            row.last_checked_at = now
+            stat = RouteStat(
+                origin=row.origin,
+                intended=row.intended,
+                ticketed=row.ticketed,
+                observations=row.observations,
+                successful_connections=row.successful_connections,
+                cheaper_than_direct_count=row.cheaper_than_direct_count,
+                median_saving=row.median_saving or 0.0,
+                average_saving_percent=row.average_saving_percent or 0.0,
+                last_success_at=row.last_success_at,
+                last_cheaper_at=row.last_cheaper_at,
+            )
+            # Stored score is provider-neutral (hub 0, provider 0.5); the planner re-adds live parts.
+            row.score, _ = score_candidate(stat, 0.0, 0.5, now)
+            written["stats"] += 1
+
+    if any(written.values()):
+        await session.commit()
+    return written
+
+
+async def route_stats_snapshot(
+    session: AsyncSession, *, origin: str = "", intended: str = "", limit: int = 100
+) -> list[dict]:
+    stmt = select(HiddenCityRouteStatRow).order_by(
+        HiddenCityRouteStatRow.score.desc(), HiddenCityRouteStatRow.observations.desc()
+    )
+    if origin:
+        stmt = stmt.where(HiddenCityRouteStatRow.origin == origin.upper()[:3])
+    if intended:
+        stmt = stmt.where(HiddenCityRouteStatRow.intended == intended.upper()[:3])
+    rows = (await session.execute(stmt.limit(min(limit, 500)))).scalars().all()
+    return [
+        {
+            "origin": r.origin,
+            "intended_destination": r.intended,
+            "ticketed_destination": r.ticketed,
+            "observations": r.observations,
+            "successful_connections": r.successful_connections,
+            "success_rate": r.success_rate,
+            "cheaper_than_direct_count": r.cheaper_than_direct_count,
+            "average_saving": r.average_saving,
+            "median_saving": r.median_saving,
+            "maximum_saving": r.maximum_saving,
+            "average_saving_percent": r.average_saving_percent,
+            "currency": r.currency,
+            "best_through_price": r.best_through_price,
+            "score": r.score,
+            "last_success_at": r.last_success_at.isoformat() if r.last_success_at else None,
+            "last_cheaper_at": r.last_cheaper_at.isoformat() if r.last_cheaper_at else None,
+            "last_checked_at": r.last_checked_at.isoformat() if r.last_checked_at else None,
+        }
+        for r in rows
+    ]
+
+
+async def route_edges_snapshot(session: AsyncSession, *, origin: str = "", limit: int = 100) -> list[dict]:
+    stmt = select(RouteEdgeRow).order_by(RouteEdgeRow.observation_count.desc())
+    if origin:
+        stmt = stmt.where(RouteEdgeRow.origin == origin.upper()[:3])
+    rows = (await session.execute(stmt.limit(min(limit, 500)))).scalars().all()
+    return [
+        {
+            "origin": r.origin,
+            "destination": r.dest,
+            "carrier": r.carrier,
+            "flight_number": r.flight_number,
+            "observation_count": r.observation_count,
+            "days_seen": r.days_seen,
+            "first_seen": r.first_seen.isoformat() if r.first_seen else None,
+            "last_seen": r.last_seen.isoformat() if r.last_seen else None,
+        }
+        for r in rows
+    ]
+
+
+async def price_history(session: AsyncSession, fingerprint: str, limit: int = 200) -> list[dict]:
+    rows = (
+        await session.execute(
+            select(FareObservationRow)
+            .where(FareObservationRow.fingerprint == fingerprint[:240])
+            .order_by(FareObservationRow.observed_at.desc())
+            .limit(min(limit, 1000))
+        )
+    ).scalars().all()
+    return [
+        {
+            "price": r.price,
+            "currency": r.currency,
+            "provider": r.provider,
+            "observed_at": r.observed_at.isoformat() if r.observed_at else None,
+            "expires_at": r.expires_at,
+        }
+        for r in rows
+    ]
 
 
 async def busy_city_pairs(session: AsyncSession, limit: int = 24) -> list[tuple[str, str]]:
