@@ -9,25 +9,26 @@ services:
       - "5432:5432"
     volumes:
       - skiplag_pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U skiplag -d skiplagging"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
 
   api:
-    image: python:3.12-slim
-    working_dir: /app/backend
-    volumes:
-      - ./:/app
-    command: >
-      sh -c "pip install -q -r requirements.txt &&
-             python -m app.db.ingest &&
-             uvicorn app.main:app --host 0.0.0.0 --port 8000"
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
     ports:
       - "8000:8000"
     env_file:
       - .env.example
     environment:
-      DATABASE_URL: postgresql+asyncpg://skiplag:skiplag@db:5432/skiplagging
+      DATABASE_URL: postgresql://skiplag:skiplag@db:5432/skiplagging
       CORS_ORIGINS: http://localhost:5173,http://127.0.0.1:5173
     depends_on:
-      - db
+      db:
+        condition: service_healthy
 
   web:
     image: node:22-alpine
@@ -37,6 +38,8 @@ services:
     command: sh -c "npm install && npm run dev -- --host 0.0.0.0"
     ports:
       - "5173:5173"
+    environment:
+      API_PROXY: http://api:8000
     depends_on:
       - api
 

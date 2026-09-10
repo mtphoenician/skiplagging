@@ -46,7 +46,7 @@
     <p class="empty">
       No published inversions. This list is live shop inventory only — Duffel test tokens and mock
       fixtures are not shown. Add a <code>duffel_live_…</code> token, then run
-      <code>python -m app.engines.discover --wipe</code> from the API folder.
+      <code>cargo run --bin discover -- --wipe</code> from the API folder.
     </p>
   {:else}
     <p class="note">{deals.length} saved deal{deals.length === 1 ? '' : 's'}, highest saving first.</p>

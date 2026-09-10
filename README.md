@@ -1,6 +1,6 @@
 # Skiplagging
 
-Hidden-city fare discovery with a **PostgreSQL** airport/route database and layers that are not mixed up.
+Hidden-city fare discovery with a **PostgreSQL** airport/route database and layers that are not mixed up. The API is a Rust crate (`backend/`). The UI is SvelteKit.
 
 | Layer | What it is | What it is not | Source |
 | --- | --- | --- | --- |
@@ -22,24 +22,22 @@ The supplier (Duffel) is asked only for ordinary A→C offers. Everything that d
 
 | Module | Where | What it owns |
 | --- | --- | --- |
-| Search planner | `engines/shop.py` | Two-speed search: `POST /search` (index → direct A→B → top candidates) then `POST /search/expand` (remaining ranked candidates, reusing the index) |
-| CandidateGenerator | `engines/candidates.py` | `score = 0.30·connection + 0.25·savings probability + 0.20·expected saving + 0.10·freshness + 0.10·hub + 0.05·supplier`; shop those ≥ 0.35 up to `MAX_HIDDEN_CANDIDATES`, always 3 on a cold start, never one that failed 5 checks |
-| Route learner | `engines/learn.py` | Every response updates `fare_observations` (append-only, never overwritten), `route_edges` (flights seen inside tickets) and `hidden_city_route_stats` (A, B, C → observations, via-B successes, cheaper-than-direct count, avg/median/max saving, freshness, score) |
-| Search budget | `engines/budget.py` | Every paid supplier call is timed and logged to `provider_calls`; `GET /debug/budget` gives cost, calls per search and `ProviderScore(route, provider)` |
-| Hidden-city detector, dedupe, rank | `engines/hidden.py`, `engines/shop.py` | Complete tickets only; USD end-to-end; never `P(A,B)+P(B,C)` |
+| Search planner | `src/engines/shop.rs` | Two-speed search: `POST /search` (index → direct A→B → top candidates) then `POST /search/expand` (remaining ranked candidates, reusing the index) |
+| CandidateGenerator | `src/engines/candidates.rs` | `score = 0.30·connection + 0.25·savings probability + 0.20·expected saving + 0.10·freshness + 0.10·hub + 0.05·supplier`; shop those ≥ 0.35 up to `MAX_HIDDEN_CANDIDATES`, always 3 on a cold start, never one that failed 5 checks |
+| Route learner | `src/engines/learn.rs` | Every response updates `fare_observations` (append-only, never overwritten), `route_edges` (flights seen inside tickets) and `hidden_city_route_stats` (A, B, C → observations, via-B successes, cheaper-than-direct count, avg/median/max saving, freshness, score) |
+| Search budget | `src/budget.rs` | Every paid supplier call is timed and logged to `provider_calls`; `GET /debug/budget` gives cost, calls per search and `ProviderScore(route, provider)` |
+| Hidden-city detector, dedupe, rank | `src/engines/hidden.rs`, `src/engines/shop.rs` | Complete tickets only; USD end-to-end; never `P(A,B)+P(B,C)` |
 
 Inspect what the planner has learned at `GET /debug/route-graph?origin=JFK&intended=ORD` and a fare's history at `GET /debug/price-history?fingerprint=…`. The database starts empty; each search makes the next one cheaper. Redis, OAG/Cirium schedules and a second GDS are later phases — the interfaces above do not change for them.
 
 ## Database
 
-Local PostgreSQL (`skiplagging`). Create once, then ingest official files:
+Local PostgreSQL (`skiplagging`). Rust **1.85+**. Create once, then ingest official files:
 
 ```bash
 createdb skiplagging
 cd backend
-source .venv/bin/activate
-pip install -r requirements.txt
-python -m app.db.ingest
+cargo run --bin ingest
 ```
 
 That loads the official gazetteers, not a hand-built list:
@@ -53,9 +51,11 @@ Browse them at `/places`. `GET /countries`, `/countries/US/regions`, `/airports/
 ## Run
 
 ```bash
-# API
-cd backend && source .venv/bin/activate
-uvicorn app.main:app --reload --port 8000
+# API  (http://127.0.0.1:8000)
+cd backend && cargo run --bin api
+
+# overnight deal scan (live Duffel token only publishes)
+cargo run --bin discover -- --wipe
 
 # UI
 cd frontend && npm install && npm run dev
@@ -76,6 +76,10 @@ Without a Duffel token, other city pairs stay empty except those mock fixtures. 
 DUFFEL_TOKEN=
 RAPIDAPI_KEY=
 ```
+
+Tests: `cd backend && cargo test`.
+
+Docker: `docker compose up --build` (ingests on API start, then serves `:8000` and `:5173`).
 
 ## API
 
