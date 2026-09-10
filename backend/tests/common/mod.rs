@@ -127,6 +127,7 @@ pub fn hc_match(oid: &str, through: Offer, local: Offer, saving: f64) -> HiddenC
         exit_segment_index: 0,
         warnings: vec![],
         result_type: "hidden_city".into(),
+        window: None,
     }
 }
 

@@ -1,5 +1,7 @@
 <script lang="ts">
-  import { airlineName, duration, hm, money, refreshOffer, timeRange } from '$lib/api';
+  import { airlineName, duration, hm, isAbortError, money, refreshOffer, timeRange, windowChip } from '$lib/api';
+  import PriceSpark from '$lib/components/PriceSpark.svelte';
+  import { onDestroy } from 'svelte';
   import type { HiddenCityMatch, Offer } from '$lib/types';
 
   let { match, names = {} }: { match: HiddenCityMatch; names?: Record<string, string> } = $props();
@@ -7,6 +9,9 @@
   let refreshNote = $state('');
   let checking = $state(false);
   let quoted = $state<Offer | null>(null);
+  let refreshAbort: AbortController | null = null;
+
+  onDestroy(() => refreshAbort?.abort());
   const t = $derived(quoted ?? match.through_offer);
   const first = $derived(t.segments[0]);
   const last = $derived(t.segments[t.segments.length - 1]);
@@ -23,12 +28,21 @@
       ? match.local_offer.price - shownPrice
       : match.gross_saving
   );
+  const shownBookers = $derived(
+    (match.bookers ?? []).filter((b) => !b.id.startsWith('carrier-')).slice(0, 5)
+  );
+  const win = $derived(match.window);
+  const urgencyClass = $derived(windowChip(win?.urgency));
 
   async function onRefresh() {
     checking = true;
     refreshNote = 'Checking whether this ticket still stops at ' + getOff + '…';
+    refreshAbort?.abort();
+    const ac = new AbortController();
+    refreshAbort = ac;
     try {
-      const r = await refreshOffer(match.through_offer, getOff);
+      const r = await refreshOffer(match.through_offer, getOff, ac.signal);
+      if (ac.signal.aborted) return;
       if (!r.valid) {
         quoted = null;
         refreshNote = r.reason || 'This hidden-city result is no longer valid.';
@@ -40,9 +54,11 @@
           ? `Still a hidden-city ticket via ${getOff}. Fresh price ${money(r.offer.price, r.offer.currency)}.`
           : 'Still available.';
     } catch (e) {
-      refreshNote = e instanceof Error ? e.message : 'Refresh failed';
+      if (!isAbortError(e)) {
+        refreshNote = e instanceof Error ? e.message : 'Refresh failed';
+      }
     } finally {
-      checking = false;
+      if (!ac.signal.aborted) checking = false;
     }
   }
 </script>
@@ -53,6 +69,9 @@
       <div class="chips">
         <span class="chip hot">Hidden city</span>
         <span class="chip good">Get off in {getOff}</span>
+        {#if win}
+          <span class="chip {urgencyClass}">{win.label}</span>
+        {/if}
         {#if match.first_flight_match}
           <span class="chip good">Same first flight</span>
         {/if}
@@ -80,26 +99,32 @@
       <div class="seg" style="margin-top:6px">
         {duration(t.duration_min)}
       </div>
-      {#if match.bookers?.length}
+      {#if shownBookers.length}
         <div class="book-row" style="margin-top:12px">
-          {#each match.bookers.filter((b) => !b.id.startsWith('carrier-')).slice(0, 5) as b}
+          {#each shownBookers as b (b.id)}
             <a class="book-btn" href={b.url} target="_blank" rel="noreferrer">{b.name}</a>
           {/each}
         </div>
       {/if}
     </div>
-    <div class="price">
-      <span class="price-was">{money(match.local_offer.price, match.currency)}</span>
-      {money(shownPrice, t.currency || match.currency)}
-      <small>Save {money(shownSaving, t.currency || match.currency)}</small>
-      <button class="ghost recheck" type="button" onclick={onRefresh} disabled={checking}>
-        {checking ? 'Checking…' : 'Recheck this ticket'}
-      </button>
-      {#if refreshNote}
-        <p class="note recheck-note">{refreshNote}</p>
-      {/if}
+    <div class="hc-side">
+      <PriceSpark window={win} currency={t.currency || match.currency} was={match.local_offer.price} />
+      <div class="price">
+        <span class="price-was">{money(match.local_offer.price, match.currency)}</span>
+        {money(shownPrice, t.currency || match.currency)}
+        <small>Save {money(shownSaving, t.currency || match.currency)}</small>
+        <button class="ghost recheck" type="button" onclick={onRefresh} disabled={checking}>
+          {checking ? 'Checking…' : 'Recheck this ticket'}
+        </button>
+        {#if refreshNote}
+          <p class="note recheck-note">{refreshNote}</p>
+        {/if}
+      </div>
     </div>
   </div>
+  {#if win?.headline}
+    <p class="window-note">{win.headline}</p>
+  {/if}
 
   <ul class="hc-warnings">
     {#each warnings as w}
@@ -141,12 +166,30 @@
     margin-top: 10px;
     font-size: 0.8rem;
   }
+  .hc-side {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 10px;
+    flex: 0 0 auto;
+  }
+  .window-note {
+    margin: 10px 0 0;
+    color: var(--muted);
+    font-size: 0.84rem;
+    line-height: 1.4;
+    max-width: 42rem;
+  }
   .recheck-note {
     margin: 6px 0 0;
     max-width: 12rem;
     text-align: right;
   }
   @media (max-width: 720px) {
+    .hc-side {
+      align-items: flex-start;
+      width: 100%;
+    }
     .recheck-note {
       max-width: none;
       text-align: left;

@@ -151,6 +151,26 @@ export interface TrackerLink {
   url: string;
 }
 
+export interface PricePoint {
+  t: string;
+  price: number;
+}
+
+export interface FareWindow {
+  urgency: 'now' | 'soon' | 'watch' | 'open' | string;
+  label: string;
+  headline: string;
+  minutes_to_depart?: number | null;
+  minutes_to_expire?: number | null;
+  seats?: number | null;
+  trend: 'rising' | 'falling' | 'stable' | 'new' | string;
+  current?: number | null;
+  low?: number | null;
+  high?: number | null;
+  low_at?: string | null;
+  points: PricePoint[];
+}
+
 export interface HiddenCityMatch {
   id: string;
   hidden_city: string;
@@ -168,6 +188,7 @@ export interface HiddenCityMatch {
   exit_segment_index?: number;
   warnings?: string[];
   result_type?: 'hidden_city';
+  window?: FareWindow | null;
 }
 
 export interface CandidateTrace {
@@ -310,6 +331,7 @@ export interface HiddenDeal {
   through_offer?: Offer | null;
   risk?: RiskAssessment | null;
   warnings?: string[];
+  window?: FareWindow | null;
 }
 
 export interface SearchResponse {

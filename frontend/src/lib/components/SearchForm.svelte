@@ -1,9 +1,10 @@
 <script lang="ts">
   import { goto } from '$app/navigation';
+  import { onDestroy } from 'svelte';
   import AirportInput from '$lib/components/AirportInput.svelte';
   import DatePicker from '$lib/components/DatePicker.svelte';
   import SelectMenu from '$lib/components/SelectMenu.svelte';
-  import { buildSearchHref, searchAirports } from '$lib/api';
+  import { buildSearchHref, isAbortError, searchAirports } from '$lib/api';
   import type { Cabin, SearchMode } from '$lib/types';
 
   const cabins = [
@@ -37,6 +38,9 @@
 
   let error = $state('');
   let submitting = $state(false);
+  let submitAbort: AbortController | null = null;
+
+  onDestroy(() => submitAbort?.abort());
 
   $effect(() => {
     if (return_date && date && return_date < date) return_date = '';
@@ -53,12 +57,12 @@
     destination = a;
   }
 
-  async function resolveIata(raw: string): Promise<string> {
+  async function resolveIata(raw: string, signal?: AbortSignal): Promise<string> {
     const t = raw.trim();
     if (/^city-[A-Za-z]{3}$/i.test(t)) return `CITY-${t.slice(-3).toUpperCase()}`;
     if (/^[A-Za-z]{3}$/.test(t)) return t.toUpperCase();
     if (t.length < 2) return '';
-    const hits = await searchAirports(t);
+    const hits = await searchAirports(t, signal);
     return hits[0]?.place_id || hits[0]?.iata || '';
   }
 
@@ -78,8 +82,11 @@
       return;
     }
     submitting = true;
+    submitAbort?.abort();
+    const ac = new AbortController();
+    submitAbort = ac;
     try {
-      const [o, d] = await Promise.all([resolveIata(origin), resolveIata(destination)]);
+      const [o, d] = await Promise.all([resolveIata(origin, ac.signal), resolveIata(destination, ac.signal)]);
       if (!o || !d) {
         error = 'Choose a from and to city or airport.';
         return;
@@ -103,7 +110,9 @@
         })
       );
     } catch (err) {
-      error = err instanceof Error ? err.message : 'Airport lookup failed.';
+      if (!isAbortError(err)) {
+        error = err instanceof Error ? err.message : 'Airport lookup failed.';
+      }
     } finally {
       submitting = false;
     }

@@ -269,6 +269,16 @@ async fn health_and_defaults_and_search() {
         .as_str()
         .unwrap()
         .is_empty());
+    let (st, lite) = get(app.clone(), &format!("/airports/{o}?lite=1")).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(lite["iata"], o);
+    assert!(lite["runways"]
+        .as_array()
+        .map(|a| a.is_empty())
+        .unwrap_or(true));
+    let (st, full) = get(app.clone(), &format!("/airports/{o}")).await;
+    assert_eq!(st, StatusCode::OK);
+    assert!(!full["runways"].as_array().unwrap().is_empty());
 
     let q = defaults["origin"]["country_name"]
         .as_str()

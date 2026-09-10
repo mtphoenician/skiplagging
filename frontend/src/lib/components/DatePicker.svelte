@@ -16,6 +16,7 @@
   const title = $derived(
     cursor.toLocaleString('en-GB', { month: 'long', year: 'numeric' })
   );
+  const grid = $derived(open ? cells() : []);
 
   function format(iso: string) {
     if (!iso) return 'Choose date';
@@ -84,16 +85,22 @@
     open = false;
   }
 
-  function onDoc(e: MouseEvent) {
-    if (root && !root.contains(e.target as Node)) open = false;
-  }
-
-  function onKey(e: KeyboardEvent) {
-    if (e.key === 'Escape') open = false;
-  }
+  $effect(() => {
+    if (!open) return;
+    const onDoc = (e: MouseEvent) => {
+      if (root && !root.contains(e.target as Node)) open = false;
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') open = false;
+    };
+    window.addEventListener('click', onDoc);
+    window.addEventListener('keydown', onKey);
+    return () => {
+      window.removeEventListener('click', onDoc);
+      window.removeEventListener('keydown', onKey);
+    };
+  });
 </script>
-
-<svelte:window onclick={onDoc} onkeydown={onKey} />
 
 <div class="field picker" bind:this={root}>
   <span class="field-label">{label}</span>
@@ -126,7 +133,7 @@
         {/each}
       </div>
       <div class="cal-grid">
-        {#each cells() as c}
+        {#each grid as c (c.iso)}
           <button
             class="cal-day"
             class:muted={c.muted}

@@ -1,3 +1,4 @@
+use reqwest::header::HeaderValue;
 use serde_json::{json, Value};
 use std::time::Duration;
 
@@ -37,31 +38,30 @@ pub fn offer_request_body(req: &ShopRequest) -> Value {
 }
 
 pub struct DuffelProvider {
-    token: String,
+    auth: HeaderValue,
     client: reqwest::Client,
 }
 
 impl DuffelProvider {
     pub fn new(settings: &Settings, client: reqwest::Client) -> Self {
-        Self {
-            token: settings.duffel_token.clone(),
-            client,
-        }
+        let auth = HeaderValue::from_str(&format!("Bearer {}", settings.duffel_token))
+            .unwrap_or_else(|_| HeaderValue::from_static("Bearer"));
+        Self { auth, client }
     }
 
     pub async fn shop(&self, req: &ShopRequest) -> anyhow::Result<Vec<Offer>> {
         let payload = offer_request_body(req);
         let mut last: Option<reqwest::Response> = None;
-        for _ in 0..4 {
+        for _ in 0..3 {
             let r = self
                 .client
                 .post("https://api.duffel.com/air/offer_requests")
                 .query(&[("return_offers", "true")])
-                .header("Authorization", format!("Bearer {}", self.token))
+                .header("Authorization", self.auth.clone())
                 .header("Duffel-Version", "v2")
                 .header("Accept", "application/json")
                 .json(&payload)
-                .timeout(Duration::from_secs(40))
+                .timeout(Duration::from_secs(22))
                 .send()
                 .await?;
             if r.status().as_u16() != 429 {
@@ -75,7 +75,7 @@ impl DuffelProvider {
                 .and_then(|v| v.to_str().ok())
                 .and_then(|s| s.parse::<f64>().ok())
                 .unwrap_or(3.0)
-                .clamp(1.5, 25.0);
+                .clamp(1.5, 8.0);
             tokio::time::sleep(Duration::from_secs_f64(wait)).await;
         }
         let Some(r) = last else {
@@ -87,19 +87,22 @@ impl DuffelProvider {
             let snippet: String = body.chars().take(240).collect();
             anyhow::bail!("Duffel HTTP {status}: {snippet}");
         }
-        let payload: Value = r
+        let mut payload: Value = r
             .json()
             .await
             .map_err(|e| anyhow::anyhow!("Duffel JSON: {e}"))?;
+        let raw_offers = match payload
+            .get_mut("data")
+            .and_then(|d| d.get_mut("offers"))
+            .map(std::mem::take)
+        {
+            Some(Value::Array(v)) => v,
+            _ => Vec::new(),
+        };
+        drop(payload);
         let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
         let mut offers = Vec::new();
-        for raw in payload
-            .get("data")
-            .and_then(|d| d.get("offers"))
-            .and_then(|v| v.as_array())
-            .cloned()
-            .unwrap_or_default()
-        {
+        for raw in raw_offers {
             if let Some(parsed) = parse_one(&raw, req, &now) {
                 offers.push(parsed);
             }
@@ -124,7 +127,7 @@ impl DuffelProvider {
         let r = self
             .client
             .get(format!("https://api.duffel.com/air/offers/{oid}"))
-            .header("Authorization", format!("Bearer {}", self.token))
+            .header("Authorization", self.auth.clone())
             .header("Duffel-Version", "v2")
             .header("Accept", "application/json")
             .timeout(Duration::from_secs(20))
@@ -133,8 +136,11 @@ impl DuffelProvider {
         if r.status().as_u16() >= 400 {
             return Ok(None);
         }
-        let body: Value = r.json().await.unwrap_or(json!({}));
-        let raw = body.get("data").cloned().unwrap_or(json!({}));
+        let mut body: Value = r.json().await.unwrap_or(json!({}));
+        let raw = body
+            .get_mut("data")
+            .map(std::mem::take)
+            .unwrap_or(json!({}));
         if raw.is_null() || raw.as_object().map(|o| o.is_empty()).unwrap_or(true) {
             return Ok(None);
         }
@@ -240,10 +246,10 @@ pub fn _one(raw: &Value, req: &ShopRequest, now: &str) -> Option<Offer> {
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
-            let mkt = s.get("marketing_carrier").cloned().unwrap_or(json!({}));
-            let op = s.get("operating_carrier").cloned().unwrap_or(json!({}));
+            let mkt = s.get("marketing_carrier");
+            let op = s.get("operating_carrier");
             let mkt_code = mkt
-                .get("iata_code")
+                .and_then(|o| o.get("iata_code"))
                 .and_then(|v| v.as_str())
                 .unwrap_or("XX");
             let flight_n = s
@@ -259,7 +265,7 @@ pub fn _one(raw: &Value, req: &ShopRequest, now: &str) -> Option<Offer> {
                 dest,
                 carrier: mkt_code.to_string(),
                 operating_carrier: op
-                    .get("iata_code")
+                    .and_then(|o| o.get("iata_code"))
                     .and_then(|v| v.as_str())
                     .map(|s| s.to_string()),
                 flight_number: format!("{mkt_code}{flight_n}"),
@@ -292,11 +298,18 @@ pub fn _one(raw: &Value, req: &ShopRequest, now: &str) -> Option<Offer> {
     if segments.is_empty() || outbound_end < 0 {
         return None;
     }
+    let first_carrier = segments[0].carrier.clone();
+    let first_flight = segments[0].flight_number.clone();
+    let duration_min = if total_mins > 0 {
+        total_mins
+    } else {
+        segments.iter().map(|s| s.duration_min).sum()
+    };
     let owner = raw
         .get("owner")
         .and_then(|o| o.get("iata_code"))
         .and_then(|v| v.as_str())
-        .unwrap_or(&segments[0].carrier)
+        .unwrap_or(&first_carrier)
         .to_string();
     let live = raw.get("live_mode").and_then(|v| v.as_bool());
     let live_label = match live {
@@ -338,7 +351,7 @@ pub fn _one(raw: &Value, req: &ShopRequest, now: &str) -> Option<Offer> {
         channel: "ndc".into(),
         source: "duffel".into(),
         layer: "priced-offer".into(),
-        segments: segments.clone(),
+        segments,
         price: as_f(raw.get("total_amount")),
         base_price: as_f(raw.get("base_amount")),
         taxes: as_f(raw.get("tax_amount")),
@@ -352,14 +365,12 @@ pub fn _one(raw: &Value, req: &ShopRequest, now: &str) -> Option<Offer> {
         adults,
         fare_basis: String::new(),
         validating_airline: Some(owner),
-        carrier: segments[0].carrier.clone(),
-        duration_min: if total_mins > 0 {
-            total_mins
-        } else {
-            segments.iter().map(|s| s.duration_min).sum()
-        },
+        carrier: first_carrier,
+        duration_min,
         stops: (outbound_n - 1).max(0),
-        first_flight: segments[0].flight_number.clone(),
+        first_flight,
+        seats: offer_seats(raw),
+        last_ticketing_date: payment_deadline(raw),
         retrieved_at: Some(now.to_string()),
         expires_at: raw.get("expires_at").and_then(|v| v.as_str()).map(|s| s.to_string()),
         live,
@@ -388,6 +399,34 @@ fn passenger_count(raw: &Value, req: &ShopRequest) -> i32 {
     } else {
         req.adults.clamp(1, 9)
     }
+}
+
+fn offer_seats(raw: &Value) -> Option<i32> {
+    for key in ["available_quantity", "number_of_bookable_seats"] {
+        if let Some(n) = as_i(raw.get(key)) {
+            if (1..10).contains(&n) {
+                return Some(n);
+            }
+        }
+    }
+    None
+}
+
+fn payment_deadline(raw: &Value) -> Option<String> {
+    let pr = raw.get("payment_requirements")?;
+    pr.get("payment_required_by")
+        .or_else(|| pr.get("price_guarantee_expires_at"))
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+}
+
+fn as_i(v: Option<&Value>) -> Option<i32> {
+    v.and_then(|v| match v {
+        Value::Number(n) => n.as_i64().map(|n| n as i32).or_else(|| n.as_f64().map(|n| n as i32)),
+        Value::String(s) => s.parse().ok(),
+        _ => None,
+    })
 }
 
 fn as_f(v: Option<&Value>) -> Option<f64> {

@@ -71,6 +71,15 @@
   );
   const toLabel = $derived(destSeg ? (toCity ? `${destSeg.dest} ${toCity}` : destSeg.dest) : '');
   const tickets = $derived(offer.separate_tickets ?? []);
+  const ticketBookers = $derived(
+    isSelf
+      ? tickets.map((t) =>
+          t.date
+            ? itineraryBookers(t.origin, t.dest, t.date, adults, t.currency || offer.currency, cabin, undefined, 3)
+            : []
+        )
+      : []
+  );
 </script>
 
 <article class="offer" class:pick={featured}>
@@ -156,7 +165,7 @@
               <span>Ticket {i + 1}: {t.origin}→{t.dest} {money(t.price, t.currency)}</span>
               {#if t.date}
                 <div class="book-row">
-                  {#each itineraryBookers(t.origin, t.dest, t.date, adults, t.currency || offer.currency, cabin).slice(0, 3) as b}
+                  {#each ticketBookers[i] as b}
                     <a class="book-btn" href={b.url} target="_blank" rel="noopener noreferrer">{b.name}</a>
                   {/each}
                 </div>

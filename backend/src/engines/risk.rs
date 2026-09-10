@@ -185,6 +185,7 @@ pub fn attach_risk(
             .map(|s| (*s).to_string())
             .collect(),
         result_type: "hidden_city".into(),
+        window: None,
     }
 }
 

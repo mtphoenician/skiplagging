@@ -8,27 +8,29 @@ use serde_json::Value;
 use sqlx::PgPool;
 use tokio::sync::Semaphore;
 
-use crate::budget::{start_ledger, timed_shop, LEDGER};
+use crate::budget::{start_ledger, timed_shop, ProviderCall, LEDGER};
 use crate::config::Settings;
 use crate::db::repo;
 use crate::engines::candidates::{
     assign_source, hub_probabilities, rank_candidates, record_offer, select_candidates, Candidate,
 };
-use crate::engines::expiry::{offer_unexpired, unexpired};
+use crate::engines::expiry::{offer_unexpired, take_unexpired};
 use crate::engines::hidden::{
-    detect_hidden_city, hidden_city_savings, is_standard_to, meaningful_saving,
-    ticketed_destination,
+    detect_hidden_city, hidden_city_savings, is_standard_to, itinerary_fingerprint,
+    meaningful_saving, ticketed_destination,
 };
+use crate::engines::window::{attach_windows, sort_matches};
 use crate::engines::index::{classify_for_search, ticketed_dests_through};
 use crate::engines::learn::build_batch;
 use crate::engines::risk::{assess, attach_risk};
 use crate::engines::self_transfer::{
     bridge_pairs, combine_at_hubs, next_day, pick_transfer_hubs, MAX_LEG_FLIGHTS,
 };
-use crate::fx::{offer_in_usd, offers_in_usd, refresh_rates};
+use crate::fx::{offer_in_usd, offers_in_usd, refresh_rates, take_offers_in_usd};
 use crate::models::{
     Airport, BoardFlight, CandidateTrace, ChannelGroup, ConnectionHint, HiddenCityMatch,
     HonestPick, LiveTraffic, Offer, SearchDebug, SearchQuery, SearchResponse, ShopRequest,
+    TrackedAircraft,
 };
 use crate::providers::aerodatabox::AeroDataBoxProvider;
 use crate::providers::bookers::booker_links;
@@ -102,8 +104,99 @@ pub fn _reuse_indexed_honest(offers: &[Offer], mock_enabled: bool, duffel_live: 
     offers.iter().any(is_fresh_live_honest)
 }
 
-fn reuse_indexed_honest(offers: &[Offer], settings: &Settings) -> bool {
-    _reuse_indexed_honest(offers, settings.mock_enabled, settings.duffel_live())
+fn reuse_indexed_honest_from(
+    offers: &[Offer],
+    origin_u: &HashSet<String>,
+    dests: &HashSet<String>,
+    mock_enabled: bool,
+    duffel_live: bool,
+) -> bool {
+    if mock_enabled || !duffel_live {
+        return false;
+    }
+    offers.iter().any(|o| {
+        o.price.is_some()
+            && is_standard_to(o, dests)
+            && !o.segments.is_empty()
+            && origin_u.contains(&o.segments[0].origin.to_uppercase())
+            && is_fresh_live_honest(o)
+    })
+}
+
+struct SearchPersist {
+    pool: PgPool,
+    learned: Vec<Offer>,
+    date: String,
+    adults: i32,
+    cabin: String,
+    origins: HashSet<String>,
+    dests: HashSet<String>,
+    honest_price: Option<f64>,
+    honest_ccy: Option<String>,
+    expanded: Vec<String>,
+    probe_origin: Option<String>,
+    probe_dest: Option<String>,
+    calls: Vec<ProviderCall>,
+    hidden: Option<(Vec<HiddenCityMatch>, String, String, String, String)>,
+    tracks: Option<(String, Vec<TrackedAircraft>, Option<i32>)>,
+    search_id: Option<i32>,
+    persist_offers: Vec<Offer>,
+}
+
+fn spawn_search_persist(job: SearchPersist) {
+    tokio::spawn(async move {
+        let _ = repo::remember_offers(
+            &job.pool,
+            &job.learned,
+            &job.date,
+            job.adults,
+            &job.cabin,
+        )
+        .await;
+        let batch = build_batch(
+            &job.learned,
+            &job.origins,
+            &job.dests,
+            job.honest_price,
+            job.honest_ccy.as_deref(),
+            &job.expanded,
+            &job.date,
+            job.adults,
+            &job.cabin,
+            job.probe_origin.as_deref(),
+            job.probe_dest.as_deref(),
+            None,
+        );
+        let _ = repo::apply_learning(&job.pool, &batch).await;
+        let _ = repo::persist_provider_calls(&job.pool, &job.calls).await;
+        if let Some((matches, origin, origin_city, dest, dest_city)) = job.hidden {
+            let _ = repo::persist_hidden_deals(
+                &job.pool,
+                &matches,
+                &origin,
+                &origin_city,
+                &dest,
+                &dest_city,
+                &job.date,
+            )
+            .await;
+        }
+        if let Some((iata, aircraft, api_time)) = job.tracks {
+            let states: Vec<Value> = aircraft
+                .iter()
+                .filter_map(|a| serde_json::to_value(a).ok())
+                .collect();
+            let _ = repo::persist_tracks(&job.pool, &iata, &states, api_time).await;
+        }
+        if let Some(search_id) = job.search_id {
+            let payload: Vec<Value> = job
+                .persist_offers
+                .iter()
+                .filter_map(|o| serde_json::to_value(o).ok())
+                .collect();
+            let _ = repo::persist_search_offers(&job.pool, search_id, &payload).await;
+        }
+    });
 }
 
 fn members_of(place: &Airport) -> Vec<String> {
@@ -191,8 +284,12 @@ async fn search_all_ways_inner(
     let origin = query.origin.clone();
     let dest = query.destination.clone();
 
-    let o_ap = repo::get_place(pool, &origin, false).await?;
-    let d_ap = repo::get_place(pool, &dest, false).await?;
+    let (o_ap, d_ap) = tokio::join!(
+        repo::get_place(pool, &origin, false),
+        repo::get_place(pool, &dest, false),
+    );
+    let o_ap = o_ap?;
+    let d_ap = d_ap?;
     let (Some(o_ap), Some(d_ap)) = (o_ap, d_ap) else {
         anyhow::bail!(
             "Unknown IATA in the OurAirports table. Ingest has not been run, or the code is not a scheduled airport."
@@ -269,42 +366,35 @@ async fn search_all_ways_inner(
         Ok(v) => v,
         Err(_) => vec![],
     };
-    indexed = offers_in_usd(&indexed)
-        .into_iter()
-        .filter(|o| !is_self_transfer(o) && offer_unexpired(o))
-        .collect();
+    indexed.retain(|o| !is_self_transfer(o) && offer_unexpired(o));
     if let Some(ret) = &query.return_date {
         indexed.retain(|o| o.return_date.as_deref() == Some(ret.as_str()));
     } else {
         indexed.retain(|o| o.return_date.is_none());
     }
     let origin_u = upper_set(route_origins.iter());
-    let indexed_honest: Vec<Offer> = indexed
-        .iter()
-        .filter(|o| {
-            o.price.is_some()
-                && is_standard_to(o, &route_dests)
-                && !o.segments.is_empty()
-                && origin_u.contains(&o.segments[0].origin.to_uppercase())
-        })
-        .cloned()
-        .collect();
+    let reuse_honest = reuse_indexed_honest_from(
+        &indexed,
+        &origin_u,
+        &route_dests,
+        settings.mock_enabled,
+        settings.duffel_live(),
+    );
 
-    let spoke_origins: Vec<String> = d_airports.iter().take(4).cloned().collect();
-    let spokes = repo::destinations_from_many(pool, &spoke_origins, 18)
-        .await
-        .unwrap_or_default();
-    let hint_codes: Vec<String> = spokes.iter().map(|(c, _, _)| c.clone()).collect();
-    let hint_aps = repo::airports_by_iata(pool, &hint_codes)
-        .await
-        .unwrap_or_default();
-    let hints = hints_from_spokes(&spokes, &hint_aps, &origin);
+    let hints = if mode == "deep" {
+        vec![]
+    } else {
+        let spoke_origins: Vec<String> = d_airports.iter().take(4).cloned().collect();
+        let spokes = repo::destinations_from_many(pool, &spoke_origins, 18)
+            .await
+            .unwrap_or_default();
+        let hint_codes: Vec<String> = spokes.iter().map(|(c, _, _)| c.clone()).collect();
+        let hint_aps = repo::airports_by_iata(pool, &hint_codes)
+            .await
+            .unwrap_or_default();
+        hints_from_spokes(&spokes, &hint_aps, &origin)
+    };
 
-    let o_board = members_of(&o_ap)
-        .first()
-        .cloned()
-        .unwrap_or_else(|| o_ap.iata.clone());
-    let reuse_honest = reuse_indexed_honest(&indexed_honest, settings);
     if !reuse_honest {
         LEDGER.try_with(|l| l.hold_direct_slot()).ok();
     }
@@ -315,29 +405,37 @@ async fn search_all_ways_inner(
             shop_place(&req, &o_ap, &d_ap, duffel.as_deref(), mock.as_deref()).await
         }
     };
-    let (g0, g1, g2, g3) = tokio::join!(
-        shop_fut,
-        capped(opensky.traffic_near(&o_ap)),
-        capped(opensky.traffic_near(&d_ap)),
-        async {
-            if let Some(b) = box_.as_ref() {
-                capped(b.board(&o_board, "Departure")).await
-            } else {
-                Some(Vec::new())
-            }
-        },
-    );
-    let shop_local = g0;
+    let (shop_local, traffic_o_opt, traffic_d_opt, board_opt) = if mode == "deep" {
+        (shop_fut.await, None, None, Some(Vec::new()))
+    } else {
+        let o_board = o_members
+            .first()
+            .cloned()
+            .unwrap_or_else(|| o_ap.iata.clone());
+        let (g0, g1, g2, g3) = tokio::join!(
+            shop_fut,
+            capped(opensky.traffic_near(&o_ap)),
+            capped(opensky.traffic_near(&d_ap)),
+            async {
+                if let Some(b) = box_.as_ref() {
+                    capped(b.board(&o_board, "Departure")).await
+                } else {
+                    Some(Vec::new())
+                }
+            },
+        );
+        (g0, g1, g2, g3)
+    };
     let mut traffic_o = traffic_placeholder(&o_ap);
     let mut traffic_d = traffic_placeholder(&d_ap);
     let mut board: Vec<BoardFlight> = Vec::new();
-    if let Some(t) = g1 {
+    if let Some(t) = traffic_o_opt {
         traffic_o = t;
     }
-    if let Some(t) = g2 {
+    if let Some(t) = traffic_d_opt {
         traffic_d = t;
     }
-    if let Some(b) = g3 {
+    if let Some(b) = board_opt {
         board = b;
     }
     LEDGER.try_with(|l| l.release_direct_hold()).ok();
@@ -356,27 +454,25 @@ async fn search_all_ways_inner(
     let reused_from_index = indexed_useful.len() as i32;
     let index_cache = cache_state(&indexed_useful, &shop_local);
     let mut merged = indexed_useful;
-    merged.extend(shop_local.iter().cloned());
-    let mut raw_local = offers_in_usd(&_drop_sandbox(&_dedupe(&merged)));
+    merged.extend(shop_local);
+    let mut raw_local = take_offers_in_usd(take_drop_sandbox(take_dedupe(merged)));
     if let Some(ret) = &query.return_date {
         raw_local.retain(|o| o.return_date.as_deref() == Some(ret.as_str()));
     } else {
         raw_local.retain(|o| o.return_date.is_none());
     }
-    let mut local_offers = _prefer_real_carriers(_dedupe_itineraries(&_keep_on_route(
-        &raw_local,
-        &route_origins,
-        &route_dests,
-    )));
-    local_offers.retain(|o| !is_self_transfer(o));
-    let priced: Vec<Offer> = _priced_in_currency(
-        &local_offers
+    let local_offers = take_prefer_real_carriers(take_dedupe_itineraries(
+        raw_local
             .iter()
-            .filter(|o| o.price.is_some())
+            .filter(|o| _on_route(o, &route_origins, &route_dests) && !is_self_transfer(o))
             .cloned()
-            .collect::<Vec<_>>(),
-        Some("USD"),
-    );
+            .collect(),
+    ));
+    let has_real_carrier = local_offers.iter().any(|o| !is_test_carrier(&o.carrier));
+    let priced: Vec<Offer> = local_offers
+        .into_iter()
+        .filter(|o| o.price.is_some())
+        .collect();
 
     let mut nearby_offers: Vec<Offer> = Vec::new();
     if query.include_nearby && !city_search && duffel.is_some() && priced.len() < 3 && !round_trip {
@@ -394,14 +490,13 @@ async fn search_all_ways_inner(
             .into_iter()
             .filter(|o| !_on_route(o, &route_origins, &route_dests))
             .collect();
-        nearby_offers = offers_in_usd(&_drop_sandbox(&_prefer_real_carriers(_dedupe_itineraries(
-            &nearby_offers,
-        ))));
+        nearby_offers =
+            take_prefer_real_carriers(take_dedupe_itineraries(take_drop_sandbox(nearby_offers)));
         if let Some(first) = priced.first() {
             let ccy = first.currency.clone();
             nearby_offers.retain(|o| o.currency == ccy);
         }
-        if local_offers.iter().any(|o| !is_test_carrier(&o.carrier)) {
+        if has_real_carrier {
             nearby_offers.retain(|o| !is_test_carrier(&o.carrier));
         }
     }
@@ -426,7 +521,7 @@ async fn search_all_ways_inner(
             rejected = classified.1;
         }
     }
-    let mut hidden_matches = hidden_from_local.clone();
+    let mut hidden_matches = hidden_from_local;
     let mut expanded: Vec<String> = Vec::new();
     let mut pending: Vec<String> = Vec::new();
     let mut probe_offers: Vec<Offer> = Vec::new();
@@ -459,8 +554,8 @@ async fn search_all_ways_inner(
         .await
         {
             Ok((st, legs)) => {
-                self_transfer_offers = offers_in_usd(&_drop_sandbox(&st));
-                transfer_legs = offers_in_usd(&_drop_sandbox(&legs));
+                self_transfer_offers = take_drop_sandbox(st);
+                transfer_legs = take_drop_sandbox(legs);
             }
             Err(_) => {
                 self_transfer_offers = vec![];
@@ -480,7 +575,7 @@ async fn search_all_ways_inner(
                     Ok(v) => v,
                     Err(_) => vec![],
                 };
-            if !(mode == "fast" && !hidden_from_local.is_empty()) {
+            if !(mode == "fast" && !hidden_matches.is_empty()) {
                 let chosen = select_candidates(
                     &mut ranked,
                     c_budget,
@@ -552,58 +647,39 @@ async fn search_all_ways_inner(
             .collect(),
     );
     let ticketed_codes: Vec<String> = hidden_matches.iter().map(ticketed_code).collect();
-    let ticketed_aps = repo::airports_by_iata(pool, &ticketed_codes)
-        .await
-        .unwrap_or_default();
-    apply_ticketed_airports(&mut hidden_matches, &o_ap.country, &ticketed_aps);
-    hidden_matches.sort_by(|a, b| {
-        b.gross_saving
-            .partial_cmp(&a.gross_saving)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| {
-                b.risk
-                    .net_saving_estimate
-                    .partial_cmp(&a.risk.net_saving_estimate)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            })
-    });
-
-    let mut learned_src: Vec<Offer> = Vec::new();
-    learned_src.extend(raw_local.iter().cloned());
-    learned_src.extend(probe_offers.iter().cloned());
-    learned_src.extend(nearby_offers.iter().cloned());
-    learned_src.extend(transfer_legs.iter().cloned());
-    learned_src.extend(hidden_matches.iter().map(|m| m.through_offer.clone()));
-    let mut learned_offers = _drop_sandbox(&_dedupe(&learned_src));
-    learned_offers.retain(|o| !is_self_transfer(o));
-    let _ = repo::remember_offers(
-        pool,
-        &learned_offers,
-        &query.date,
-        query.adults,
-        &query.cabin,
-    )
-    .await;
-    let batch = build_batch(
-        &learned_offers,
-        &route_origins,
-        &route_dests,
-        honest_pick.as_ref().and_then(|p| p.offer.price),
-        honest_pick.as_ref().map(|p| p.offer.currency.as_str()),
-        &expanded,
-        &query.date,
-        query.adults,
-        &query.cabin,
-        Some(&req.origin),
-        Some(&req.dest),
-        None,
+    let mut hist_fps = Vec::new();
+    let mut hist_origins = Vec::new();
+    let mut hist_ticketed = Vec::new();
+    for m in &hidden_matches {
+        hist_fps.push(itinerary_fingerprint(&m.through_offer));
+        if let Some(s) = m.through_offer.segments.first() {
+            hist_origins.push(s.origin.to_uppercase());
+        }
+        hist_ticketed.push(ticketed_code(m));
+    }
+    let (ticketed_aps, series) = tokio::join!(
+        repo::airports_by_iata(pool, &ticketed_codes),
+        repo::fare_series(pool, &hist_fps, &hist_origins, &hist_ticketed),
     );
-    let _ = repo::apply_learning(pool, &batch).await;
+    apply_ticketed_airports(
+        &mut hidden_matches,
+        &o_ap.country,
+        &ticketed_aps.unwrap_or_default(),
+    );
+    attach_windows(&mut hidden_matches, &series.unwrap_or_default(), chrono::Utc::now());
+    sort_matches(&mut hidden_matches);
+
+    let mut learned_src = raw_local;
+    learned_src.extend(probe_offers);
+    learned_src.extend(transfer_legs);
+    learned_src.extend(nearby_offers.iter().cloned());
+    learned_src.extend(hidden_matches.iter().map(|m| m.through_offer.clone()));
+    let mut learned_offers = take_drop_sandbox(take_dedupe(learned_src));
+    learned_offers.retain(|o| !is_self_transfer(o));
 
     let (paid_len, total_cost, calls) = LEDGER
         .try_with(|l| (l.paid().len(), l.total_cost(), l.calls()))
         .unwrap_or((0, 0.0, vec![]));
-    let _ = repo::persist_provider_calls(pool, &calls).await;
 
     let hidden_if_cheaper = _hidden_if_cheaper(&hidden_matches, honest_pick.as_ref());
     let search_debug = SearchDebug {
@@ -639,60 +715,20 @@ async fn search_all_ways_inner(
         pending_self_transfer: duffel.is_some() && !mock_covered && !round_trip && mode == "fast",
     };
 
-    let compare_ccy = honest_pick.as_ref().map(|p| p.offer.currency.clone());
-    let local_cmp: Vec<Offer> = priced
+    let compare_ccy = honest_pick.as_ref().map(|p| p.offer.currency.as_str());
+    let currency_ok =
+        |o: &Offer| o.price.is_some() && compare_ccy.map(|c| o.currency == c).unwrap_or(true);
+    let cheapest_local = priced
         .iter()
-        .filter(|o| {
-            compare_ccy
-                .as_ref()
-                .map(|c| &o.currency == c)
-                .unwrap_or(true)
-        })
-        .cloned()
-        .collect();
-    let cheapest_local = local_cmp
-        .iter()
+        .filter(|o| currency_ok(o))
         .filter_map(|o| o.price)
         .fold(None, |acc, p| Some(acc.map(|a: f64| a.min(p)).unwrap_or(p)));
-    let mut pool_offers = local_cmp.clone();
-    pool_offers.extend(
-        nearby_offers
-            .iter()
-            .filter(|o| {
-                o.price.is_some()
-                    && compare_ccy
-                        .as_ref()
-                        .map(|c| &o.currency == c)
-                        .unwrap_or(true)
-            })
-            .cloned(),
-    );
-    pool_offers.extend(hidden_matches.iter().filter_map(|m| {
-        if m.through_offer.price.is_some()
-            && compare_ccy
-                .as_ref()
-                .map(|c| &m.through_offer.currency == c)
-                .unwrap_or(true)
-        {
-            Some(m.through_offer.clone())
-        } else {
-            None
-        }
-    }));
-    pool_offers.extend(
-        self_transfer_offers
-            .iter()
-            .filter(|o| {
-                o.price.is_some()
-                    && compare_ccy
-                        .as_ref()
-                        .map(|c| &o.currency == c)
-                        .unwrap_or(true)
-            })
-            .cloned(),
-    );
-    let cheapest_any = pool_offers
+    let cheapest_any = priced
         .iter()
+        .chain(nearby_offers.iter())
+        .chain(self_transfer_offers.iter())
+        .chain(hidden_matches.iter().map(|m| &m.through_offer))
+        .filter(|o| currency_ok(o))
         .filter_map(|o| o.price)
         .fold(None, |acc, p| Some(acc.map(|a: f64| a.min(p)).unwrap_or(p)));
 
@@ -731,7 +767,6 @@ async fn search_all_ways_inner(
     let airline_pairs = repo::airlines_by_iata(pool, &codes_vec)
         .await
         .unwrap_or_default();
-    let airline_names: HashMap<String, String> = airline_pairs.iter().cloned().collect();
     let book_ccy = "USD";
     let bookers = booker_links(
         &o_ap.iata,
@@ -743,10 +778,10 @@ async fn search_all_ways_inner(
         &query.cabin,
         query.return_date.as_deref(),
     );
-    let airline_map = airline_names.clone();
+    let airline_names: HashMap<String, String> = airline_pairs.into_iter().collect();
     for match_ in hidden_matches.iter_mut() {
         let code = match_.through_offer.carrier.to_uppercase();
-        let thru_al: Vec<(String, String)> = if let Some(name) = airline_map.get(&code) {
+        let thru_al: Vec<(String, String)> = if let Some(name) = airline_names.get(&code) {
             vec![(code.clone(), name.clone())]
         } else {
             vec![]
@@ -762,18 +797,34 @@ async fn search_all_ways_inner(
             None,
         );
     }
-    if !hidden_matches.is_empty() && !round_trip {
-        let _ = repo::persist_hidden_deals(
-            pool,
-            &hidden_matches,
-            &o_ap.iata.chars().take(3).collect::<String>(),
-            &o_ap.city,
-            &d_ap.iata.chars().take(3).collect::<String>(),
-            &d_ap.city,
-            &query.date,
-        )
-        .await;
-    }
+
+    let persist_tracks = if !traffic_o.aircraft.is_empty() {
+        Some((
+            o_members
+                .first()
+                .cloned()
+                .unwrap_or_else(|| o_ap.iata.clone()),
+            traffic_o.aircraft.clone(),
+            traffic_o.api_time.map(|t| t as i32),
+        ))
+    } else {
+        None
+    };
+    traffic_o.aircraft.truncate(8);
+    traffic_d.aircraft.truncate(8);
+    board.truncate(12);
+
+    let persist_hidden = if !hidden_matches.is_empty() && !round_trip {
+        Some((
+            hidden_matches.clone(),
+            o_ap.iata.chars().take(3).collect::<String>(),
+            o_ap.city.clone(),
+            d_ap.iata.chars().take(3).collect::<String>(),
+            d_ap.city.clone(),
+        ))
+    } else {
+        None
+    };
 
     let channels = vec![
         ChannelGroup {
@@ -781,7 +832,7 @@ async fn search_all_ways_inner(
             label: "Priced nonstop A → B".into(),
             blurb: "GDS/NDC priced offers that end at your destination with one flight. A search offer is not a ticket.".into(),
             offers: {
-                let mut v = nonstop.clone();
+                let mut v = nonstop;
                 v.sort_by_key(|o| honest_rank_key(o));
                 v
             },
@@ -791,7 +842,7 @@ async fn search_all_ways_inner(
             label: "Priced connecting itineraries that end at B".into(),
             blurb: "Honest through products ticketed to B. Different from hidden-city A→B→C.".into(),
             offers: {
-                let mut v = connecting.clone();
+                let mut v = connecting;
                 v.sort_by_key(|o| honest_rank_key(o));
                 v
             },
@@ -801,7 +852,7 @@ async fn search_all_ways_inner(
             label: "Priced nearby-airport substitutes".into(),
             blurb: "Same trip intent, different IATA. Still a real A′→B′ offer, not skiplagging.".into(),
             offers: {
-                let mut v: Vec<Offer> = nearby_offers.iter().filter(|o| o.price.is_some()).cloned().collect();
+                let mut v: Vec<Offer> = nearby_offers.into_iter().filter(|o| o.price.is_some()).collect();
                 v.sort_by_key(|o| honest_rank_key(o));
                 v
             },
@@ -810,7 +861,7 @@ async fn search_all_ways_inner(
             kind: "self-transfer".into(),
             label: "Self-transfer (separate tickets)".into(),
             blurb: "Two or three independently priced tickets you buy yourself. A missed connection is not protected. Not hidden-city.".into(),
-            offers: self_transfer_offers.clone(),
+            offers: self_transfer_offers,
         },
         ChannelGroup {
             kind: "hidden-city".into(),
@@ -876,17 +927,12 @@ async fn search_all_ways_inner(
     ];
 
     let elapsed = (t0.elapsed().as_secs_f64() * 1000.0 * 10.0).round() / 10.0;
-    let mut persist_payload: Vec<Value> = priced
+    let persist_offers: Vec<Offer> = priced
         .iter()
         .take(30)
-        .filter_map(|o| serde_json::to_value(o).ok())
+        .cloned()
+        .chain(hidden_matches.iter().take(15).map(|m| m.through_offer.clone()))
         .collect();
-    persist_payload.extend(
-        hidden_matches
-            .iter()
-            .take(15)
-            .filter_map(|m| serde_json::to_value(&m.through_offer).ok()),
-    );
     let search_id = repo::persist_search(
         pool,
         &o_ap.iata.chars().take(3).collect::<String>(),
@@ -897,27 +943,29 @@ async fn search_all_ways_inner(
         &query.currency,
         elapsed,
         &sources_used,
-        &persist_payload,
+        &[],
     )
     .await
     .ok();
-    if !traffic_o.aircraft.is_empty() {
-        let states: Vec<Value> = traffic_o
-            .aircraft
-            .iter()
-            .filter_map(|a| serde_json::to_value(a).ok())
-            .collect();
-        let _ = repo::persist_tracks(
-            pool,
-            members_of(&o_ap)
-                .first()
-                .map(|s| s.as_str())
-                .unwrap_or(&o_ap.iata),
-            &states,
-            traffic_o.api_time.map(|t| t as i32),
-        )
-        .await;
-    }
+    spawn_search_persist(SearchPersist {
+        pool: pool.clone(),
+        learned: learned_offers,
+        date: query.date.clone(),
+        adults: query.adults,
+        cabin: query.cabin.clone(),
+        origins: route_origins,
+        dests: route_dests,
+        honest_price: honest_pick.as_ref().and_then(|p| p.offer.price),
+        honest_ccy: honest_pick.as_ref().map(|p| p.offer.currency.clone()),
+        expanded: expanded.clone(),
+        probe_origin: Some(req.origin.clone()),
+        probe_dest: Some(req.dest.clone()),
+        calls,
+        hidden: persist_hidden,
+        tracks: persist_tracks,
+        search_id,
+        persist_offers,
+    });
 
     Ok(SearchResponse {
         query,
@@ -1253,27 +1301,26 @@ pub async fn _shop_providers(
         )
         .await;
         if !mocked.is_empty() {
-            return offers_in_usd(&_drop_sandbox(&mocked));
+            return take_offers_in_usd(take_drop_sandbox(mocked));
         }
     }
     let mut parts: Vec<Vec<Offer>> = Vec::new();
     if let Some(duffel) = duffel {
-        parts.push(
-            timed_shop(
-                "duffel",
-                &req.origin,
-                &req.dest,
-                &req.date,
-                purpose,
-                duffel.shop(req),
-            )
-            .await,
-        );
-        if extra_nonstop && !req.nonstop {
+        let extra = extra_nonstop && !req.nonstop;
+        let parallel_extra = extra && LEDGER.try_with(|l| l.remaining() >= 2).unwrap_or(true);
+        if extra && parallel_extra {
             let mut r = clone_shop(req);
             r.nonstop = true;
             r.max_offers = 12;
-            parts.push(
+            let (connecting, nonstop) = tokio::join!(
+                timed_shop(
+                    "duffel",
+                    &req.origin,
+                    &req.dest,
+                    &req.date,
+                    purpose,
+                    duffel.shop(req),
+                ),
                 timed_shop(
                     "duffel",
                     &r.origin,
@@ -1281,9 +1328,38 @@ pub async fn _shop_providers(
                     &r.date,
                     purpose,
                     duffel.shop(&r),
+                ),
+            );
+            parts.push(connecting);
+            parts.push(nonstop);
+        } else {
+            parts.push(
+                timed_shop(
+                    "duffel",
+                    &req.origin,
+                    &req.dest,
+                    &req.date,
+                    purpose,
+                    duffel.shop(req),
                 )
                 .await,
             );
+            if extra {
+                let mut r = clone_shop(req);
+                r.nonstop = true;
+                r.max_offers = 12;
+                parts.push(
+                    timed_shop(
+                        "duffel",
+                        &r.origin,
+                        &r.dest,
+                        &r.date,
+                        purpose,
+                        duffel.shop(&r),
+                    )
+                    .await,
+                );
+            }
         }
     }
     if parts.is_empty() {
@@ -1293,7 +1369,7 @@ pub async fn _shop_providers(
     for part in parts {
         out.extend(part);
     }
-    offers_in_usd(&_drop_sandbox(&unexpired(&out)))
+    take_offers_in_usd(take_drop_sandbox(take_unexpired(out)))
 }
 
 pub async fn _shop_nearby(
@@ -1777,11 +1853,20 @@ fn classify_hidden(
     origin_place: Option<&Airport>,
     min_saving: f64,
 ) -> (Vec<HiddenCityMatch>, Vec<String>) {
-    let Some(local_usd) = offer_in_usd(local).filter(|o| o.price.is_some()) else {
-        return (
-            vec![],
-            vec!["honest fare FX unverified (could not convert to USD)".into()],
-        );
+    let local_owned = if local.currency.eq_ignore_ascii_case("USD") && local.price.is_some() {
+        None
+    } else {
+        Some(offer_in_usd(local).filter(|o| o.price.is_some()))
+    };
+    let local_usd = match &local_owned {
+        None => local,
+        Some(Some(o)) => o,
+        Some(None) => {
+            return (
+                vec![],
+                vec!["honest fare FX unverified (could not convert to USD)".into()],
+            );
+        }
     };
     let mut matches = Vec::new();
     let mut rejected = Vec::new();
@@ -1789,7 +1874,11 @@ fn classify_hidden(
         if offer.price.is_none() {
             continue;
         }
-        let Some(mut converted) = offer_in_usd(offer).filter(|o| o.price.is_some()) else {
+        let converted_owned = if offer.currency.eq_ignore_ascii_case("USD") {
+            None
+        } else if let Some(o) = offer_in_usd(offer).filter(|o| o.price.is_some()) {
+            Some(o)
+        } else {
             rejected.push(format!(
                 "{}: FX unverified ({})",
                 offer.id,
@@ -1801,10 +1890,11 @@ fn classify_hidden(
             ));
             continue;
         };
-        if is_standard_to(&converted, intended) {
+        let converted = converted_owned.as_ref().unwrap_or(offer);
+        if is_standard_to(converted, intended) {
             continue;
         }
-        let Some(hit) = detect_hidden_city(&converted, intended) else {
+        let Some(hit) = detect_hidden_city(converted, intended) else {
             rejected.push(format!(
                 "{}: does not pass through intended destination",
                 offer.id
@@ -1816,6 +1906,7 @@ fn classify_hidden(
             rejected.push(format!("{}: saving below floor", offer.id));
             continue;
         }
+        let mut converted = converted.clone();
         converted.kind = "hidden-city".into();
         let ticketed = ticketed_destination(&converted);
         let match_id = format!("hc-{}-{}", converted.id, hit.exit_airport);
@@ -1899,14 +1990,18 @@ pub fn _drop_sandbox(offers: &[Offer]) -> Vec<Offer> {
     offers.iter().filter(|o| !_is_sandbox(o)).cloned().collect()
 }
 
+fn take_drop_sandbox(offers: Vec<Offer>) -> Vec<Offer> {
+    offers.into_iter().filter(|o| !_is_sandbox(o)).collect()
+}
+
 pub fn _on_route(offer: &Offer, origins: &HashSet<String>, dests: &HashSet<String>) -> bool {
     if offer.segments.is_empty() {
         return false;
     }
-    let allowed_o = upper_set(origins.iter());
-    let allowed_d = upper_set(dests.iter());
-    allowed_o.contains(&offer.segments[0].origin.to_uppercase())
-        && allowed_d.contains(&ticketed_destination(offer))
+    let origin = offer.segments[0].origin.to_uppercase();
+    let ticketed = ticketed_destination(offer);
+    (origins.contains(&origin) || origins.iter().any(|o| o.eq_ignore_ascii_case(&origin)))
+        && (dests.contains(&ticketed) || dests.iter().any(|d| d.eq_ignore_ascii_case(&ticketed)))
 }
 
 pub fn _keep_on_route(
@@ -1937,7 +2032,10 @@ fn codeshare_key(offer: &Offer) -> Vec<(String, String, String, String)> {
 }
 
 pub fn _dedupe_itineraries(offers: &[Offer]) -> Vec<Offer> {
-    let mut ordered = offers.to_vec();
+    take_dedupe_itineraries(offers.to_vec())
+}
+
+fn take_dedupe_itineraries(mut ordered: Vec<Offer>) -> Vec<Offer> {
     ordered.sort_by(|a, b| {
         let pa = a.price.unwrap_or(1e12);
         let pb = b.price.unwrap_or(1e12);
@@ -1957,20 +2055,21 @@ pub fn _dedupe_itineraries(offers: &[Offer]) -> Vec<Offer> {
 }
 
 pub fn _prefer_real_carriers(offers: Vec<Offer>) -> Vec<Offer> {
-    let real: Vec<Offer> = offers
-        .iter()
-        .filter(|o| !is_test_carrier(&o.carrier))
-        .cloned()
-        .collect();
-    if real.is_empty() {
-        offers
-    } else {
-        real
+    take_prefer_real_carriers(offers)
+}
+
+fn take_prefer_real_carriers(mut offers: Vec<Offer>) -> Vec<Offer> {
+    if offers.iter().any(|o| !is_test_carrier(&o.carrier)) {
+        offers.retain(|o| !is_test_carrier(&o.carrier));
     }
+    offers
 }
 
 pub fn _dedupe(offers: &[Offer]) -> Vec<Offer> {
-    let mut ordered = offers.to_vec();
+    take_dedupe(offers.to_vec())
+}
+
+fn take_dedupe(mut ordered: Vec<Offer>) -> Vec<Offer> {
     ordered.sort_by(|a, b| {
         let pa = a.price.unwrap_or(1e12);
         let pb = b.price.unwrap_or(1e12);
@@ -2115,23 +2214,40 @@ fn as_pick(offer: Offer, reason: &str) -> HonestPick {
     }
 }
 
+fn pick_price_key(a: &Offer, b: &Offer) -> std::cmp::Ordering {
+    let pa = a.price.unwrap_or(1e12);
+    let pb = b.price.unwrap_or(1e12);
+    pa.partial_cmp(&pb)
+        .unwrap_or(std::cmp::Ordering::Equal)
+        .then_with(|| layover_minutes(a).cmp(&layover_minutes(b)))
+        .then_with(|| a.duration_min.cmp(&b.duration_min))
+}
+
 pub fn pick_honest(
     nonstop: &[Offer],
     connecting: &[Offer],
     preferred: Option<&str>,
 ) -> Option<HonestPick> {
-    let mut all = Vec::new();
-    all.extend(nonstop.iter().cloned());
-    all.extend(connecting.iter().cloned());
-    let priced = _priced_in_currency(&all, preferred);
-    let offer = priced.into_iter().min_by(|a, b| {
-        let pa = a.price.unwrap_or(1e12);
-        let pb = b.price.unwrap_or(1e12);
-        pa.partial_cmp(&pb)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| layover_minutes(a).cmp(&layover_minutes(b)))
-            .then_with(|| a.duration_min.cmp(&b.duration_min))
-    })?;
+    let want = preferred.unwrap_or("USD");
+    let mixed = nonstop
+        .iter()
+        .chain(connecting.iter())
+        .any(|o| o.price.is_some() && !o.currency.eq_ignore_ascii_case(want));
+    let offer = if mixed {
+        let mut all = Vec::new();
+        all.extend(nonstop.iter().cloned());
+        all.extend(connecting.iter().cloned());
+        _priced_in_currency(&all, preferred)
+            .into_iter()
+            .min_by(pick_price_key)
+    } else {
+        nonstop
+            .iter()
+            .chain(connecting.iter())
+            .filter(|o| o.price.is_some())
+            .min_by(|a, b| pick_price_key(a, b))
+            .cloned()
+    }?;
     if offer.stops == 0 {
         Some(as_pick(offer, "Best — cheapest nonstop"))
     } else {
@@ -2157,29 +2273,33 @@ pub fn pick_best(
     connecting: &[Offer],
     cheapest: Option<&HonestPick>,
 ) -> Option<HonestPick> {
-    let mut all = Vec::new();
-    all.extend(nonstop.iter().cloned());
-    all.extend(connecting.iter().cloned());
-    let priced = _priced_in_currency(&all, None);
-    if priced.is_empty() {
-        return None;
-    }
     let cheap_id = cheapest.map(|c| c.offer.id.as_str());
-    let nons: Vec<Offer> = priced.iter().filter(|o| o.stops == 0).cloned().collect();
-    if !nons.is_empty() {
-        let best = nons.into_iter().min_by(_honest_rank)?;
+    let usd = |o: &Offer| o.price.is_some() && o.currency.eq_ignore_ascii_case("USD");
+    if !nonstop.iter().chain(connecting.iter()).any(usd) {
+        let mut all = Vec::new();
+        all.extend(nonstop.iter().cloned());
+        all.extend(connecting.iter().cloned());
+        return pick_best_from_owned(_priced_in_currency(&all, None), cheap_id);
+    }
+    if let Some(best) = nonstop
+        .iter()
+        .filter(|o| usd(o))
+        .min_by(|a, b| _honest_rank(a, b))
+    {
         if Some(best.id.as_str()) == cheap_id {
             return None;
         }
-        return Some(as_pick(best, "Best — cheapest nonstop"));
+        return Some(as_pick(best.clone(), "Best — cheapest nonstop"));
+    }
+    let priced: Vec<&Offer> = connecting.iter().filter(|o| usd(o)).collect();
+    if priced.is_empty() {
+        return None;
     }
     let min_stops = priced.iter().map(|o| o.stops).min()?;
-    let fewest: Vec<Offer> = priced
-        .iter()
+    let best = priced
+        .into_iter()
         .filter(|o| o.stops == min_stops)
-        .cloned()
-        .collect();
-    let best = fewest.into_iter().min_by(_honest_rank)?;
+        .min_by(|a, b| _honest_rank(a, b))?;
     if Some(best.id.as_str()) == cheap_id {
         return None;
     }
@@ -2188,7 +2308,37 @@ pub fn pick_best(
     } else {
         format!("{min_stops} stops")
     };
-    Some(as_pick(best, &format!("Best — cheapest {label}")))
+    Some(as_pick(best.clone(), &format!("Best — cheapest {label}")))
+}
+
+fn pick_best_from_owned(priced: Vec<Offer>, cheap_id: Option<&str>) -> Option<HonestPick> {
+    if priced.is_empty() {
+        return None;
+    }
+    if let Some(best) = priced
+        .iter()
+        .filter(|o| o.stops == 0)
+        .min_by(|a, b| _honest_rank(a, b))
+    {
+        if Some(best.id.as_str()) == cheap_id {
+            return None;
+        }
+        return Some(as_pick(best.clone(), "Best — cheapest nonstop"));
+    }
+    let min_stops = priced.iter().map(|o| o.stops).min()?;
+    let best = priced
+        .iter()
+        .filter(|o| o.stops == min_stops)
+        .min_by(|a, b| _honest_rank(a, b))?;
+    if Some(best.id.as_str()) == cheap_id {
+        return None;
+    }
+    let label = if min_stops == 1 {
+        "one stop".to_string()
+    } else {
+        format!("{min_stops} stops")
+    };
+    Some(as_pick(best.clone(), &format!("Best — cheapest {label}")))
 }
 
 pub fn _clean_hidden_matches(matches: Vec<HiddenCityMatch>) -> Vec<HiddenCityMatch> {

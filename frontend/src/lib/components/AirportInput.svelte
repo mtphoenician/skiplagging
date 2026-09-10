@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onDestroy } from 'svelte';
-  import { fetchAirport, searchAirports } from '$lib/api';
+  import { fetchAirport, isAbortError, searchAirports } from '$lib/api';
   import type { Airport } from '$lib/types';
 
   /** Pause after the last keystroke before searching. Cancels in-flight prefix queries. */
@@ -13,7 +13,7 @@
   }: { label: string; value: string; placeholder?: string } = $props();
 
   let open = $state(false);
-  let hits = $state<Airport[]>([]);
+  let hits = $state.raw<Airport[]>([]);
   let hitsQuery = $state('');
   let active = $state(0);
   let draft = $state('');
@@ -30,10 +30,6 @@
 
   function displayOf(a: Airport) {
     return a.type === 'city' ? a.city : a.iata;
-  }
-
-  function isAbortError(e: unknown): boolean {
-    return e instanceof Error && e.name === 'AbortError';
   }
 
   function cancelLookup() {
@@ -64,20 +60,29 @@
   });
 
   async function hydrate(code: string) {
+    abort?.abort();
+    const ac = new AbortController();
+    abort = ac;
     try {
-      const ap = await fetchAirport(code);
+      const ap = await fetchAirport(code, ac.signal);
       if (ap && !focused && value.toUpperCase() === code.toUpperCase()) {
         picked = ap;
         draft = displayOf(ap);
       }
-    } catch {
+    } catch (e) {
+      if (isAbortError(e)) return;
       /* keep the IATA even if the name never loads */
     }
   }
 
-  function onDoc(e: MouseEvent) {
-    if (root && !root.contains(e.target as Node)) open = false;
-  }
+  $effect(() => {
+    if (!open) return;
+    const onDoc = (e: MouseEvent) => {
+      if (root && !root.contains(e.target as Node)) open = false;
+    };
+    window.addEventListener('click', onDoc);
+    return () => window.removeEventListener('click', onDoc);
+  });
 
   async function lookup(q: string) {
     if (draft.trim() !== q) return;
@@ -142,6 +147,7 @@
       queueMicrotask(() => inputEl?.select());
     }
     const q = draft.trim();
+    if (picked && (placeId(picked) === value || displayOf(picked) === q)) return;
     if (hits.length && hitsQuery === q) open = true;
     else if (q.length >= 1) scheduleLookup(q, true);
   }
@@ -180,8 +186,6 @@
   onDestroy(cancelLookup);
 </script>
 
-<svelte:window onclick={onDoc} />
-
 <div class="field suggest" bind:this={root}>
   <label for="ap-{label}">{label}</label>
   <div class="suggest-box">
@@ -207,7 +211,7 @@
   </div>
   {#if open && hits.length}
     <div class="suggest-list scroll" role="listbox">
-      {#each hits as a, i}
+      {#each hits as a, i (a.place_id || a.iata)}
         <button class:active={i === active} type="button" role="option" aria-selected={i === active} onmousedown={() => pick(a)}>
           <span class="suggest-top">
             <strong>{a.iata}</strong>

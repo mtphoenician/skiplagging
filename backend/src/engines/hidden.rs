@@ -19,11 +19,17 @@ pub struct HiddenCityHit {
 
 pub trait Intended {
     fn codes(&self) -> std::collections::HashSet<String>;
+    fn contains_code(&self, code: &str) -> bool {
+        self.codes().contains(&code.to_uppercase())
+    }
 }
 
 impl Intended for &str {
     fn codes(&self) -> std::collections::HashSet<String> {
         std::collections::HashSet::from([(*self).to_uppercase()])
+    }
+    fn contains_code(&self, code: &str) -> bool {
+        self.eq_ignore_ascii_case(code)
     }
 }
 
@@ -31,11 +37,17 @@ impl Intended for String {
     fn codes(&self) -> std::collections::HashSet<String> {
         std::collections::HashSet::from([self.to_uppercase()])
     }
+    fn contains_code(&self, code: &str) -> bool {
+        self.eq_ignore_ascii_case(code)
+    }
 }
 
 impl Intended for std::collections::HashSet<String> {
     fn codes(&self) -> std::collections::HashSet<String> {
         self.iter().map(|s| s.to_uppercase()).collect()
+    }
+    fn contains_code(&self, code: &str) -> bool {
+        self.contains(code) || self.contains(&code.to_uppercase())
     }
 }
 
@@ -43,17 +55,29 @@ impl Intended for &std::collections::HashSet<String> {
     fn codes(&self) -> std::collections::HashSet<String> {
         (*self).iter().map(|s| s.to_uppercase()).collect()
     }
+    fn contains_code(&self, code: &str) -> bool {
+        self.contains(code) || self.contains(&code.to_uppercase())
+    }
 }
 
 impl Intended for [&str] {
     fn codes(&self) -> std::collections::HashSet<String> {
         self.iter().map(|s| s.to_uppercase()).collect()
     }
+    fn contains_code(&self, code: &str) -> bool {
+        self.iter().any(|s| s.eq_ignore_ascii_case(code))
+    }
 }
 
 impl<'a> Intended for std::collections::HashSet<&'a str> {
     fn codes(&self) -> std::collections::HashSet<String> {
         self.iter().map(|s| s.to_uppercase()).collect()
+    }
+    fn contains_code(&self, code: &str) -> bool {
+        self.contains(code) || {
+            let u = code.to_uppercase();
+            self.contains(u.as_str())
+        }
     }
 }
 
@@ -94,12 +118,11 @@ pub fn detect_hidden_city(offer: &Offer, intended: impl Intended) -> Option<Hidd
     if segs.len() < 2 {
         return None;
     }
-    let dests = intended.codes();
-    if dests.contains(&ticketed_destination(offer)) {
+    if intended.contains_code(&ticketed_destination(offer)) {
         return None;
     }
     for (index, segment) in segs[..segs.len() - 1].iter().enumerate() {
-        if dests.contains(&segment.dest.to_uppercase()) {
+        if intended.contains_code(&segment.dest) {
             return Some(HiddenCityHit {
                 exit_airport: segment.dest.to_uppercase(),
                 exit_segment_index: index as i32,
@@ -111,7 +134,7 @@ pub fn detect_hidden_city(offer: &Offer, intended: impl Intended) -> Option<Hidd
 }
 
 pub fn is_standard_to(offer: &Offer, intended: impl Intended) -> bool {
-    !offer.segments.is_empty() && intended.codes().contains(&ticketed_destination(offer))
+    !offer.segments.is_empty() && intended.contains_code(&ticketed_destination(offer))
 }
 
 pub fn hidden_city_savings(best_standard: Option<f64>, through_price: Option<f64>) -> Option<f64> {

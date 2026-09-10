@@ -4,7 +4,7 @@
   import OfferCard from '$lib/components/OfferCard.svelte';
   import SearchForm from '$lib/components/SearchForm.svelte';
   import TrafficPanel from '$lib/components/TrafficPanel.svelte';
-  import { duration, expandSearch, itineraryBookers, mergeSearch, money, outboundDest, searchFares, buildSearchHref, searchModeFromParams, backDateFromParams } from '$lib/api';
+  import { duration, expandSearch, itineraryBookers, mergeSearch, money, outboundDest, searchFares, buildSearchHref, searchModeFromParams, backDateFromParams, isAbortError } from '$lib/api';
   import type { Cabin, Offer, SearchMode, SearchQuery, SearchResponse } from '$lib/types';
 
   const params = $derived(page.url.searchParams);
@@ -13,7 +13,7 @@
   const startBack = backDateFromParams(page.url.searchParams, startMode);
   const startRoundTrip = startMode === 'compare' && Boolean(startReturn);
 
-  let data = $state<SearchResponse | null>(null);
+  let data = $state.raw<SearchResponse | null>(null);
   let error = $state('');
   let loading = $state(true);
   let deepPending = $state<string[]>([]);
@@ -34,9 +34,9 @@
   );
   let mode = $state<SearchMode>(startMode);
   let rechecking = $state(false);
-  let run: { cancel: boolean } | null = null;
-  let backRun: { cancel: boolean } | null = null;
-  let backData = $state<SearchResponse | null>(null);
+  let run: { cancel: boolean; abort: AbortController } | null = null;
+  let backRun: { cancel: boolean; abort: AbortController } | null = null;
+  let backData = $state.raw<SearchResponse | null>(null);
   let backLoading = $state(false);
   let backError = $state('');
   let backDate = $state(startBack);
@@ -66,8 +66,11 @@
   }
 
   function beginSearch(query: SearchQuery, bypass: boolean) {
-    if (run) run.cancel = true;
-    const thisRun = { cancel: false };
+    if (run) {
+      run.cancel = true;
+      run.abort.abort();
+    }
+    const thisRun = { cancel: false, abort: new AbortController() };
     run = thisRun;
     if (bypass) {
       rechecking = true;
@@ -80,7 +83,7 @@
       deepNote = '';
     }
 
-    searchFares(query, { bypassCache: bypass })
+    searchFares(query, { bypassCache: bypass, signal: thisRun.abort.signal })
       .then((fast) => {
         if (thisRun.cancel) return;
         data = fast;
@@ -96,7 +99,7 @@
         const before = fast.hidden_if_cheaper?.through_offer.price ?? null;
         const beforeCount = fast.hidden_city.length;
         const beforeSelf = fast.channels.find((c) => c.kind === 'self-transfer')?.offers[0]?.price ?? null;
-        return expandSearch(query, fast.search_debug?.expanded_destinations ?? [])
+        return expandSearch(query, fast.search_debug?.expanded_destinations ?? [], thisRun.abort.signal)
           .then((deep) => {
             if (thisRun.cancel) return;
             const merged = mergeSearch(fast, deep);
@@ -116,8 +119,9 @@
                 : 'Deep search finished. Nothing cheaper.';
             }
           })
-          .catch(() => {
-            if (!thisRun.cancel) deepNote = 'Deep search did not finish. Results above are the fast pass.';
+          .catch((e: Error) => {
+            if (thisRun.cancel || isAbortError(e)) return;
+            deepNote = 'Deep search did not finish. Results above are the fast pass.';
           })
           .finally(() => {
             if (!thisRun.cancel) {
@@ -128,24 +132,26 @@
           });
       })
       .catch((e: Error) => {
-        if (!thisRun.cancel) {
-          error = e.message;
-          loading = false;
-          rechecking = false;
-        }
+        if (thisRun.cancel || isAbortError(e)) return;
+        error = e.message;
+        loading = false;
+        rechecking = false;
       });
   }
 
   function beginBackSearch(query: SearchQuery, bypass: boolean) {
-    if (backRun) backRun.cancel = true;
-    const thisRun = { cancel: false };
+    if (backRun) {
+      backRun.cancel = true;
+      backRun.abort.abort();
+    }
+    const thisRun = { cancel: false, abort: new AbortController() };
     backRun = thisRun;
     if (!bypass) {
       backLoading = true;
       backError = '';
       backData = null;
     }
-    searchFares(query, { bypassCache: bypass })
+    searchFares(query, { bypassCache: bypass, signal: thisRun.abort.signal })
       .then((fast) => {
         if (thisRun.cancel) return;
         backData = fast;
@@ -153,20 +159,19 @@
         const pending = fast.search_debug?.pending_candidates ?? [];
         const pendingSelf = Boolean(fast.search_debug?.pending_self_transfer);
         if (!pending.length && !pendingSelf) return;
-        return expandSearch(query, fast.search_debug?.expanded_destinations ?? [])
+        return expandSearch(query, fast.search_debug?.expanded_destinations ?? [], thisRun.abort.signal)
           .then((deep) => {
             if (thisRun.cancel) return;
             backData = mergeSearch(fast, deep);
           })
-          .catch(() => {
-            /* Fast pass stands if the deep pass does not finish. */
+          .catch((e: Error) => {
+            if (thisRun.cancel || isAbortError(e)) return;
           });
       })
       .catch((e: Error) => {
-        if (!thisRun.cancel) {
-          backError = e.message;
-          backLoading = false;
-        }
+        if (thisRun.cancel || isAbortError(e)) return;
+        backError = e.message;
+        backLoading = false;
       });
   }
 
@@ -260,8 +265,14 @@
     }
 
     return () => {
-      if (run) run.cancel = true;
-      if (backRun) backRun.cancel = true;
+      if (run) {
+        run.cancel = true;
+        run.abort.abort();
+      }
+      if (backRun) {
+        backRun.cancel = true;
+        backRun.abort.abort();
+      }
     };
   });
 
@@ -317,6 +328,12 @@
   const lists = $derived(data?.channels.filter((c) => c.kind !== 'hidden-city') ?? []);
   const listedCount = $derived(lists.reduce((n, c) => n + c.offers.length, 0));
   const hiddenList = $derived(data?.hidden_city ?? []);
+  const featuredHiddenId = $derived(data?.hidden_if_cheaper?.id || data?.hidden_if_cheaper?.through_offer.id || '');
+  const restHidden = $derived(
+    featuredHiddenId
+      ? hiddenList.filter((m) => (m.id || m.through_offer.id) !== featuredHiddenId)
+      : hiddenList
+  );
   const showHonest = $derived(
     Boolean(
       data?.honest_pick &&
@@ -377,22 +394,52 @@
 
   // Comparator list: every priced flight to B in one list, like a metasearch.
   // Hidden-city tickets are not in here; they are a separate, labeled addition.
-  const allOffers = $derived.by(() => {
+  const fareIndex = $derived.by(() => {
+    if (tab !== 'flights') {
+      return { allOffers: [] as Offer[], minPrice: Infinity, minDuration: Infinity, bestId: '', stopCounts: { nonstop: 0, one: 0 } };
+    }
     const seen = new Set<string>();
-    const out: Offer[] = [];
+    const allOffers: Offer[] = [];
+    let minPrice = Infinity;
+    let minDuration = Infinity;
+    let best: Offer | null = null;
+    let nonstop = 0;
+    let one = 0;
     for (const ch of lists) {
       for (const o of ch.offers) {
         if (o.price == null || seen.has(o.id)) continue;
         seen.add(o.id);
-        out.push(o);
+        allOffers.push(o);
+        if (o.price < minPrice) minPrice = o.price;
+        if (o.duration_min && o.duration_min < minDuration) minDuration = o.duration_min;
+        if (o.stops === 0) nonstop++;
+        if (o.stops <= 1) one++;
+        if (
+          !best ||
+          o.stops < best.stops ||
+          (o.stops === best.stops && (o.price ?? 1e9) < (best.price ?? 1e9)) ||
+          (o.stops === best.stops && (o.price ?? 1e9) === (best.price ?? 1e9) && o.duration_min < best.duration_min)
+        ) {
+          best = o;
+        }
       }
     }
-    return out;
+    return {
+      allOffers,
+      minPrice,
+      minDuration,
+      bestId: best?.id ?? '',
+      stopCounts: { nonstop, one }
+    };
   });
-  const minPrice = $derived(Math.min(...allOffers.map((o) => o.price ?? Infinity)));
-  const minDuration = $derived(Math.min(...allOffers.map((o) => o.duration_min || Infinity)));
+  const allOffers = $derived(fareIndex.allOffers);
+  const minPrice = $derived(fareIndex.minPrice);
+  const minDuration = $derived(fareIndex.minDuration);
+  const bestId = $derived(fareIndex.bestId);
+  const stopCounts = $derived(fareIndex.stopCounts);
   const shown = $derived.by(() => {
-    const rows = allOffers.filter((o) => maxStops < 0 || o.stops <= maxStops);
+    if (tab !== 'flights') return [] as Offer[];
+    const rows = maxStops < 0 ? allOffers : allOffers.filter((o) => o.stops <= maxStops);
     const by: Record<typeof sort, (a: Offer, b: Offer) => number> = {
       cheapest: (a, b) => (a.price ?? 1e9) - (b.price ?? 1e9) || a.duration_min - b.duration_min,
       fastest: (a, b) => a.duration_min - b.duration_min || (a.price ?? 1e9) - (b.price ?? 1e9),
@@ -400,17 +447,13 @@
     };
     return [...rows].sort(by[sort]);
   });
-  const bestId = $derived(
-    allOffers.length
-      ? [...allOffers].sort(
-          (a, b) => a.stops - b.stops || (a.price ?? 1e9) - (b.price ?? 1e9) || a.duration_min - b.duration_min
-        )[0].id
-      : ''
+  const shownRows = $derived(
+    shown.map((offer) => ({
+      offer,
+      tag: tagFor(offer),
+      cities: cities(offer)
+    }))
   );
-  const stopCounts = $derived({
-    nonstop: allOffers.filter((o) => o.stops === 0).length,
-    one: allOffers.filter((o) => o.stops <= 1).length
-  });
 
   function tagFor(o: Offer): string {
     if (o.kind === 'nearby') return 'Nearby airport';
@@ -438,27 +481,27 @@
   });
   const backNames = $derived(backData?.airline_names ?? {});
   const wayBackHref = $derived(
-    origin && destination && backDate
+    data && backDate
       ? buildSearchHref({
-          origin: destination,
-          destination: origin,
+          origin: data.destination.iata,
+          destination: data.origin.iata,
           date: backDate,
-          adults,
-          cabin,
-          nearby: include_nearby,
+          adults: data.query.adults,
+          cabin: data.query.cabin,
+          nearby: data.query.include_nearby,
           mode: 'hidden'
         })
       : ''
   );
   const twoOneWaysHref = $derived(
-    origin && destination && date
+    data
       ? buildSearchHref({
-          origin,
-          destination,
-          date,
+          origin: data.origin.iata,
+          destination: data.destination.iata,
+          date: data.query.date,
           returnDate: return_date,
-          adults,
-          cabin,
+          adults: data.query.adults,
+          cabin: data.query.cabin,
           nearby: false,
           mode: 'hidden'
         })
@@ -560,7 +603,9 @@
       <p class="pick-kicker">
         Hidden-city{hiddenSaving > 0
           ? ` — save ${money(hiddenSaving, data.hidden_if_cheaper.currency)} vs flying to ${data.destination.city}`
-          : ` — get off in ${data.destination.iata}`}
+          : ` — get off in ${data.destination.iata}`}{data.hidden_if_cheaper.window?.label
+          ? ` · ${data.hidden_if_cheaper.window.label}`
+          : ''}
       </p>
       <HiddenCityCard match={data.hidden_if_cheaper} names={names} />
     {:else if !roundTrip && !deepPending.length && !deepSelf && data.honest_pick}
@@ -717,18 +762,19 @@
             </button>
           </div>
         </div>
-        {#if shown.length}
-          {#each shown as offer (offer.id)}
+        {#if shownRows.length}
+          {#each shownRows as row (row.offer.id)}
             <OfferCard
-              {offer}
-              cheapest={offer.price === minPrice}
-              fastest={offer.duration_min === minDuration}
-              best={offer.id === bestId}
-              tag={tagFor(offer)}
+              offer={row.offer}
+              cheapest={row.offer.price === minPrice}
+              fastest={row.offer.duration_min === minDuration}
+              best={row.offer.id === bestId}
+              tag={row.tag}
               names={names}
               adults={data.query.adults}
               cabin={data.query.cabin}
-              {...cities(offer)}
+              fromCity={row.cities.fromCity}
+              toCity={row.cities.toCity}
             />
           {/each}
         {:else}
@@ -752,7 +798,7 @@
         </p>
       {/if}
       {#if hiddenList.length}
-        {#each hiddenList as match}
+        {#each restHidden as match (match.id || match.through_offer.id)}
           <HiddenCityCard {match} names={names} />
         {/each}
       {:else}

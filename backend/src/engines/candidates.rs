@@ -337,6 +337,7 @@ pub struct HiddenCityCandidateEdge {
 
 static GRAPH: LazyLock<Mutex<HashMap<(String, String, String), HiddenCityCandidateEdge>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+const GRAPH_CAP: usize = 8192;
 
 pub fn record_offer(origin: &str, connection: &str, ticketed: &str, price: Option<f64>) {
     let key = (
@@ -354,7 +355,7 @@ pub fn record_offer(origin: &str, connection: &str, ticketed: &str, price: Optio
                 edge.best_observed_price = Some(p);
             }
         }
-    } else {
+    } else if g.len() < GRAPH_CAP {
         g.insert(
             key.clone(),
             HiddenCityCandidateEdge {

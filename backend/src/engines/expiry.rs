@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 
 use crate::models::Offer;
 
-fn parse_expiry(raw: Option<&str>) -> Option<DateTime<Utc>> {
+pub fn parse_offer_time(raw: Option<&str>) -> Option<DateTime<Utc>> {
     let text = raw?.trim();
     if text.is_empty() {
         return None;
@@ -24,7 +24,7 @@ pub fn offer_unexpired(offer: &Offer) -> bool {
 }
 
 pub fn offer_unexpired_at(offer: &Offer, now: Option<DateTime<Utc>>) -> bool {
-    let Some(exp) = parse_expiry(offer.expires_at.as_deref()) else {
+    let Some(exp) = parse_offer_time(offer.expires_at.as_deref()) else {
         return true;
     };
     let moment = now.unwrap_or_else(Utc::now);
@@ -33,6 +33,10 @@ pub fn offer_unexpired_at(offer: &Offer, now: Option<DateTime<Utc>>) -> bool {
 
 pub fn unexpired(offers: &[Offer]) -> Vec<Offer> {
     unexpired_at(offers, None)
+}
+
+pub fn take_unexpired(offers: Vec<Offer>) -> Vec<Offer> {
+    offers.into_iter().filter(offer_unexpired).collect()
 }
 
 pub fn unexpired_at(offers: &[Offer], now: Option<DateTime<Utc>>) -> Vec<Offer> {

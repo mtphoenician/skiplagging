@@ -65,6 +65,7 @@ fn match_of(local: Offer, through: Offer, hidden: &str, saving: f64, pct: f64) -
         exit_segment_index: 0,
         warnings: vec![],
         result_type: "hidden_city".into(),
+        window: None,
     }
 }
 

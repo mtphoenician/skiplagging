@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
-use std::sync::{LazyLock, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
+use std::time::Instant;
 
 use chrono::{DateTime, Utc};
 use regex::Regex;
@@ -11,12 +12,12 @@ use unicode_normalization::UnicodeNormalization;
 
 use crate::budget::provider_score;
 use crate::engines::candidates::{score_candidate, RouteStat};
-use crate::engines::expiry::{offer_unexpired, unexpired};
+use crate::engines::expiry::{offer_unexpired, take_unexpired};
 use crate::engines::hidden::{hidden_city_savings, meaningful_saving, HIDDEN_CITY_WARNINGS};
 use crate::engines::index::observation_meta;
 use crate::engines::learn::{merge_savings, summarize_savings, LearnBatch};
 use crate::engines::risk::assess;
-use crate::fx::{offer_in_usd, offers_in_usd, to_usd};
+use crate::fx::{offer_in_usd, take_offers_in_usd, to_usd};
 use crate::metros::{catalog_code_for_member, normalize_place_id, METROS};
 use crate::models::{
     Airport, BookerLink, Country, HiddenCityMatch, HiddenDeal, Navaid, Offer, Region, Runway,
@@ -24,7 +25,11 @@ use crate::models::{
 use crate::providers::bookers::booker_links;
 use crate::providers::sandbox::is_live_fare;
 
-static CONTINENTS: Mutex<Option<HashMap<String, String>>> = Mutex::new(None);
+static CONTINENTS: Mutex<Option<Arc<HashMap<String, String>>>> = Mutex::new(None);
+static COUNTRIES: Mutex<Option<Arc<Vec<CountryRow>>>> = Mutex::new(None);
+static COUNTRY_AIRPORT_COUNTS: Mutex<Option<Arc<HashMap<String, i32>>>> = Mutex::new(None);
+static TABLE_COUNTS: Mutex<Option<(Instant, Arc<HashMap<String, i64>>)>> = Mutex::new(None);
+const TABLE_COUNTS_TTL_SECS: u64 = 60;
 static TOKEN_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[a-z0-9]+").expect("token regex"));
 
 const TYPE_W: &[(&str, i32)] = &[
@@ -224,7 +229,7 @@ struct RouteEdgeRow {
     last_seen: DateTime<Utc>,
 }
 
-pub async fn continent_names(pool: &PgPool) -> anyhow::Result<HashMap<String, String>> {
+pub async fn continent_names(pool: &PgPool) -> anyhow::Result<Arc<HashMap<String, String>>> {
     {
         let guard = crate::mutex_lock(&CONTINENTS);
         if let Some(map) = guard.as_ref() {
@@ -234,8 +239,47 @@ pub async fn continent_names(pool: &PgPool) -> anyhow::Result<HashMap<String, St
     let rows: Vec<ContinentRow> = sqlx::query_as("SELECT code, name, source FROM continents")
         .fetch_all(pool)
         .await?;
-    let map: HashMap<String, String> = rows.into_iter().map(|r| (r.code, r.name)).collect();
+    let map: Arc<HashMap<String, String>> =
+        Arc::new(rows.into_iter().map(|r| (r.code, r.name)).collect());
     *crate::mutex_lock(&CONTINENTS) = Some(map.clone());
+    Ok(map)
+}
+
+async fn all_countries(pool: &PgPool) -> anyhow::Result<Arc<Vec<CountryRow>>> {
+    {
+        let guard = crate::mutex_lock(&COUNTRIES);
+        if let Some(rows) = guard.as_ref() {
+            return Ok(rows.clone());
+        }
+    }
+    let rows: Vec<CountryRow> = sqlx::query_as("SELECT * FROM countries")
+        .fetch_all(pool)
+        .await?;
+    let rows = Arc::new(rows);
+    *crate::mutex_lock(&COUNTRIES) = Some(rows.clone());
+    Ok(rows)
+}
+
+async fn country_airport_counts(pool: &PgPool) -> anyhow::Result<Arc<HashMap<String, i32>>> {
+    {
+        let guard = crate::mutex_lock(&COUNTRY_AIRPORT_COUNTS);
+        if let Some(map) = guard.as_ref() {
+            return Ok(map.clone());
+        }
+    }
+    let count_rows = sqlx::query(
+        "SELECT iso_country, COUNT(*)::bigint FROM airports WHERE scheduled_service = TRUE GROUP BY iso_country",
+    )
+    .fetch_all(pool)
+    .await?;
+    let mut count_map: HashMap<String, i32> = HashMap::new();
+    for row in count_rows {
+        let iso: String = row.try_get(0)?;
+        let n: i64 = row.try_get(1)?;
+        count_map.insert(iso, n as i32);
+    }
+    let map = Arc::new(count_map);
+    *crate::mutex_lock(&COUNTRY_AIRPORT_COUNTS) = Some(map.clone());
     Ok(map)
 }
 
@@ -567,15 +611,36 @@ pub fn has_phrase(hay: &str, needle: &str) -> bool {
     if n.is_empty() || h.is_empty() {
         return false;
     }
-    if h == n
-        || h.starts_with(&(n.clone() + " "))
-        || h.starts_with(&(n.clone() + "("))
-        || h.starts_with(&(n.clone() + ","))
-    {
-        return true;
+    if h == n || h.starts_with(&n) {
+        if h.len() == n.len() {
+            return true;
+        }
+        if let Some(c) = h[n.len()..].chars().next() {
+            if !c.is_ascii_alphanumeric() {
+                return true;
+            }
+        }
     }
-    let re = Regex::new(&format!(r"(^|[^a-z0-9]){}([^a-z0-9]|$)", regex::escape(&n))).ok();
-    re.map(|r| r.is_match(&h)).unwrap_or(false)
+    let mut start = 0;
+    while let Some(i) = h[start..].find(&n) {
+        let at = start + i;
+        let before_ok = at == 0
+            || h[..at]
+                .chars()
+                .last()
+                .is_some_and(|c| !c.is_ascii_alphanumeric());
+        let after = at + n.len();
+        let after_ok = after == h.len()
+            || h[after..]
+                .chars()
+                .next()
+                .is_some_and(|c| !c.is_ascii_alphanumeric());
+        if before_ok && after_ok {
+            return true;
+        }
+        start = at + 1;
+    }
+    false
 }
 
 pub fn prefix_token(hay: &str, needle: &str) -> bool {
@@ -804,7 +869,9 @@ pub async fn search_airports(pool: &PgPool, q: &str, limit: i64) -> anyhow::Resu
     if let Some(iso) = &country_iso {
         let extras: Vec<AirportRow> = sqlx::query_as(
             "SELECT * FROM airports WHERE iso_country = $1 AND scheduled_service = TRUE \
-             AND \"type\" IN ('large_airport', 'medium_airport')",
+             AND \"type\" IN ('large_airport', 'medium_airport') \
+             ORDER BY CASE WHEN \"type\" = 'large_airport' THEN 0 ELSE 1 END, name \
+             LIMIT 80",
         )
         .bind(iso)
         .fetch_all(pool)
@@ -1070,13 +1137,17 @@ pub async fn nearby_airports(
     let dlon = max_km / (111.0 * origin.lat.to_radians().abs()).max(20.0);
     let rows: Vec<AirportRow> = sqlx::query_as(
         "SELECT * FROM airports WHERE iata <> $1 AND scheduled_service = TRUE \
-         AND lat BETWEEN $2 AND $3 AND lon BETWEEN $4 AND $5",
+         AND lat BETWEEN $2 AND $3 AND lon BETWEEN $4 AND $5 \
+         ORDER BY abs(lat - $6) + abs(lon - $7) \
+         LIMIT 40",
     )
     .bind(&origin.iata)
     .bind(origin.lat - dlat)
     .bind(origin.lat + dlat)
     .bind(origin.lon - dlon)
     .bind(origin.lon + dlon)
+    .bind(origin.lat)
+    .bind(origin.lon)
     .fetch_all(pool)
     .await?;
     let names = continent_names(pool).await?;
@@ -1363,35 +1434,23 @@ fn score_country(row: &CountryRow, needle: &str) -> i32 {
 }
 
 pub async fn search_countries(pool: &PgPool, q: &str, limit: i64) -> anyhow::Result<Vec<Country>> {
-    let count_rows = sqlx::query(
-        "SELECT iso_country, COUNT(*)::bigint FROM airports WHERE scheduled_service = TRUE GROUP BY iso_country",
-    )
-    .fetch_all(pool)
-    .await?;
-    let mut count_map: HashMap<String, i32> = HashMap::new();
-    for row in count_rows {
-        let iso: String = row.try_get(0)?;
-        let n: i64 = row.try_get(1)?;
-        count_map.insert(iso, n as i32);
-    }
-    let rows: Vec<CountryRow> = sqlx::query_as("SELECT * FROM countries")
-        .fetch_all(pool)
-        .await?;
+    let count_map = country_airport_counts(pool).await?;
+    let rows = all_countries(pool).await?;
     let names = continent_names(pool).await?;
     let needle = q.trim();
     if needle.is_empty() {
-        let mut rows = rows;
-        rows.sort_by(|a, b| a.name.cmp(&b.name));
-        return Ok(rows
-            .iter()
+        let mut ordered: Vec<&CountryRow> = rows.iter().collect();
+        ordered.sort_by(|a, b| a.name.cmp(&b.name));
+        return Ok(ordered
+            .into_iter()
             .take(limit as usize)
             .map(|r| to_country(r, count_map.get(&r.iso2).copied().unwrap_or(0), &names))
             .collect());
     }
     let qf = fold(needle);
-    let mut ranked: Vec<(i32, CountryRow)> = rows
-        .into_iter()
-        .map(|r| (score_country(&r, needle), r))
+    let mut ranked: Vec<(i32, &CountryRow)> = rows
+        .iter()
+        .map(|r| (score_country(r, needle), r))
         .filter(|(s, _)| *s > 0)
         .collect();
     if let Some(alias) = country_alias(&qf) {
@@ -1435,7 +1494,7 @@ pub async fn search_countries(pool: &PgPool, q: &str, limit: i64) -> anyhow::Res
     Ok(ranked
         .into_iter()
         .take(limit as usize)
-        .map(|(_, r)| to_country(&r, count_map.get(&r.iso2).copied().unwrap_or(0), &names))
+        .map(|(_, r)| to_country(r, count_map.get(&r.iso2).copied().unwrap_or(0), &names))
         .collect())
 }
 
@@ -1444,12 +1503,10 @@ async fn matching_country_iso(pool: &PgPool, needle: &str) -> anyhow::Result<Opt
     if let Some(alias) = country_alias(&qf) {
         return Ok(Some(alias.to_string()));
     }
-    let rows: Vec<CountryRow> = sqlx::query_as("SELECT * FROM countries")
-        .fetch_all(pool)
-        .await?;
-    let mut ranked: Vec<(i32, CountryRow)> = rows
-        .into_iter()
-        .map(|r| (score_country(&r, needle), r))
+    let rows = all_countries(pool).await?;
+    let mut ranked: Vec<(i32, &CountryRow)> = rows
+        .iter()
+        .map(|r| (score_country(r, needle), r))
         .filter(|(s, _)| *s > 0)
         .collect();
     if ranked.is_empty() {
@@ -1468,7 +1525,7 @@ async fn matching_country_iso(pool: &PgPool, needle: &str) -> anyhow::Result<Opt
         }
     }
     ranked.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.name.cmp(&b.1.name)));
-    let top = &ranked[0].1;
+    let top = ranked[0].1;
     if qf == fold(&top.iso2)
         || qf == fold(top.iso3.as_deref().unwrap_or(""))
         || qf == fold(&top.name)
@@ -1482,14 +1539,10 @@ pub async fn get_country(pool: &PgPool, iso2: &str) -> anyhow::Result<Option<Cou
     let Some(row) = fetch_country(pool, iso2).await? else {
         return Ok(None);
     };
-    let n: (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM airports WHERE iso_country = $1 AND scheduled_service = TRUE",
-    )
-    .bind(&row.iso2)
-    .fetch_one(pool)
-    .await?;
+    let counts = country_airport_counts(pool).await?;
+    let n = counts.get(&row.iso2).copied().unwrap_or(0);
     let names = continent_names(pool).await?;
-    Ok(Some(to_country(&row, n.0 as i32, &names)))
+    Ok(Some(to_country(&row, n, &names)))
 }
 
 pub async fn regions_for(pool: &PgPool, iso2: &str) -> anyhow::Result<Vec<Region>> {
@@ -1537,13 +1590,21 @@ pub async fn list_continents(pool: &PgPool) -> anyhow::Result<Vec<Value>> {
 }
 
 pub async fn counts(pool: &PgPool) -> anyhow::Result<HashMap<String, i64>> {
+    {
+        let g = crate::mutex_lock(&TABLE_COUNTS);
+        if let Some((t, map)) = g.as_ref() {
+            if t.elapsed().as_secs() < TABLE_COUNTS_TTL_SECS {
+                return Ok((**map).clone());
+            }
+        }
+    }
     async fn c(pool: &PgPool, table: &str) -> anyhow::Result<i64> {
         let n: (i64,) = sqlx::query_as(&format!("SELECT COUNT(*) FROM {table}"))
             .fetch_one(pool)
             .await?;
         Ok(n.0)
     }
-    Ok(HashMap::from([
+    let out = HashMap::from([
         ("continents".into(), c(pool, "continents").await?),
         ("countries".into(), c(pool, "countries").await?),
         ("regions".into(), c(pool, "regions").await?),
@@ -1563,7 +1624,10 @@ pub async fn counts(pool: &PgPool) -> anyhow::Result<HashMap<String, i64>> {
             c(pool, "hidden_city_route_stats").await?,
         ),
         ("provider_calls".into(), c(pool, "provider_calls").await?),
-    ]))
+    ]);
+    let shared = Arc::new(out);
+    *crate::mutex_lock(&TABLE_COUNTS) = Some((Instant::now(), shared.clone()));
+    Ok((*shared).clone())
 }
 
 fn haversine(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
@@ -1607,6 +1671,30 @@ pub async fn persist_search(
     .fetch_one(&mut *tx)
     .await?;
     let search_id = row.0;
+    persist_search_offers_in(&mut tx, search_id, offers).await?;
+    tx.commit().await?;
+    Ok(search_id)
+}
+
+pub async fn persist_search_offers(
+    pool: &PgPool,
+    search_id: i32,
+    offers: &[Value],
+) -> anyhow::Result<i32> {
+    if offers.is_empty() {
+        return Ok(0);
+    }
+    let mut tx = pool.begin().await?;
+    persist_search_offers_in(&mut tx, search_id, offers).await?;
+    tx.commit().await?;
+    Ok(offers.len() as i32)
+}
+
+async fn persist_search_offers_in(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    search_id: i32,
+    offers: &[Value],
+) -> anyhow::Result<()> {
     for o in offers {
         sqlx::query(
             "INSERT INTO offers (search_id, offer_uid, source, layer, kind, price, currency, payload) \
@@ -1620,11 +1708,10 @@ pub async fn persist_search(
         .bind(o.get("price").and_then(|v| v.as_f64()))
         .bind(o.get("currency").and_then(|v| v.as_str()))
         .bind(Json(o))
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
     }
-    tx.commit().await?;
-    Ok(search_id)
+    Ok(())
 }
 
 pub async fn remember_offers(
@@ -1706,7 +1793,7 @@ pub async fn recall_offers(
             out.push(offer);
         }
     }
-    Ok(unexpired(&offers_in_usd(&out)))
+    Ok(take_unexpired(take_offers_in_usd(out)))
 }
 
 pub async fn recall_candidate_dests(
@@ -2092,6 +2179,7 @@ pub fn deal_from_row(row: &HiddenDealRow) -> Option<HiddenDeal> {
         through_offer,
         risk,
         warnings,
+        window: None,
     })
 }
 
@@ -2116,21 +2204,21 @@ pub async fn list_hidden_deals(
     .fetch_all(pool)
     .await?;
     let mut deals: Vec<HiddenDeal> = rows.iter().filter_map(deal_from_row).collect();
-    deals.sort_by(|a, b| {
-        b.saving
-            .partial_cmp(&a.saving)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| {
-                b.saving_pct
-                    .partial_cmp(&a.saving_pct)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            })
-            .then_with(|| {
-                a.through_price
-                    .partial_cmp(&b.through_price)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            })
-    });
+    let mut fps = Vec::new();
+    let mut origins = Vec::new();
+    let mut ticketed = Vec::new();
+    for d in &deals {
+        origins.push(d.origin.clone());
+        ticketed.push(d.hidden_city.clone());
+        if let Some(o) = &d.through_offer {
+            fps.push(crate::engines::hidden::itinerary_fingerprint(o));
+        }
+    }
+    let series = fare_series(pool, &fps, &origins, &ticketed)
+        .await
+        .unwrap_or_default();
+    crate::engines::window::attach_deal_windows(&mut deals, &series, Utc::now());
+    crate::engines::window::sort_deals(&mut deals);
     let cap = limit.min(120) as usize;
     deals.truncate(cap);
     Ok(deals)
@@ -2867,6 +2955,55 @@ pub async fn route_edges_snapshot(
                 "days_seen": r.days_seen,
                 "first_seen": r.first_seen.to_rfc3339(),
                 "last_seen": r.last_seen.to_rfc3339(),
+            })
+        })
+        .collect())
+}
+
+pub async fn fare_series(
+    pool: &PgPool,
+    fingerprints: &[String],
+    origins: &[String],
+    ticketed: &[String],
+) -> anyhow::Result<Vec<crate::engines::window::FarePoint>> {
+    let fps: Vec<String> = fingerprints
+        .iter()
+        .filter(|s| !s.is_empty())
+        .map(|s| clip(s, 240))
+        .collect();
+    let origins: Vec<String> = origins.iter().map(|s| iata3(s)).filter(|s| !s.is_empty()).collect();
+    let ticketed: Vec<String> = ticketed
+        .iter()
+        .map(|s| iata3(s))
+        .filter(|s| !s.is_empty())
+        .collect();
+    if fps.is_empty() && origins.is_empty() {
+        return Ok(vec![]);
+    }
+    let rows = sqlx::query(
+        "SELECT fingerprint, origin, ticketed, date, price, observed_at \
+         FROM fare_observations \
+         WHERE observed_at > NOW() - INTERVAL '120 days' \
+           AND (fingerprint = ANY($1::text[]) \
+                OR (origin = ANY($2::text[]) AND ticketed = ANY($3::text[]))) \
+         ORDER BY observed_at ASC \
+         LIMIT 2500",
+    )
+    .bind(&fps)
+    .bind(&origins)
+    .bind(&ticketed)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|r| {
+            Some(crate::engines::window::FarePoint {
+                fingerprint: r.try_get("fingerprint").ok()?,
+                origin: r.try_get("origin").ok()?,
+                ticketed: r.try_get("ticketed").ok()?,
+                date: r.try_get("date").ok()?,
+                price: r.try_get("price").ok()?,
+                observed_at: r.try_get("observed_at").ok()?,
             })
         })
         .collect())

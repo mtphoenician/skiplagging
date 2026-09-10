@@ -11,7 +11,7 @@
       <div>
         <h3 style="margin:0 0 6px">{label} · {traffic.airport}</h3>
         <div class="book-row">
-          {#each traffic.trackers as t}
+          {#each traffic.trackers as t (t.url)}
             <a class="book-btn" href={t.url} target="_blank" rel="noreferrer">{t.name}</a>
           {/each}
         </div>
@@ -32,7 +32,7 @@
             </tr>
           </thead>
           <tbody>
-            {#each traffic.aircraft.slice(0, 8) as a}
+            {#each traffic.aircraft.slice(0, 8) as a (a.icao24 || a.callsign)}
               <tr>
                 <td class="mono">{a.callsign || a.icao24}</td>
                 <td>{fl(a.baro_altitude_m)}</td>

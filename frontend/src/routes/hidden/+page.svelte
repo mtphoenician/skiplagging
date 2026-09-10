@@ -1,24 +1,26 @@
 <script lang="ts">
   import DealCard from '$lib/components/DealCard.svelte';
-  import { fetchDeals } from '$lib/api';
+  import { fetchDeals, isAbortError } from '$lib/api';
   import type { HiddenDeal } from '$lib/types';
 
-  let deals = $state<HiddenDeal[]>([]);
+  let deals = $state.raw<HiddenDeal[]>([]);
   let error = $state('');
   let loading = $state(true);
 
   $effect(() => {
     loading = true;
-    fetchDeals({ limit: 80 })
+    const ac = new AbortController();
+    fetchDeals({ limit: 80, signal: ac.signal })
       .then((rows) => {
         deals = rows;
       })
       .catch((e: Error) => {
-        error = e.message;
+        if (!isAbortError(e)) error = e.message;
       })
       .finally(() => {
-        loading = false;
+        if (!ac.signal.aborted) loading = false;
       });
+    return () => ac.abort();
   });
 </script>
 
@@ -53,9 +55,12 @@
       <code>cargo run --bin discover -- --wipe</code> from the API folder.
     </p>
   {:else}
-    <p class="note">{deals.length} saved deal{deals.length === 1 ? '' : 's'}, highest saving first.</p>
+    <p class="note">
+      {deals.length} saved deal{deals.length === 1 ? '' : 's'}, soonest-to-vanish first — hidden-city
+      inventory dies when the unused leg fills.
+    </p>
     <div class="deal-list">
-      {#each deals as deal}
+      {#each deals as deal (deal.id)}
         <DealCard {deal} />
       {/each}
     </div>

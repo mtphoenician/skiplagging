@@ -8,3 +8,4 @@ pub mod refresh;
 pub mod risk;
 pub mod self_transfer;
 pub mod shop;
+pub mod window;

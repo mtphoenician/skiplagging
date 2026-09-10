@@ -445,6 +445,39 @@ pub struct RiskAssessment {
     pub expected_enforcement_cost: f64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PricePoint {
+    pub t: String,
+    pub price: f64,
+}
+
+/// Why a hidden-city through-ticket may disappear, and how its price has moved.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct FareWindow {
+    /// `now` | `soon` | `watch` | `open`
+    pub urgency: String,
+    pub label: String,
+    pub headline: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub minutes_to_depart: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub minutes_to_expire: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seats: Option<i32>,
+    /// `rising` | `falling` | `stable` | `new`
+    pub trend: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub low: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub high: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub low_at: Option<String>,
+    #[serde(default)]
+    pub points: Vec<PricePoint>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HiddenCityMatch {
     pub id: String,
@@ -469,6 +502,9 @@ pub struct HiddenCityMatch {
     pub warnings: Vec<String>,
     #[serde(default = "default_hidden_city")]
     pub result_type: String,
+    /// When this through-ticket is likely to vanish, plus a compact price series.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window: Option<FareWindow>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -694,6 +730,8 @@ pub struct HiddenDeal {
     pub risk: Option<RiskAssessment>,
     #[serde(default)]
     pub warnings: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window: Option<FareWindow>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

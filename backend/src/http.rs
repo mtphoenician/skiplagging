@@ -21,7 +21,8 @@ use crate::engines::hidden::{detect_hidden_city, refresh_keeps_hidden_city};
 use crate::engines::refresh::refresh_priced_offer;
 use crate::engines::shop::search_all_ways;
 use crate::models::{
-    OfferRefreshRequest, OfferRefreshResponse, SearchExpandRequest, SearchQuery, SearchQueryError,
+    LiveTraffic, OfferRefreshRequest, OfferRefreshResponse, SearchExpandRequest, SearchQuery,
+    SearchQueryError,
 };
 use crate::providers::aerodatabox::AeroDataBoxProvider;
 use crate::providers::opensky::OpenSkyProvider;
@@ -148,6 +149,12 @@ struct Q {
     q: String,
 }
 
+#[derive(Deserialize, Default)]
+struct AirportDetailQ {
+    #[serde(default)]
+    lite: Option<String>,
+}
+
 async fn countries(State(st): State<AppState>, Query(q): Query<Q>) -> Json<Value> {
     Json(json!(repo::search_countries(&st.pool, &q.q, 300)
         .await
@@ -185,8 +192,13 @@ async fn airports(State(st): State<AppState>, Query(q): Query<Q>) -> Response {
     }
 }
 
-async fn airport_detail(State(st): State<AppState>, Path(iata): Path<String>) -> Response {
-    match repo::get_place(&st.pool, &iata, true).await {
+async fn airport_detail(
+    State(st): State<AppState>,
+    Path(iata): Path<String>,
+    Query(q): Query<AirportDetailQ>,
+) -> Response {
+    let detail = !matches!(q.lite.as_deref(), Some("1" | "true" | "yes"));
+    match repo::get_place(&st.pool, &iata, detail).await {
         Ok(Some(ap)) => Json(ap).into_response(),
         _ => err(StatusCode::NOT_FOUND, "Unknown IATA in OurAirports table"),
     }
@@ -348,16 +360,18 @@ async fn search(
     let key = cache_key(&query);
     if bypass {
         st.cache.invalidate(&key);
-    } else if let Some(mut cached) = st.cache.get(&key) {
-        if let Some(debug) = cached.search_debug.as_mut() {
+    } else if let Some(cached) = st.cache.get(&key) {
+        let mut body = (*cached).clone();
+        if let Some(debug) = body.search_debug.as_mut() {
             debug.cache = stamp_http_cache_hit(&debug.cache);
         }
-        return Json(cached).into_response();
+        return Json(body).into_response();
     }
     match search_all_ways(query, &st.settings, &st.http, &st.pool, "fast", None).await {
         Ok(result) => {
-            st.cache.insert(key, result.clone());
-            Json(result).into_response()
+            let shared = Arc::new(result);
+            st.cache.insert(key, shared.clone());
+            Json(shared).into_response()
         }
         Err(e) => search_err(e),
     }
@@ -386,12 +400,28 @@ async fn search_expand(
     )
     .await
     {
-        Ok(result) => {
-            st.cache.insert(key, result.clone());
-            Json(result).into_response()
+        Ok(mut result) => {
+            if let Some(prev) = st.cache.get(&key) {
+                if traffic_empty(&result.traffic_origin) {
+                    result.traffic_origin = prev.traffic_origin.clone();
+                }
+                if traffic_empty(&result.traffic_destination) {
+                    result.traffic_destination = prev.traffic_destination.clone();
+                }
+                if result.board_origin.is_empty() && !prev.board_origin.is_empty() {
+                    result.board_origin = prev.board_origin.clone();
+                }
+            }
+            let shared = Arc::new(result);
+            st.cache.insert(key, shared.clone());
+            Json(shared).into_response()
         }
         Err(e) => search_err(e),
     }
+}
+
+fn traffic_empty(traffic: &Option<LiveTraffic>) -> bool {
+    traffic.as_ref().map(|t| t.aircraft.is_empty()).unwrap_or(true)
 }
 
 async fn refresh_offer(
@@ -521,6 +551,7 @@ pub async fn serve() -> anyhow::Result<()> {
         .timeout(std::time::Duration::from_secs(25))
         .connect_timeout(std::time::Duration::from_secs(6))
         .pool_max_idle_per_host(20)
+        .gzip(true)
         .build()?;
     let cache = build_cache(&settings);
     crate::fx::spawn_background_refresh(http.clone());

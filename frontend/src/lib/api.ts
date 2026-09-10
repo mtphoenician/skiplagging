@@ -17,8 +17,14 @@ function apiDetail(body: unknown, fallback: string): string {
   return fallback;
 }
 
-export async function fetchAirport(iata: string): Promise<Airport | null> {
-  const r = await fetch(`${prefix}/airports/${encodeURIComponent(iata)}`);
+export function isAbortError(e: unknown): boolean {
+  return e instanceof DOMException
+    ? e.name === 'AbortError'
+    : e instanceof Error && e.name === 'AbortError';
+}
+
+export async function fetchAirport(iata: string, signal?: AbortSignal): Promise<Airport | null> {
+  const r = await fetch(`${prefix}/airports/${encodeURIComponent(iata)}?lite=1`, { signal });
   if (r.status === 404) return null;
   if (!r.ok) throw new Error('Airport lookup failed');
   return r.json();
@@ -35,7 +41,7 @@ export async function searchAirports(q: string, signal?: AbortSignal): Promise<A
 
 export async function searchFares(
   query: SearchQuery,
-  opts?: { bypassCache?: boolean }
+  opts?: { bypassCache?: boolean; signal?: AbortSignal }
 ): Promise<SearchResponse> {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   const body: SearchQuery = { ...query };
@@ -46,27 +52,33 @@ export async function searchFares(
   const r = await fetch(`${prefix}/search`, {
     method: 'POST',
     headers,
-    body: JSON.stringify(body)
+    body: JSON.stringify(body),
+    signal: opts?.signal
   });
   if (!r.ok) {
     const body = await r.json().catch(() => ({ detail: r.statusText }));
     throw new Error(apiDetail(body, 'Search failed'));
   }
-  return r.json();
+  return slimSearch(await r.json());
 }
 
 /** Deep pass: shop the ranked candidates the fast pass left pending. */
-export async function expandSearch(query: SearchQuery, exclude: string[]): Promise<SearchResponse> {
+export async function expandSearch(
+  query: SearchQuery,
+  exclude: string[],
+  signal?: AbortSignal
+): Promise<SearchResponse> {
   const r = await fetch(`${prefix}/search/expand`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ query, exclude })
+    body: JSON.stringify({ query, exclude }),
+    signal
   });
   if (!r.ok) {
     const body = await r.json().catch(() => ({ detail: r.statusText }));
     throw new Error(apiDetail(body, 'Deep search failed'));
   }
-  return r.json();
+  return slimSearch(await r.json());
 }
 
 /** Merge a deep response over a fast one. Hidden-city picks come from the deep
@@ -109,7 +121,7 @@ export function mergeSearch(fast: SearchResponse, deep: SearchResponse): SearchR
       return f ?? d;
     })
     .filter((c): c is ChannelGroup => Boolean(c));
-    return {
+  return slimSearch({
     ...deep,
     honest_pick: deep.honest_pick ?? fast.honest_pick,
     best_pick: deep.best_pick ?? fast.best_pick,
@@ -123,27 +135,80 @@ export function mergeSearch(fast: SearchResponse, deep: SearchResponse): SearchR
     traffic_destination: deep.traffic_destination?.aircraft?.length
       ? deep.traffic_destination
       : fast.traffic_destination
-  };
+  });
 }
 
-export async function fetchDeals(opts: { limit?: number; origin?: string; dest?: string } = {}): Promise<HiddenDeal[]> {
+function slimBookers<T extends { id: string }>(rows: T[] | undefined, n: number): T[] {
+  return (rows ?? []).filter((b) => !b.id.startsWith('carrier-')).slice(0, n);
+}
+
+function slimTraffic(traffic: SearchResponse['traffic_origin']) {
+  if (!traffic?.aircraft?.length || traffic.aircraft.length <= 8) return traffic;
+  return { ...traffic, aircraft: traffic.aircraft.slice(0, 8) };
+}
+
+function slimSearch(resp: SearchResponse): SearchResponse {
+  resp.connection_hints = [];
+  resp.notes = [];
+  resp.sources_used = [];
+  resp.bookers = slimBookers(resp.bookers, 5);
+  if (resp.board_origin?.length > 12) resp.board_origin = resp.board_origin.slice(0, 12);
+  resp.traffic_origin = slimTraffic(resp.traffic_origin);
+  resp.traffic_destination = slimTraffic(resp.traffic_destination);
+  if (resp.origin) {
+    resp.origin.runways = [];
+    resp.origin.members = resp.origin.members?.slice(0, 8);
+  }
+  if (resp.destination) {
+    resp.destination.runways = [];
+    resp.destination.members = resp.destination.members?.slice(0, 8);
+  }
+  if (resp.hidden_if_cheaper) {
+    resp.hidden_if_cheaper.bookers = slimBookers(resp.hidden_if_cheaper.bookers, 5);
+    resp.hidden_if_cheaper.local_offer.segments = [];
+    resp.hidden_if_cheaper.local_offer.note = undefined;
+  }
+  for (const match of resp.hidden_city ?? []) {
+    match.bookers = slimBookers(match.bookers, 5);
+    match.local_offer.segments = [];
+    match.local_offer.note = undefined;
+  }
+  return resp;
+}
+
+export async function fetchDeals(
+  opts: { limit?: number; origin?: string; dest?: string; signal?: AbortSignal } = {}
+): Promise<HiddenDeal[]> {
   const q = new URLSearchParams();
   if (opts.limit) q.set('limit', String(opts.limit));
   if (opts.origin) q.set('origin', opts.origin);
   if (opts.dest) q.set('dest', opts.dest);
-  const r = await fetch(`${prefix}/deals?${q.toString()}`);
+  const r = await fetch(`${prefix}/deals?${q.toString()}`, { signal: opts.signal });
   if (!r.ok) throw new Error('Deals failed');
-  return r.json();
+  const rows: HiddenDeal[] = await r.json();
+  for (const deal of rows) {
+    deal.bookers = slimBookers(deal.bookers, 4);
+    if (deal.through_offer) {
+      deal.through_offer.note = undefined;
+    }
+    if (deal.local_offer) {
+      deal.local_offer.segments = [];
+      deal.local_offer.note = undefined;
+    }
+  }
+  return rows;
 }
 
 export async function refreshOffer(
   offer: Offer,
-  intended_destination: string
+  intended_destination: string,
+  signal?: AbortSignal
 ): Promise<{ offer: Offer | null; valid: boolean; reason: string }> {
   const r = await fetch(`${prefix}/offers/refresh`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ offer, intended_destination })
+    body: JSON.stringify({ offer, intended_destination }),
+    signal
   });
   if (!r.ok) throw new Error('Refresh failed');
   return r.json();
@@ -155,8 +220,8 @@ export async function fetchDefaults(): Promise<{ origin: Airport; destination: A
   return r.json();
 }
 
-export async function fetchCountries(q = ''): Promise<Country[]> {
-  const r = await fetch(`${prefix}/countries?q=${encodeURIComponent(q)}`);
+export async function fetchCountries(q = '', signal?: AbortSignal): Promise<Country[]> {
+  const r = await fetch(`${prefix}/countries?q=${encodeURIComponent(q)}`, { signal });
   if (!r.ok) {
     const body = await r.json().catch(() => ({ detail: r.statusText }));
     throw new Error(apiDetail(body, 'Country lookup failed'));
@@ -164,8 +229,8 @@ export async function fetchCountries(q = ''): Promise<Country[]> {
   return r.json();
 }
 
-export async function fetchSources(): Promise<{ layers: string[]; sources: SourceDef[] }> {
-  const r = await fetch(`${prefix}/sources`);
+export async function fetchSources(signal?: AbortSignal): Promise<{ layers: string[]; sources: SourceDef[] }> {
+  const r = await fetch(`${prefix}/sources`, { signal });
   if (!r.ok) throw new Error('Sources failed');
   return r.json();
 }
@@ -209,9 +274,17 @@ export function buildSearchHref(opts: {
   return `/results?${q.toString()}`;
 }
 
+const moneyFmt = new Map<string, Intl.NumberFormat>();
+
 export function money(n: number | null | undefined, currency = 'USD'): string {
   if (n == null) return '—';
-  return new Intl.NumberFormat('en-US', { style: 'currency', currency, maximumFractionDigits: 0 }).format(n);
+  const code = currency || 'USD';
+  let fmt = moneyFmt.get(code);
+  if (!fmt) {
+    fmt = new Intl.NumberFormat('en-US', { style: 'currency', currency: code, maximumFractionDigits: 0 });
+    moneyFmt.set(code, fmt);
+  }
+  return fmt.format(n);
 }
 
 export function hm(iso: string): string {
@@ -233,6 +306,30 @@ export function duration(min: number): string {
   const h = Math.floor(min / 60);
   const m = min % 60;
   return h ? (m ? `${h}h ${m}m` : `${h}h`) : `${m}m`;
+}
+
+/** Compact age for a price-history annotation (“2mo ago”). */
+export function timeAgo(iso: string | null | undefined): string {
+  if (!iso) return '';
+  const ms = Date.now() - Date.parse(iso);
+  if (!Number.isFinite(ms) || ms < 0) return '';
+  const min = Math.round(ms / 60000);
+  if (min < 90) return `${min} min ago`;
+  const hours = Math.round(min / 60);
+  if (hours < 36) return `${hours}h ago`;
+  const days = Math.round(min / 1440);
+  if (days < 14) return `${days}d ago`;
+  const weeks = Math.round(min / 10080);
+  if (weeks < 9) return `${weeks}wk ago`;
+  const months = Math.max(1, Math.round(min / 43800));
+  return `${months}mo ago`;
+}
+
+export function windowChip(urgency: string | undefined): string {
+  if (urgency === 'now') return 'hot';
+  if (urgency === 'soon') return 'warn';
+  if (urgency === 'watch') return '';
+  return 'good';
 }
 
 export function airlineName(code: string | null | undefined, names: Record<string, string> = {}): string {
@@ -336,7 +433,8 @@ export function itineraryBookers(
   adults = 1,
   currency = 'USD',
   cabin = 'ECONOMY',
-  returnDate?: string | null
+  returnDate?: string | null,
+  limit = 5
 ): { id: string; name: string; url: string }[] {
   const o = origin.toUpperCase();
   const d = dest.toUpperCase();
@@ -354,31 +452,46 @@ export function itineraryBookers(
           ? 'first'
           : 'economy';
   const skyPath = returnDate ? `${yymmdd}/${retYymmdd}/` : `${yymmdd}/`;
-  return [
-    { id: 'google-flights', name: 'Google Flights', url: googleFlightsUrl(o, d, date, currency, adults, cabin, returnDate) },
-    {
+  const cap = Math.max(0, Math.min(limit, 5));
+  const out: { id: string; name: string; url: string }[] = [];
+  if (cap >= 1) {
+    out.push({
+      id: 'google-flights',
+      name: 'Google Flights',
+      url: googleFlightsUrl(o, d, date, currency, adults, cabin, returnDate)
+    });
+  }
+  if (cap >= 2) {
+    out.push({
       id: 'kayak',
       name: 'Kayak',
       url: `https://www.kayak.com/flights/${o}-${d}/${kayakDates}${adultsPath}?sort=bestflight_a`
-    },
-    {
+    });
+  }
+  if (cap >= 3) {
+    out.push({
       id: 'skyscanner',
       name: 'Skyscanner',
       url: `https://www.skyscanner.com/transport/flights/${o.toLowerCase()}/${d.toLowerCase()}/${skyPath}?adultsv2=${adults}&cabinclass=${skyCabin}&rtn=${returnDate ? 1 : 0}&preferdirects=false`
-    },
-    {
+    });
+  }
+  if (cap >= 4) {
+    out.push({
       id: 'booking-com',
       name: 'Booking.com',
       url: `https://flights.booking.com/flights/${o}.AIRPORT-${d}.AIRPORT/?type=${returnDate ? 'ROUNDTRIP' : 'ONEWAY'}&adults=${adults}&cabinClass=${cabin}&depart=${date}${returnDate ? `&return=${returnDate}` : ''}&from=${o}&to=${d}&sort=BEST`
-    },
-    {
+    });
+  }
+  if (cap >= 5) {
+    out.push({
       id: 'expedia',
       name: 'Expedia',
       url: returnDate
         ? `https://www.expedia.com/Flights-Search?flight-type=on&mode=search&trip=roundtrip&leg1=from:${o},to:${d},departure:${us}TANYT&leg2=from:${d},to:${o},departure:${returnDate.slice(5, 7)}/${returnDate.slice(8, 10)}/${returnDate.slice(0, 4)}TANYT&passengers=adults:${adults},children:0,infantinlap:N`
         : `https://www.expedia.com/Flights-Search?flight-type=on&mode=search&trip=oneway&leg1=from:${o},to:${d},departure:${us}TANYT&passengers=adults:${adults},children:0,infantinlap:N`
-    }
-  ];
+    });
+  }
+  return out;
 }
 
 export function sameItinerary(

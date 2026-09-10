@@ -1,25 +1,34 @@
 <script lang="ts">
-  import { fetchCountries } from '$lib/api';
+  import { fetchCountries, isAbortError } from '$lib/api';
   import type { Country } from '$lib/types';
 
   let q = $state('');
-  let rows = $state<Country[]>([]);
+  let rows = $state.raw<Country[]>([]);
   let error = $state('');
   let timer: ReturnType<typeof setTimeout>;
+  let abort: AbortController | null = null;
 
   function load(query: string) {
-    fetchCountries(query)
+    abort?.abort();
+    const ac = new AbortController();
+    abort = ac;
+    fetchCountries(query, ac.signal)
       .then((r) => {
+        if (ac.signal.aborted) return;
         rows = r;
         error = '';
       })
       .catch((e: Error) => {
-        error = e.message;
+        if (!isAbortError(e)) error = e.message;
       });
   }
 
   $effect(() => {
     load('');
+    return () => {
+      abort?.abort();
+      clearTimeout(timer);
+    };
   });
 
   function onInput(e: Event) {

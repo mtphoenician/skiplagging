@@ -1,18 +1,20 @@
 <script lang="ts">
-  import { fetchSources } from '$lib/api';
+  import { fetchSources, isAbortError } from '$lib/api';
   import type { SourceDef } from '$lib/types';
 
-  let sources = $state<SourceDef[]>([]);
+  let sources = $state.raw<SourceDef[]>([]);
   let error = $state('');
 
   $effect(() => {
-    fetchSources()
+    const ac = new AbortController();
+    fetchSources(ac.signal)
       .then((r) => {
         sources = r.sources;
       })
       .catch((e: Error) => {
-        error = e.message;
+        if (!isAbortError(e)) error = e.message;
       });
+    return () => ac.abort();
   });
 
   function chipClass(s: SourceDef): string {

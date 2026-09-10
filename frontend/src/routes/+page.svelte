@@ -2,7 +2,7 @@
   import DealCard from '$lib/components/DealCard.svelte';
   import FlightArc from '$lib/components/FlightArc.svelte';
   import SearchForm from '$lib/components/SearchForm.svelte';
-  import { defaultDate, fetchDeals } from '$lib/api';
+  import { defaultDate, fetchDeals, isAbortError } from '$lib/api';
   import type { Cabin, HiddenDeal, SearchMode } from '$lib/types';
 
   let origin = $state('');
@@ -13,14 +13,20 @@
   let include_nearby = $state(false);
   let mode = $state<SearchMode>('hidden');
   let return_date = $state('');
-  let preview = $state<HiddenDeal[]>([]);
+  let preview = $state.raw<HiddenDeal[]>([]);
 
   $effect(() => {
-    fetchDeals({ limit: 4 })
+    const ac = new AbortController();
+    fetchDeals({ limit: 4, signal: ac.signal })
       .then((rows) => {
         preview = rows;
       })
-      .catch(() => {});
+      .catch((e) => {
+        if (!isAbortError(e)) {
+          /* homepage deals are optional */
+        }
+      });
+    return () => ac.abort();
   });
 </script>
 
@@ -56,7 +62,7 @@
         <a class="text-link" href="/hidden">Browse all</a>
       </div>
       <div class="deal-list compact">
-        {#each preview as deal}
+        {#each preview as deal (deal.id)}
           <DealCard {deal} compact />
         {/each}
       </div>

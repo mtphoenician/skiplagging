@@ -9,11 +9,12 @@ const POSITION_SOURCE: &[(i64, &str)] = &[(0, "ADS-B"), (1, "ASTERIX"), (2, "MLA
 const TOKEN_URL: &str =
     "https://auth.opensky-network.org/auth/realms/opensky-network/protocol/openid-connect/token";
 
+static TOKEN: Mutex<Option<(String, Instant)>> = Mutex::new(None);
+
 pub struct OpenSkyProvider {
     client_id: String,
     client_secret: String,
     client: reqwest::Client,
-    token: Mutex<Option<(String, Instant)>>,
 }
 
 impl OpenSkyProvider {
@@ -22,7 +23,6 @@ impl OpenSkyProvider {
             client_id: settings.opensky_client_id.clone(),
             client_secret: settings.opensky_client_secret.clone(),
             client,
-            token: Mutex::new(None),
         }
     }
 
@@ -66,12 +66,8 @@ impl OpenSkyProvider {
         let body: serde_json::Value = r.json().await.unwrap_or(serde_json::json!({}));
         let api_time = body.get("time").and_then(|v| v.as_i64());
         let mut aircraft = Vec::new();
-        for row in body
-            .get("states")
-            .and_then(|v| v.as_array())
-            .cloned()
-            .unwrap_or_default()
-        {
+        let states = body.get("states").and_then(|v| v.as_array());
+        for row in states.into_iter().flatten() {
             let arr = match row.as_array() {
                 Some(a) if a.len() >= 12 => a,
                 _ => continue,
@@ -137,7 +133,7 @@ impl OpenSkyProvider {
             return None;
         }
         {
-            let g = crate::mutex_lock(&self.token);
+            let g = crate::mutex_lock(&TOKEN);
             if let Some((tok, exp)) = g.as_ref() {
                 if Instant::now() < *exp {
                     return Some(format!("Bearer {tok}"));
@@ -166,7 +162,7 @@ impl OpenSkyProvider {
             .get("expires_in")
             .and_then(|v| v.as_i64())
             .unwrap_or(1700);
-        *crate::mutex_lock(&self.token) = Some((
+        *crate::mutex_lock(&TOKEN) = Some((
             token.clone(),
             Instant::now() + Duration::from_secs(expires as u64) - Duration::from_secs(30),
         ));

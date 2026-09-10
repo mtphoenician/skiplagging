@@ -1,10 +1,11 @@
 use moka::sync::Cache;
+use std::sync::Arc;
 use std::time::Duration;
 
 use crate::config::Settings;
 use crate::models::SearchResponse;
 
-pub type SearchCache = Cache<String, SearchResponse>;
+pub type SearchCache = Cache<String, Arc<SearchResponse>>;
 
 /// Live Duffel: POST /search memory TTL. Mock/sandbox keep CACHE_TTL_SECONDS (180).
 pub const LIVE_HTTP_CACHE_TTL_SECS: u64 = 45;
@@ -43,7 +44,14 @@ pub fn stamp_http_cache_hit(planner: &str) -> String {
 
 pub fn build_cache(settings: &Settings) -> SearchCache {
     Cache::builder()
-        .max_capacity(512)
+        .max_capacity(4096)
+        .weigher(|key: &String, value: &Arc<SearchResponse>| {
+            let offers: u32 = value.channels.iter().map(|c| c.offers.len() as u32).sum();
+            let hidden = value.hidden_city.len() as u32;
+            let base = 8u32 + (key.len() as u32 / 32);
+            base.saturating_add(offers)
+                .saturating_add(hidden.saturating_mul(2))
+        })
         .time_to_live(Duration::from_secs(search_cache_ttl(settings)))
         .build()
 }

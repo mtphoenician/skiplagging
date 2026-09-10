@@ -191,14 +191,17 @@ pub fn with_untrusted_rates<R>(f: impl FnOnce() -> R) -> R {
 }
 
 pub fn usd_per_unit(currency: &str) -> Option<f64> {
-    let code = if currency.is_empty() { "USD" } else { currency }.to_uppercase();
-    if code == "USD" {
+    if currency.is_empty() || currency.eq_ignore_ascii_case("USD") {
         return Some(1.0);
     }
-    if !rates_are_live() {
+    if FORCE_UNTRUSTED.with(|c| c.get()) {
         return None;
     }
-    rates().rates.get(&code).copied()
+    let g = rates();
+    if g.fetched_at.is_none() {
+        return None;
+    }
+    g.rates.get(&currency.to_uppercase()).copied()
 }
 
 pub fn to_usd(amount: Option<f64>, currency: Option<&str>) -> Option<f64> {
@@ -275,6 +278,23 @@ pub fn offer_in_usd(offer: &Offer) -> Option<Offer> {
 
 pub fn offers_in_usd(offers: &[Offer]) -> Vec<Offer> {
     offers.iter().filter_map(offer_in_usd).collect()
+}
+
+/// Convert a owned list without cloning offers that are already USD.
+pub fn take_offers_in_usd(offers: Vec<Offer>) -> Vec<Offer> {
+    offers.into_iter().filter_map(take_offer_in_usd).collect()
+}
+
+fn take_offer_in_usd(offer: Offer) -> Option<Offer> {
+    let already = (offer.currency.is_empty() || offer.currency.eq_ignore_ascii_case("USD"))
+        && offer
+            .separate_tickets
+            .iter()
+            .all(|t| t.currency.is_empty() || t.currency.eq_ignore_ascii_case("USD"));
+    if already {
+        return Some(offer);
+    }
+    offer_in_usd(&offer)
 }
 
 pub fn money_in_usd(amount: Option<f64>, currency: Option<&str>) -> (Option<f64>, String) {
