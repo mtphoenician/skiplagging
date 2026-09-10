@@ -151,7 +151,7 @@
           <svg viewBox="0 0 12 12" width="10" height="10"><path d="M2 6.2 4.6 9 10 3" fill="none" stroke="#fff" stroke-width="1.8" /></svg>
         {/if}
       </span>
-      Nearby airports
+      <span class="check-label">Nearby airports</span>
     </button>
     <button
       class="check"
@@ -164,7 +164,7 @@
           <svg viewBox="0 0 12 12" width="10" height="10"><path d="M2 6.2 4.6 9 10 3" fill="none" stroke="#fff" stroke-width="1.8" /></svg>
         {/if}
       </span>
-      Round-trip ticket only (skips hidden-city)
+      <span class="check-label">Round-trip only (skips hidden-city)</span>
     </button>
     <div class="stepper" role="group" aria-label="Adults">
       <button type="button" class="icon-btn" aria-label="Fewer adults" onclick={() => (adults = Math.max(1, adults - 1))}>−</button>

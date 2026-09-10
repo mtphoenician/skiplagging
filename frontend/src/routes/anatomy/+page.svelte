@@ -49,6 +49,7 @@
   <div class="anatomy-grid">
     <section class="anatomy-card">
       <h2>Published examples — not live tickets</h2>
+      <div class="table-scroll">
       <table class="mini">
         <thead>
           <tr>
@@ -80,9 +81,11 @@
           </tr>
         </tbody>
       </table>
+      </div>
     </section>
     <section class="anatomy-card">
       <h2>Main risks</h2>
+      <div class="table-scroll">
       <table class="mini">
         <thead>
           <tr>
@@ -109,6 +112,7 @@
           </tr>
         </tbody>
       </table>
+      </div>
     </section>
   </div>
 

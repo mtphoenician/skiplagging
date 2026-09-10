@@ -2,7 +2,7 @@
   let { a = 'A', b = 'B', c = 'C' }: { a?: string; b?: string; c?: string } = $props();
 </script>
 
-<svg class="arc" viewBox="0 0 680 188" fill="none" aria-hidden="true">
+<svg class="arc" viewBox="40 16 560 152" preserveAspectRatio="xMidYMid meet" fill="none" aria-hidden="true">
   <defs>
     <linearGradient id="arc-line" x1="70" y1="88" x2="560" y2="88" gradientUnits="userSpaceOnUse">
       <stop stop-color="#c9a36a" />

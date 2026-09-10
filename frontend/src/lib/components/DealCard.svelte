@@ -26,7 +26,9 @@
   <a class="deal-link" {href}>
     <div class="row">
       <div>
-        <span class="chip hot">Get off in {getOff}</span>
+        <div class="chips">
+          <span class="chip hot">Get off in {getOff}</span>
+        </div>
         <h3>
           {deal.origin_city || deal.origin} → {deal.dest_city || deal.dest}
         </h3>

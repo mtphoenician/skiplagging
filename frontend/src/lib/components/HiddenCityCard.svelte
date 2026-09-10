@@ -50,13 +50,15 @@
 <article class="hc">
   <div class="row">
     <div>
-      <span class="chip hot">Hidden city</span>
-      <span class="chip good">Get off in {getOff}</span>
-      {#if match.first_flight_match}
-        <span class="chip good">Same first flight</span>
-      {/if}
+      <div class="chips">
+        <span class="chip hot">Hidden city</span>
+        <span class="chip good">Get off in {getOff}</span>
+        {#if match.first_flight_match}
+          <span class="chip good">Same first flight</span>
+        {/if}
+      </div>
       {#if carrier}
-        <p class="airline-name" style="margin-top:10px">{carrier}</p>
+        <p class="airline-name">{carrier}</p>
       {/if}
       {#if first && last}
         <p class="flight-times">{hm(first.dep)} → {hm(last.arr)}</p>
@@ -143,5 +145,11 @@
     margin: 6px 0 0;
     max-width: 12rem;
     text-align: right;
+  }
+  @media (max-width: 720px) {
+    .recheck-note {
+      max-width: none;
+      text-align: left;
+    }
   }
 </style>

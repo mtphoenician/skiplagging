@@ -775,26 +775,28 @@
       {#if data.board_origin?.length}
         <h2 class="section-title">FIDS board ({data.origin.iata})</h2>
         <p class="note">Scheduled / estimated / actual — not a fare.</p>
-        <table class="mini">
-          <thead>
-            <tr>
-              <th>Flight</th>
-              <th>To</th>
-              <th>Scheduled</th>
-              <th>Status</th>
-            </tr>
-          </thead>
-          <tbody>
-            {#each data.board_origin.slice(0, 12) as f}
+        <div class="table-scroll">
+          <table class="mini">
+            <thead>
               <tr>
-                <td class="mono">{f.flight_number}</td>
-                <td>{f.dest || '—'}</td>
-                <td>{f.scheduled || f.estimated || '—'}</td>
-                <td>{f.status || '—'}</td>
+                <th>Flight</th>
+                <th>To</th>
+                <th>Scheduled</th>
+                <th>Status</th>
               </tr>
-            {/each}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {#each data.board_origin.slice(0, 12) as f}
+                <tr>
+                  <td class="mono">{f.flight_number}</td>
+                  <td>{f.dest || '—'}</td>
+                  <td>{f.scheduled || f.estimated || '—'}</td>
+                  <td>{f.status || '—'}</td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+        </div>
       {/if}
     {:else if tab === 'debug'}
       <p class="note">
@@ -939,6 +941,12 @@
   }
   .way-back .section-title {
     margin: 0;
+  }
+  @media (max-width: 560px) {
+    .results-head-row .ghost {
+      width: 100%;
+      text-align: center;
+    }
   }
   .shop-gaps {
     margin: 8px 0 6px;

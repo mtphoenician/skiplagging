@@ -67,8 +67,10 @@
         <article class="offer">
           <div class="row">
             <div>
-              <span class="chip">{s.layer}</span>
-              <span class={chipClass(s)}>{chipText(s)}</span>
+              <div class="chips">
+                <span class="chip">{s.layer}</span>
+                <span class={chipClass(s)}>{chipText(s)}</span>
+              </div>
               <h3>{s.name}</h3>
             </div>
             <a class="link" href={s.url} target="_blank" rel="noreferrer">Docs</a>

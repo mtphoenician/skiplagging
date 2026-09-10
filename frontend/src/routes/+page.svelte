@@ -65,15 +65,15 @@
 
   <section class="how">
     <article>
-      <b><span class="step">1</span> Search</b>
+      <b><span class="step">1</span><span>Search</span></b>
       <p>Two airports and a one-way date. A back date shops a second one-way home — never one round-trip ticket.</p>
     </article>
     <article>
-      <b><span class="step">2</span> Find the inversion</b>
+      <b><span class="step">2</span><span>Find the inversion</span></b>
       <p>We keep the cheapest ticket that actually ends at your city, then hunt for a cheaper through-ticket. The deal is shown first when it saves money.</p>
     </article>
     <article>
-      <b><span class="step">3</span> Book there</b>
+      <b><span class="step">3</span><span>Book there</span></b>
       <p>Google Flights, Kayak, Skyscanner, and other bookers. We never issue a ticket.</p>
     </article>
   </section>

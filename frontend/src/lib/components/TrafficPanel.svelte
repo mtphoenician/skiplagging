@@ -22,24 +22,26 @@
       <p class="note" style="margin:10px 0 0">{traffic.note}</p>
     {/if}
     {#if traffic.aircraft.length}
-      <table class="mini" style="margin-top:10px">
-        <thead>
-          <tr>
-            <th>Callsign</th>
-            <th>Alt</th>
-            <th>Speed</th>
-          </tr>
-        </thead>
-        <tbody>
-          {#each traffic.aircraft.slice(0, 8) as a}
+      <div class="table-scroll">
+        <table class="mini">
+          <thead>
             <tr>
-              <td class="mono">{a.callsign || a.icao24}</td>
-              <td>{fl(a.baro_altitude_m)}</td>
-              <td>{kt(a.velocity_ms)}</td>
+              <th>Callsign</th>
+              <th>Alt</th>
+              <th>Speed</th>
             </tr>
-          {/each}
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            {#each traffic.aircraft.slice(0, 8) as a}
+              <tr>
+                <td class="mono">{a.callsign || a.icao24}</td>
+                <td>{fl(a.baro_altitude_m)}</td>
+                <td>{kt(a.velocity_ms)}</td>
+              </tr>
+            {/each}
+          </tbody>
+        </table>
+      </div>
     {:else}
       <p class="note" style="margin:10px 0 0">No live positions right now. That is not a missing fare.</p>
     {/if}
