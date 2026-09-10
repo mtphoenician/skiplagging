@@ -1,4 +1,6 @@
 export type Cabin = 'ECONOMY' | 'PREMIUM_ECONOMY' | 'BUSINESS' | 'FIRST';
+/** `hidden` is the product. `compare` is an explicit round-trip that cannot classify hidden-city. */
+export type SearchMode = 'compare' | 'hidden';
 export type ItineraryKind = 'nonstop' | 'connecting' | 'nearby' | 'hidden-city' | 'self-transfer';
 
 export interface Country {

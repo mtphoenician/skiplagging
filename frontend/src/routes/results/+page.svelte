@@ -4,29 +4,42 @@
   import OfferCard from '$lib/components/OfferCard.svelte';
   import SearchForm from '$lib/components/SearchForm.svelte';
   import TrafficPanel from '$lib/components/TrafficPanel.svelte';
-  import { duration, expandSearch, itineraryBookers, mergeSearch, money, outboundDest, searchFares } from '$lib/api';
-  import type { Cabin, Offer, SearchQuery, SearchResponse } from '$lib/types';
+  import { duration, expandSearch, itineraryBookers, mergeSearch, money, outboundDest, searchFares, buildSearchHref, searchModeFromParams, backDateFromParams } from '$lib/api';
+  import type { Cabin, Offer, SearchMode, SearchQuery, SearchResponse } from '$lib/types';
 
   const params = $derived(page.url.searchParams);
+  const startMode = searchModeFromParams(page.url.searchParams);
+  const startReturn = page.url.searchParams.get('return') || '';
+  const startBack = backDateFromParams(page.url.searchParams, startMode);
+  const startRoundTrip = startMode === 'compare' && Boolean(startReturn);
+
   let data = $state<SearchResponse | null>(null);
   let error = $state('');
   let loading = $state(true);
   let deepPending = $state<string[]>([]);
   let deepSelf = $state(false);
   let deepNote = $state('');
-  let tab = $state<'flights' | 'hidden' | 'live' | 'debug'>('flights');
+  let tab = $state<'flights' | 'hidden' | 'live' | 'debug'>(startRoundTrip ? 'flights' : 'hidden');
   let sort = $state<'cheapest' | 'best' | 'fastest'>('cheapest');
   let maxStops = $state<number>(-1);
 
-  let origin = $state('');
-  let destination = $state('');
-  let date = $state('');
-  let return_date = $state('');
-  let adults = $state(1);
-  let cabin = $state<Cabin>('ECONOMY');
-  let include_nearby = $state(true);
+  let origin = $state((page.url.searchParams.get('origin') || '').toUpperCase());
+  let destination = $state((page.url.searchParams.get('destination') || '').toUpperCase());
+  let date = $state(page.url.searchParams.get('date') || '');
+  let return_date = $state(startMode === 'compare' ? startReturn : startBack);
+  let adults = $state(Number(page.url.searchParams.get('adults') || 1));
+  let cabin = $state<Cabin>((page.url.searchParams.get('cabin') || 'ECONOMY') as Cabin);
+  let include_nearby = $state(
+    startMode === 'compare' ? page.url.searchParams.get('nearby') !== '0' : page.url.searchParams.get('nearby') === '1'
+  );
+  let mode = $state<SearchMode>(startMode);
   let rechecking = $state(false);
   let run: { cancel: boolean } | null = null;
+  let backRun: { cancel: boolean } | null = null;
+  let backData = $state<SearchResponse | null>(null);
+  let backLoading = $state(false);
+  let backError = $state('');
+  let backDate = $state(startBack);
 
   function cacheNote(raw: string): string {
     if (raw.startsWith('http-cache')) {
@@ -43,7 +56,7 @@
       origin,
       destination,
       date,
-      return_date: return_date || null,
+      return_date: mode === 'hidden' ? null : return_date || null,
       adults,
       cabin,
       currency: 'USD',
@@ -123,27 +136,88 @@
       });
   }
 
+  function beginBackSearch(query: SearchQuery, bypass: boolean) {
+    if (backRun) backRun.cancel = true;
+    const thisRun = { cancel: false };
+    backRun = thisRun;
+    if (!bypass) {
+      backLoading = true;
+      backError = '';
+      backData = null;
+    }
+    searchFares(query, { bypassCache: bypass })
+      .then((fast) => {
+        if (thisRun.cancel) return;
+        backData = fast;
+        backLoading = false;
+        const pending = fast.search_debug?.pending_candidates ?? [];
+        const pendingSelf = Boolean(fast.search_debug?.pending_self_transfer);
+        if (!pending.length && !pendingSelf) return;
+        return expandSearch(query, fast.search_debug?.expanded_destinations ?? [])
+          .then((deep) => {
+            if (thisRun.cancel) return;
+            backData = mergeSearch(fast, deep);
+          })
+          .catch(() => {
+            /* Fast pass stands if the deep pass does not finish. */
+          });
+      })
+      .catch((e: Error) => {
+        if (!thisRun.cancel) {
+          backError = e.message;
+          backLoading = false;
+        }
+      });
+  }
+
   function recheckSearch() {
     if (loading || rechecking) return;
     beginSearch(data?.query ?? searchQuery(), true);
+    if (mode === 'hidden' && backDate) {
+      beginBackSearch(backQuery(), true);
+    }
+  }
+
+  function backQuery(): SearchQuery {
+    return {
+      origin: destination,
+      destination: origin,
+      date: backDate,
+      return_date: null,
+      adults,
+      cabin,
+      currency: 'USD',
+      include_nearby,
+      allow_synthetic: false
+    };
   }
 
   $effect(() => {
     const o = (params.get('origin') || '').toUpperCase();
     const d = (params.get('destination') || '').toUpperCase();
     const dt = params.get('date') || '';
+    const nextMode = searchModeFromParams(params);
     const ret = params.get('return') || '';
+    const back = backDateFromParams(params, nextMode);
     const ad = Number(params.get('adults') || 1);
     const cb = (params.get('cabin') || 'ECONOMY') as Cabin;
-    const near = params.get('nearby') !== '0';
+    const near = nextMode === 'compare' ? params.get('nearby') !== '0' : params.get('nearby') === '1';
 
     origin = o;
     destination = d;
     date = dt;
-    return_date = ret;
+    mode = nextMode;
+    return_date = nextMode === 'compare' ? ret : back;
+    backDate = back;
     adults = ad;
     cabin = cb;
     include_nearby = near;
+    tab = nextMode === 'compare' && ret ? 'flights' : 'hidden';
+
+    if (backRun) backRun.cancel = true;
+    backData = null;
+    backError = '';
+    backLoading = false;
 
     if (!/^(CITY-)?[A-Z]{3}$/.test(o) || !/^(CITY-)?[A-Z]{3}$/.test(d) || !dt) {
       if (run) run.cancel = true;
@@ -158,7 +232,7 @@
         origin: o,
         destination: d,
         date: dt,
-        return_date: ret || null,
+        return_date: nextMode === 'compare' ? ret || null : null,
         adults: ad,
         cabin: cb,
         currency: 'USD',
@@ -168,8 +242,26 @@
       false
     );
 
+    if (nextMode !== 'compare' && back && /^(CITY-)?[A-Z]{3}$/.test(o) && /^(CITY-)?[A-Z]{3}$/.test(d)) {
+      beginBackSearch(
+        {
+          origin: d,
+          destination: o,
+          date: back,
+          return_date: null,
+          adults: ad,
+          cabin: cb,
+          currency: 'USD',
+          include_nearby: near,
+          allow_synthetic: false
+        },
+        false
+      );
+    }
+
     return () => {
       if (run) run.cancel = true;
+      if (backRun) backRun.cancel = true;
     };
   });
 
@@ -214,7 +306,13 @@
   const liveGaps = $derived((data?.data_gaps ?? []).filter((g) => isLiveLayerGap(g)));
   const sandboxGap = $derived(shopGaps.find(isSandboxGap) || '');
   const duffelFailedGap = $derived(shopGaps.find(isDuffelFailedGap) || '');
-  const shopNotes = $derived(shopGaps.filter((g) => g !== sandboxGap && g !== duffelFailedGap));
+  const shopNotes = $derived(
+    shopGaps.filter((g) => {
+      if (g === sandboxGap || g === duffelFailedGap) return false;
+      const l = g.toLowerCase();
+      return !l.includes('one-way only') && !l.includes('priced inversion');
+    })
+  );
   const roundTrip = $derived(Boolean(data?.query.return_date));
   const lists = $derived(data?.channels.filter((c) => c.kind !== 'hidden-city') ?? []);
   const listedCount = $derived(lists.reduce((n, c) => n + c.offers.length, 0));
@@ -319,14 +417,53 @@
     return '';
   }
 
-  function cities(offer: Offer): { fromCity: string; toCity: string } {
-    if (!data) return { fromCity: '', toCity: '' };
+  function citiesFor(resp: SearchResponse | null, offer: Offer): { fromCity: string; toCity: string } {
+    if (!resp) return { fromCity: '', toCity: '' };
     const dest = outboundDest(offer);
     return {
-      fromCity: offer.segments[0]?.origin === data.origin.iata ? data.origin.city : '',
-      toCity: dest === data.destination.iata ? data.destination.city : ''
+      fromCity: offer.segments[0]?.origin === resp.origin.iata ? resp.origin.city : '',
+      toCity: dest === resp.destination.iata ? resp.destination.city : ''
     };
   }
+
+  function cities(offer: Offer): { fromCity: string; toCity: string } {
+    return citiesFor(data, offer);
+  }
+
+  const backSaving = $derived.by(() => {
+    const h = backData?.hidden_if_cheaper;
+    const honest = backData?.honest_pick?.offer.price;
+    if (!h || honest == null || h.through_offer.price == null) return 0;
+    return honest - h.through_offer.price;
+  });
+  const backNames = $derived(backData?.airline_names ?? {});
+  const wayBackHref = $derived(
+    origin && destination && backDate
+      ? buildSearchHref({
+          origin: destination,
+          destination: origin,
+          date: backDate,
+          adults,
+          cabin,
+          nearby: include_nearby,
+          mode: 'hidden'
+        })
+      : ''
+  );
+  const twoOneWaysHref = $derived(
+    origin && destination && date
+      ? buildSearchHref({
+          origin,
+          destination,
+          date,
+          returnDate: return_date,
+          adults,
+          cabin,
+          nearby: false,
+          mode: 'hidden'
+        })
+      : ''
+  );
 </script>
 
 <svelte:head>
@@ -343,10 +480,11 @@
     bind:adults
     bind:cabin
     bind:include_nearby
+    bind:mode
   />
 
   {#if loading}
-    <p class="empty">Searching…</p>
+    <p class="empty">{mode === 'compare' ? 'Searching…' : 'Looking for a cheaper through-ticket…'}</p>
   {:else if error}
     <p class="empty">{error}</p>
   {:else if data}
@@ -357,8 +495,11 @@
           <p class="meta">
             {data.origin.type === 'city' ? `${data.origin.city} (all)` : data.origin.iata}–{data.destination.type === 'city'
               ? `${data.destination.city} (all)`
-              : data.destination.iata} · {data.query.date}{data.query.return_date ? `–${data.query.return_date}` : ''}
+              : data.destination.iata}
+            · {data.query.date}{#if mode === 'hidden' && backDate}
+              · back {backDate}{:else if data.query.return_date}–{data.query.return_date}{/if}
             · {data.query.adults} adult{data.query.adults === 1 ? '' : 's'}
+            · {mode === 'compare' && data.query.return_date ? 'round-trip · no hidden-city' : 'hidden-city · one-ways'}
           </p>
         </div>
         <button
@@ -378,6 +519,13 @@
       {/if}
     </header>
 
+    {#if roundTrip && twoOneWaysHref}
+      <p class="banner">
+        This search is one round-trip ticket, so hidden-city is off.
+        <a class="text-link" href={twoOneWaysHref}>Search two one-ways</a>
+        to look for a cheaper through-ticket on each leg.
+      </p>
+    {/if}
     {#if sandboxGap}
       <p class="banner">{sandboxGap}</p>
     {:else if noShop}
@@ -408,16 +556,32 @@
       <p class="note deep-status" aria-live="polite">{deepNote}</p>
     {/if}
 
-    <!-- Comparator first: the cheapest and best regular tickets to B. -->
-    {#if data.honest_pick || data.best_pick}
+    {#if data.hidden_if_cheaper}
+      <p class="pick-kicker">
+        Hidden-city{hiddenSaving > 0
+          ? ` — save ${money(hiddenSaving, data.hidden_if_cheaper.currency)} vs flying to ${data.destination.city}`
+          : ` — get off in ${data.destination.iata}`}
+      </p>
+      <HiddenCityCard match={data.hidden_if_cheaper} names={names} />
+    {:else if !roundTrip && !deepPending.length && !deepSelf && data.honest_pick}
+      <p class="note">
+        No through-ticket cheaper than flying to {data.destination.city} on this date. Honest fares below.
+      </p>
+    {/if}
+
+    {#if data.honest_pick || (roundTrip && data.best_pick)}
       <div class="picks-row">
         {#if data.honest_pick}
           <div>
-            <p class="pick-kicker">{data.honest_pick.reason}</p>
+            <p class="pick-kicker">
+              {roundTrip
+                ? data.honest_pick.reason
+                : `Baseline — cheapest ticket that ends in ${data.destination.city}`}
+            </p>
             <OfferCard
               offer={data.honest_pick.offer}
               featured
-              cheapest={!showSelf}
+              cheapest={!showSelf && !data.hidden_if_cheaper}
               names={names}
               adults={data.query.adults}
               cabin={data.query.cabin}
@@ -425,7 +589,7 @@
             />
           </div>
         {/if}
-        {#if showHonest && data.best_pick}
+        {#if roundTrip && showHonest && data.best_pick}
           <div>
             <p class="pick-kicker">{data.best_pick.reason}</p>
             <OfferCard
@@ -437,7 +601,7 @@
               {...cities(data.best_pick.offer)}
             />
           </div>
-        {:else if !data.honest_pick && data.best_pick}
+        {:else if roundTrip && !data.honest_pick && data.best_pick}
           <div>
             <p class="pick-kicker">{data.best_pick.reason}</p>
             <OfferCard
@@ -466,12 +630,45 @@
       />
     {/if}
 
-    <!-- Addition: a hidden-city ticket, only when one exists and it saves money. -->
-    {#if data.hidden_if_cheaper}
-      <p class="pick-kicker">
-        Also: hidden-city ticket{hiddenSaving > 0 ? ` — saves ${money(hiddenSaving, data.hidden_if_cheaper.currency)}` : ''}
-      </p>
-      <HiddenCityCard match={data.hidden_if_cheaper} names={names} />
+    {#if mode !== 'compare' && backDate}
+      <section class="way-back">
+        <div class="way-back-head">
+          <h2 class="section-title">Way back · {data.destination.iata} → {data.origin.iata} · {backDate}</h2>
+          {#if wayBackHref}
+            <a class="text-link" href={wayBackHref}>Open full results</a>
+          {/if}
+        </div>
+        <p class="note">Second one-way ticket — not a round-trip PNR. Hidden-city is classified on this leg on its own.</p>
+        {#if backLoading}
+          <p class="note" aria-live="polite">Shopping the one-way home…</p>
+        {:else if backError}
+          <p class="empty">{backError}</p>
+        {:else if backData}
+          {#if backData.hidden_if_cheaper}
+            <p class="pick-kicker">
+              Hidden-city home{backSaving > 0
+                ? ` — save ${money(backSaving, backData.hidden_if_cheaper.currency)} vs flying to ${backData.destination.city}`
+                : ''}
+            </p>
+            <HiddenCityCard match={backData.hidden_if_cheaper} names={backNames} />
+          {:else if backData.honest_pick}
+            <p class="note">No through-ticket cheaper than the honest fare on the way back.</p>
+          {/if}
+          {#if backData.honest_pick}
+            <p class="pick-kicker">Baseline — cheapest ticket that ends in {backData.destination.city}</p>
+            <OfferCard
+              offer={backData.honest_pick.offer}
+              featured
+              names={backNames}
+              adults={backData.query.adults}
+              cabin={backData.query.cabin}
+              {...citiesFor(backData, backData.honest_pick.offer)}
+            />
+          {:else if !backData.hidden_if_cheaper}
+            <p class="empty">No priced one-way home on that date.</p>
+          {/if}
+        {/if}
+      </section>
     {/if}
 
     {#if !hasPriced && emptyFlightsReason && !sandboxGap && !noShop && !duffelFailedGap && !shopGaps.some(isEmptyMarketGap)}
@@ -488,11 +685,11 @@
     {/if}
 
     <div class="tabs">
-      <button class:on={tab === 'flights'} type="button" onclick={() => (tab = 'flights')}>
-        All flights {listedCount ? `(${listedCount})` : ''}
-      </button>
       <button class:on={tab === 'hidden'} type="button" onclick={() => (tab = 'hidden')}>
         Hidden city {hiddenList.length ? `(${hiddenList.length})` : ''}
+      </button>
+      <button class:on={tab === 'flights'} type="button" onclick={() => (tab = 'flights')}>
+        All flights {listedCount ? `(${listedCount})` : ''}
       </button>
       <button class:on={tab === 'live'} type="button" onclick={() => (tab = 'live')}>Live</button>
       <button class:on={tab === 'debug'} type="button" onclick={() => (tab = 'debug')}>Debug</button>
@@ -543,11 +740,17 @@
     {:else if tab === 'hidden'}
       <p class="note">
         {#if roundTrip}
-          Hidden-city is one-way only. This search is comparing honest round-trip tickets.
+          Hidden-city is one-way only. This search compared honest round-trip tickets — a return date is never classified as hidden-city.
         {:else}
-          A cheaper ticket that continues past your city. You would get off at your stop. Airlines prohibit this.
+          Cheaper complete tickets that continue past {data.destination.city}. You would get off at your stop. Airlines prohibit this.
         {/if}
       </p>
+      {#if roundTrip && twoOneWaysHref}
+        <p class="note">
+          <a class="text-link" href={twoOneWaysHref}>Search as two one-ways instead</a>
+          — outbound plus a separate one-way home, each eligible for hidden-city.
+        </p>
+      {/if}
       {#if hiddenList.length}
         {#each hiddenList as match}
           <HiddenCityCard {match} names={names} />
@@ -720,6 +923,22 @@
     padding: 8px 12px;
     border: 1px dashed var(--line-2);
     border-radius: 10px;
+  }
+  .way-back {
+    margin: 22px 0 8px;
+    padding: 12px 14px 8px;
+    border: 1px dashed var(--line);
+    border-radius: 14px;
+  }
+  .way-back-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 8px 16px;
+  }
+  .way-back .section-title {
+    margin: 0;
   }
   .shop-gaps {
     margin: 8px 0 6px;

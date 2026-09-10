@@ -451,6 +451,17 @@ h3 {
   grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr) minmax(0, 0.7fr) minmax(0, 0.7fr) minmax(0, 0.6fr) auto;
 }
 
+.trip-hint {
+  margin: 0 0 12px;
+  color: var(--muted);
+  font-size: 0.82rem;
+  line-height: 1.45;
+}
+
+.search-card.compact .trip-hint {
+  margin-bottom: 10px;
+}
+
 @media (max-width: 860px) {
   .search-grid,
   .search-card.compact .search-grid {

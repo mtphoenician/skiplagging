@@ -3,8 +3,8 @@
   import AirportInput from '$lib/components/AirportInput.svelte';
   import DatePicker from '$lib/components/DatePicker.svelte';
   import SelectMenu from '$lib/components/SelectMenu.svelte';
-  import { searchAirports } from '$lib/api';
-  import type { Cabin } from '$lib/types';
+  import { buildSearchHref, searchAirports } from '$lib/api';
+  import type { Cabin, SearchMode } from '$lib/types';
 
   const cabins = [
     { value: 'ECONOMY', label: 'Economy' },
@@ -20,7 +20,8 @@
     return_date = $bindable(''),
     adults = $bindable(1),
     cabin = $bindable<Cabin>('ECONOMY'),
-    include_nearby = $bindable(true),
+    include_nearby = $bindable(false),
+    mode = $bindable<SearchMode>('hidden'),
     compact = false
   }: {
     origin: string;
@@ -30,6 +31,7 @@
     adults: number;
     cabin: Cabin;
     include_nearby: boolean;
+    mode: SearchMode;
     compact?: boolean;
   } = $props();
 
@@ -39,6 +41,11 @@
   $effect(() => {
     if (return_date && date && return_date < date) return_date = '';
   });
+
+  function setRoundTrip(on: boolean) {
+    mode = on ? 'compare' : 'hidden';
+    include_nearby = on;
+  }
 
   function swap() {
     const a = origin;
@@ -66,6 +73,10 @@
       error = 'Return date must be on or after the outbound date.';
       return;
     }
+    if (mode === 'compare' && !return_date) {
+      error = 'A round-trip ticket needs a return date. Uncheck it to look for hidden-city — a back date is a second one-way.';
+      return;
+    }
     submitting = true;
     try {
       const [o, d] = await Promise.all([resolveIata(origin), resolveIata(destination)]);
@@ -79,16 +90,18 @@
       }
       origin = o;
       destination = d;
-      const q = new URLSearchParams({
-        origin: o,
-        destination: d,
-        date,
-        adults: String(adults),
-        cabin,
-        nearby: include_nearby ? '1' : '0'
-      });
-      if (return_date) q.set('return', return_date);
-      await goto(`/results?${q.toString()}`);
+      await goto(
+        buildSearchHref({
+          origin: o,
+          destination: d,
+          date,
+          returnDate: return_date,
+          adults,
+          cabin,
+          nearby: include_nearby,
+          mode
+        })
+      );
     } catch (err) {
       error = err instanceof Error ? err.message : 'Airport lookup failed.';
     } finally {
@@ -98,6 +111,13 @@
 </script>
 
 <form class="search-card" class:compact onsubmit={submit}>
+  <p class="trip-hint">
+    {#if mode === 'compare'}
+      One round-trip ticket. Hidden-city cannot be classified — uncheck below to search two one-ways instead.
+    {:else}
+      This search looks for a cheaper complete ticket that continues past your city. A back date is a second one-way home, never a round-trip PNR.
+    {/if}
+  </p>
   <div class="search-grid">
     <AirportInput bind:value={origin} label="From" />
     <button class="swap" type="button" onclick={swap} aria-label="Swap airports">
@@ -110,12 +130,19 @@
       <DatePicker bind:value={date} label="Depart" />
     </div>
     <div class="span-return">
-      <DatePicker bind:value={return_date} label="Return (optional)" clearable min={date} />
+      <DatePicker
+        bind:value={return_date}
+        label={mode === 'compare' ? 'Return' : 'Back (one-way home)'}
+        clearable
+        min={date}
+      />
     </div>
     <div class="span-cabin">
       <SelectMenu bind:value={cabin} label="Cabin" options={cabins} />
     </div>
-    <button class="go" type="submit" disabled={submitting}>{submitting ? 'Searching…' : 'Search'}</button>
+    <button class="go" type="submit" disabled={submitting}>
+      {submitting ? 'Searching…' : mode === 'compare' ? 'Compare round-trip' : 'Find hidden-city'}
+    </button>
   </div>
   <div class="toggles">
     <button class="check" type="button" aria-pressed={include_nearby} onclick={() => (include_nearby = !include_nearby)}>
@@ -125,6 +152,19 @@
         {/if}
       </span>
       Nearby airports
+    </button>
+    <button
+      class="check"
+      type="button"
+      aria-pressed={mode === 'compare'}
+      onclick={() => setRoundTrip(mode !== 'compare')}
+    >
+      <span class="box" class:on={mode === 'compare'}>
+        {#if mode === 'compare'}
+          <svg viewBox="0 0 12 12" width="10" height="10"><path d="M2 6.2 4.6 9 10 3" fill="none" stroke="#fff" stroke-width="1.8" /></svg>
+        {/if}
+      </span>
+      Round-trip ticket only (skips hidden-city)
     </button>
     <div class="stepper" role="group" aria-label="Adults">
       <button type="button" class="icon-btn" aria-label="Fewer adults" onclick={() => (adults = Math.max(1, adults - 1))}>−</button>

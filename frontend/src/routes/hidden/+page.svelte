@@ -35,6 +35,10 @@
         Prefound inversions: a ticket that continues past your city costs less than one that ends there. The crossed
         price is the cheapest honest alternative. Airlines prohibit getting off early. We do not book.
       </p>
+      <p class="note">
+        <a class="text-link" href="/">Search a pair</a>
+        — one-way dates; a back date is a second one-way home, not a round-trip.
+      </p>
     </div>
   </header>
 

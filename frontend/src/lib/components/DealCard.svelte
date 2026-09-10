@@ -1,12 +1,22 @@
 <script lang="ts">
-  import { duration, money, timeRange } from '$lib/api';
+  import { buildSearchHref, duration, money, timeRange } from '$lib/api';
   import type { HiddenDeal } from '$lib/types';
 
   let { deal, compact = false }: { deal: HiddenDeal; compact?: boolean } = $props();
   let open = $state(false);
   const through = $derived(deal.through_offer);
   const getOff = $derived(deal.dest);
-  const href = $derived(`/results?origin=${deal.origin}&destination=${deal.dest}&date=${deal.date}&nearby=0`);
+  const href = $derived(
+    buildSearchHref({
+      origin: deal.origin,
+      destination: deal.dest,
+      date: deal.date,
+      adults: 1,
+      cabin: 'ECONOMY',
+      nearby: false,
+      mode: 'hidden'
+    })
+  );
   const bookers = $derived((deal.bookers ?? []).filter((b) => !b.id.startsWith('carrier-')).slice(0, 4));
   const risk = $derived(deal.risk);
   const warnings = $derived(deal.warnings ?? []);

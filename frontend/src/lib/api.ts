@@ -1,4 +1,4 @@
-import type { Airport, ChannelGroup, Country, HiddenDeal, Offer, SearchQuery, SearchResponse, SourceDef } from './types';
+import type { Airport, Cabin, ChannelGroup, Country, HiddenDeal, Offer, SearchMode, SearchQuery, SearchResponse, SourceDef } from './types';
 
 const prefix = '/api';
 
@@ -168,6 +168,45 @@ export async function fetchSources(): Promise<{ layers: string[]; sources: Sourc
   const r = await fetch(`${prefix}/sources`);
   if (!r.ok) throw new Error('Sources failed');
   return r.json();
+}
+
+/** Compare is an explicit opt-out. Anything else looks for hidden-city. */
+export function searchModeFromParams(params: URLSearchParams): SearchMode {
+  return params.get('mode') === 'compare' ? 'compare' : 'hidden';
+}
+
+/** Hidden-city is the product. A leftover `return=` is a one-way home, not a round-trip PNR. */
+export function backDateFromParams(params: URLSearchParams, mode: SearchMode): string {
+  if (mode === 'compare') return '';
+  return params.get('back') || params.get('return') || '';
+}
+
+/** Hidden-city never sends a round-trip to the shop: a back date is a second one-way. */
+export function buildSearchHref(opts: {
+  origin: string;
+  destination: string;
+  date: string;
+  returnDate?: string;
+  adults: number;
+  cabin: Cabin | string;
+  nearby: boolean;
+  mode: SearchMode;
+}): string {
+  const q = new URLSearchParams({
+    origin: opts.origin,
+    destination: opts.destination,
+    date: opts.date,
+    adults: String(opts.adults),
+    cabin: opts.cabin,
+    nearby: opts.nearby ? '1' : '0',
+    mode: opts.mode
+  });
+  if (opts.mode === 'hidden') {
+    if (opts.returnDate) q.set('back', opts.returnDate);
+  } else if (opts.returnDate) {
+    q.set('return', opts.returnDate);
+  }
+  return `/results?${q.toString()}`;
 }
 
 export function money(n: number | null | undefined, currency = 'USD'): string {
