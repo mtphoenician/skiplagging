@@ -22,7 +22,16 @@ fn priced(
     source: &str,
     live: Option<bool>,
 ) -> Offer {
-    let mut o = offer_full(oid, Some(price), segments, stops, currency, source, live, None);
+    let mut o = offer_full(
+        oid,
+        Some(price),
+        segments,
+        stops,
+        currency,
+        source,
+        live,
+        None,
+    );
     if stops > 0 {
         o.kind = "hidden-city".into();
     }
@@ -59,7 +68,14 @@ fn match_of(local: Offer, through: Offer, hidden: &str, saving: f64, pct: f64) -
     }
 }
 
-async fn wipe(pool: &sqlx::PgPool, origin: &str, dest: &str, hidden: &str, date: &str, flight: &str) {
+async fn wipe(
+    pool: &sqlx::PgPool,
+    origin: &str,
+    dest: &str,
+    hidden: &str,
+    date: &str,
+    flight: &str,
+) {
     let _ = sqlx::query(
         "DELETE FROM hidden_deals WHERE origin=$1 AND destination=$2 AND hidden_city=$3 AND date=$4 AND first_flight=$5",
     )
@@ -75,7 +91,15 @@ async fn wipe(pool: &sqlx::PgPool, origin: &str, dest: &str, hidden: &str, date:
 #[tokio::test]
 async fn hidden_deals_persist_and_list() {
     let pool = pool().await;
-    let local = priced("n1", 400.0, vec![s("ORD", "DCA", "BA1")], 0, "USD", "duffel", Some(true));
+    let local = priced(
+        "n1",
+        400.0,
+        vec![s("ORD", "DCA", "BA1")],
+        0,
+        "USD",
+        "duffel",
+        Some(true),
+    );
     let through = priced(
         "h1",
         220.0,
@@ -114,7 +138,15 @@ async fn hidden_deals_persist_and_list() {
 #[tokio::test]
 async fn expired_through_is_not_persisted_or_listed() {
     let pool = pool().await;
-    let local = priced("n-exp", 400.0, vec![s("MIA", "ATL", "DL9")], 0, "USD", "duffel", Some(true));
+    let local = priced(
+        "n-exp",
+        400.0,
+        vec![s("MIA", "ATL", "DL9")],
+        0,
+        "USD",
+        "duffel",
+        Some(true),
+    );
     let mut through = priced(
         "h-exp",
         200.0,
@@ -161,15 +193,26 @@ async fn expired_through_is_not_persisted_or_listed() {
     .execute(&pool)
     .await
     .unwrap();
-    let deals = repo::list_hidden_deals(&pool, 48, "MIA", "ATL").await.unwrap();
+    let deals = repo::list_hidden_deals(&pool, 48, "MIA", "ATL")
+        .await
+        .unwrap();
     assert!(!deals.iter().any(|d| d.first_flight == "DL9"));
     wipe(&pool, "MIA", "ATL", "BOS", "2026-10-28", "DL9").await;
 }
 
 #[tokio::test]
 async fn persist_converts_to_usd_and_skips_sandbox() {
+    skiplagging::fx::mark_rates_trusted();
     let pool = pool().await;
-    let gbp_local = priced("n-gbp", 400.0, vec![s("LHR", "DUB", "BA9")], 0, "GBP", "duffel", Some(true));
+    let gbp_local = priced(
+        "n-gbp",
+        400.0,
+        vec![s("LHR", "DUB", "BA9")],
+        0,
+        "GBP",
+        "duffel",
+        Some(true),
+    );
     let gbp_through = priced(
         "h-gbp",
         220.0,
@@ -179,7 +222,15 @@ async fn persist_converts_to_usd_and_skips_sandbox() {
         "duffel",
         Some(true),
     );
-    let fake_local = priced("n-fake", 400.0, vec![s("JFK", "ORD", "BA3")], 0, "USD", "duffel", Some(false));
+    let fake_local = priced(
+        "n-fake",
+        400.0,
+        vec![s("JFK", "ORD", "BA3")],
+        0,
+        "USD",
+        "duffel",
+        Some(false),
+    );
     let fake_through = priced(
         "h-fake",
         100.0,
@@ -189,7 +240,15 @@ async fn persist_converts_to_usd_and_skips_sandbox() {
         "duffel",
         Some(false),
     );
-    let mock_local = priced("n-mock", 400.0, vec![s("JFK", "BOS", "AA1")], 0, "USD", "mock", None);
+    let mock_local = priced(
+        "n-mock",
+        400.0,
+        vec![s("JFK", "BOS", "AA1")],
+        0,
+        "USD",
+        "mock",
+        None,
+    );
     let mock_through = priced(
         "h-mock",
         200.0,
@@ -238,11 +297,19 @@ async fn persist_converts_to_usd_and_skips_sandbox() {
     assert_eq!(n_live, 1);
     assert_eq!(n_fake, 0);
     assert_eq!(n_mock, 0);
-    let deals = repo::list_hidden_deals(&pool, 48, "LHR", "DUB").await.unwrap();
+    let deals = repo::list_hidden_deals(&pool, 48, "LHR", "DUB")
+        .await
+        .unwrap();
     assert_eq!(deals.len(), 1);
     assert_eq!(deals[0].currency, "USD");
-    assert_eq!(deals[0].honest_price, to_usd(Some(400.0), Some("GBP")).unwrap());
-    assert_eq!(deals[0].through_price, to_usd(Some(220.0), Some("GBP")).unwrap());
+    assert_eq!(
+        deals[0].honest_price,
+        to_usd(Some(400.0), Some("GBP")).unwrap()
+    );
+    assert_eq!(
+        deals[0].through_price,
+        to_usd(Some(220.0), Some("GBP")).unwrap()
+    );
     assert_eq!(
         deals[0].saving,
         ((deals[0].honest_price - deals[0].through_price) * 100.0).round() / 100.0
@@ -253,7 +320,15 @@ async fn persist_converts_to_usd_and_skips_sandbox() {
 #[tokio::test]
 async fn list_ranks_usd_and_hides_sandbox_rows() {
     let pool = pool().await;
-    let krw_local = priced("n-krw", 80000.0, vec![s("ICN", "NRT", "KE1")], 0, "KRW", "duffel", Some(true));
+    let krw_local = priced(
+        "n-krw",
+        80000.0,
+        vec![s("ICN", "NRT", "KE1")],
+        0,
+        "KRW",
+        "duffel",
+        Some(true),
+    );
     let krw_through = priced(
         "h-krw",
         10000.0,
@@ -263,7 +338,15 @@ async fn list_ranks_usd_and_hides_sandbox_rows() {
         "duffel",
         Some(true),
     );
-    let usd_local = priced("n-usd", 400.0, vec![s("ICN", "NRT", "DL1")], 0, "USD", "duffel", Some(true));
+    let usd_local = priced(
+        "n-usd",
+        400.0,
+        vec![s("ICN", "NRT", "DL1")],
+        0,
+        "USD",
+        "duffel",
+        Some(true),
+    );
     let usd_through = priced(
         "h-usd",
         150.0,
@@ -282,10 +365,12 @@ async fn list_ranks_usd_and_hides_sandbox_rows() {
         "duffel",
         Some(false),
     );
-    sqlx::query("DELETE FROM hidden_deals WHERE origin='ICN' AND destination='NRT' AND date='2026-11-03'")
-        .execute(&pool)
-        .await
-        .unwrap();
+    sqlx::query(
+        "DELETE FROM hidden_deals WHERE origin='ICN' AND destination='NRT' AND date='2026-11-03'",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
     for (hidden, name, honest, through_p, ccy, saving, pct, flight, local, through) in [
         (
             "HNL",
@@ -342,21 +427,33 @@ async fn list_ranks_usd_and_hides_sandbox_rows() {
         .await
         .unwrap();
     }
-    let deals = repo::list_hidden_deals(&pool, 48, "ICN", "NRT").await.unwrap();
+    let deals = repo::list_hidden_deals(&pool, 48, "ICN", "NRT")
+        .await
+        .unwrap();
     let cities: Vec<_> = deals.iter().map(|d| d.hidden_city.as_str()).collect();
     assert!(!cities.contains(&"SEA"));
     assert_eq!(cities[0], "LAX");
     assert_eq!(deals[0].saving, 250.0);
     assert_eq!(deals[0].currency, "USD");
-    sqlx::query("DELETE FROM hidden_deals WHERE origin='ICN' AND destination='NRT' AND date='2026-11-03'")
-        .execute(&pool)
-        .await
-        .unwrap();
+    sqlx::query(
+        "DELETE FROM hidden_deals WHERE origin='ICN' AND destination='NRT' AND date='2026-11-03'",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
 }
 
 #[test]
 fn live_fare_rejects_test_inventory() {
-    let live = priced("ok", 200.0, vec![s("JFK", "LHR", "BA1")], 0, "USD", "duffel", Some(true));
+    let live = priced(
+        "ok",
+        200.0,
+        vec![s("JFK", "LHR", "BA1")],
+        0,
+        "USD",
+        "duffel",
+        Some(true),
+    );
     let mut fake = live.clone();
     fake.live = Some(false);
     fake.note = Some("Duffel offer. live_mode=False.".into());

@@ -3,9 +3,9 @@ mod common;
 use serde_json::json;
 use skiplagging::engines::hidden::ticketed_destination;
 use skiplagging::engines::refresh::refresh_priced_offer;
-use skiplagging::fx::{offer_in_usd, to_usd};
+use skiplagging::fx::{apply_frankfurter_body, offer_in_usd, to_usd, FETCH_TIMEOUT};
 use skiplagging::models::{SearchQuery, SearchQueryError, Segment};
-use skiplagging::providers::duffel::_one;
+use skiplagging::providers::duffel::{_one, _usd_quote};
 use skiplagging::providers::sandbox::is_sandbox_offer;
 
 use common::{offer_full, shop_req};
@@ -40,7 +40,10 @@ fn search_query_round_trip_order() {
         "return_date": "2026-10-10"
     }))
     .unwrap();
-    assert!(matches!(bad.validate(), Err(SearchQueryError::ReturnBeforeOutbound)));
+    assert!(matches!(
+        bad.validate(),
+        Err(SearchQueryError::ReturnBeforeOutbound)
+    ));
 }
 
 #[test]
@@ -61,6 +64,7 @@ fn search_query_rejects_impossible_dates() {
 
 #[test]
 fn to_usd_identity_and_gbp() {
+    skiplagging::fx::mark_rates_trusted();
     assert_eq!(to_usd(Some(240.0), Some("USD")), Some(240.0));
     let converted = to_usd(Some(80.0), Some("GBP")).unwrap();
     assert!(converted > 80.0);
@@ -68,7 +72,37 @@ fn to_usd_identity_and_gbp() {
 }
 
 #[test]
+fn to_usd_omits_foreign_until_fx_fetch() {
+    skiplagging::fx::with_untrusted_rates(|| {
+        assert_eq!(to_usd(Some(240.0), Some("USD")), Some(240.0));
+        assert_eq!(to_usd(Some(80.0), Some("GBP")), None);
+        assert!(offer_in_usd(&offer_full(
+            "g1",
+            Some(100.0),
+            vec![Segment {
+                origin: "LHR".into(),
+                dest: "JFK".into(),
+                carrier: "BA".into(),
+                flight_number: "BA1".into(),
+                dep: "2026-10-10T08:00".into(),
+                arr: "2026-10-10T11:00".into(),
+                duration_min: 180,
+                rbd: "Y".into(),
+                ..Segment::default()
+            }],
+            0,
+            "GBP",
+            "duffel",
+            Some(true),
+            Some(180),
+        ))
+        .is_none());
+    });
+}
+
+#[test]
 fn offer_in_usd_converts_gbp() {
+    skiplagging::fx::mark_rates_trusted();
     let offer = offer_full(
         "g1",
         Some(100.0),
@@ -134,6 +168,7 @@ const DUFFEL_OFFER: &str = r#"{
 
 #[test]
 fn duffel_get_offer_parses_and_converts_to_usd() {
+    skiplagging::fx::mark_rates_trusted();
     let raw: serde_json::Value = serde_json::from_str(DUFFEL_OFFER).unwrap();
     let req = shop_req("JFK", "ORD", "2026-10-10");
     let got = _one(&raw, &req, "2026-09-08T12:00:00+00:00").unwrap();
@@ -142,7 +177,10 @@ fn duffel_get_offer_parses_and_converts_to_usd() {
     assert_eq!(got.price, Some(170.0));
     assert_eq!(got.adults, 1);
     assert_eq!(
-        got.segments.iter().map(|s| s.dest.as_str()).collect::<Vec<_>>(),
+        got.segments
+            .iter()
+            .map(|s| s.dest.as_str())
+            .collect::<Vec<_>>(),
         ["ORD", "DEN"]
     );
     let usd = offer_in_usd(&got).unwrap();
@@ -155,7 +193,12 @@ fn duffel_missing_live_mode_is_not_sandbox() {
     let mut raw: serde_json::Value = serde_json::from_str(DUFFEL_OFFER).unwrap();
     raw.as_object_mut().unwrap().remove("live_mode");
     raw["passengers"] = json!([{"type": "adult"}, {"type": "adult"}]);
-    let got = _one(&raw, &shop_req("JFK", "ORD", "2026-10-10"), "2026-09-08T12:00:00+00:00").unwrap();
+    let got = _one(
+        &raw,
+        &shop_req("JFK", "ORD", "2026-10-10"),
+        "2026-09-08T12:00:00+00:00",
+    )
+    .unwrap();
     assert_eq!(got.live, None);
     assert!(!is_sandbox_offer(&got));
     assert_eq!(got.adults, 2);
@@ -214,4 +257,84 @@ fn duffel_two_slice_sets_return_date_without_req() {
     assert_eq!(got.outbound_end, Some(0));
     assert_eq!(ticketed_destination(&got), "ORD");
     assert_eq!(got.stops, 0);
+}
+
+#[test]
+fn frankfurter_timeout_is_four_seconds() {
+    assert_eq!(FETCH_TIMEOUT, std::time::Duration::from_secs(4));
+}
+
+#[test]
+fn live_frankfurter_does_not_rank_on_fallback_for_missing_codes() {
+    assert!(apply_frankfurter_body(&json!({
+        "rates": { "GBP": 0.79, "EUR": 0.92 }
+    })));
+    assert!(skiplagging::fx::rates_are_live());
+    let gbp = to_usd(Some(170.0), Some("GBP")).unwrap();
+    assert!(gbp > 170.0 && gbp < 250.0);
+    assert_eq!(to_usd(Some(100.0), Some("AED")), None);
+}
+
+#[test]
+fn duffel_usd_quote_ranks_without_frankfurter() {
+    skiplagging::fx::with_untrusted_rates(|| {
+        assert_eq!(to_usd(Some(170.0), Some("GBP")), None);
+        let mut offer = offer_full(
+            "g1",
+            Some(170.0),
+            vec![Segment {
+                origin: "LHR".into(),
+                dest: "JFK".into(),
+                carrier: "BA".into(),
+                flight_number: "BA1".into(),
+                dep: "2026-10-10T08:00".into(),
+                arr: "2026-10-10T11:00".into(),
+                duration_min: 180,
+                rbd: "Y".into(),
+                ..Segment::default()
+            }],
+            0,
+            "GBP",
+            "duffel",
+            Some(true),
+            Some(180),
+        );
+        offer.quoted_usd = Some(199.0);
+        let usd = offer_in_usd(&offer).unwrap();
+        assert_eq!(usd.currency, "USD");
+        assert_eq!(usd.price, Some(199.0));
+    });
+}
+
+#[test]
+fn duffel_prefers_native_usd_amount_over_gbp_total() {
+    let mut raw: serde_json::Value = serde_json::from_str(DUFFEL_OFFER).unwrap();
+    raw["available_amount"] = json!("199.00");
+    raw["available_currency"] = json!("USD");
+    assert_eq!(_usd_quote(&raw), Some(199.0));
+    let got = _one(
+        &raw,
+        &shop_req("JFK", "ORD", "2026-10-10"),
+        "2026-09-08T12:00:00+00:00",
+    )
+    .unwrap();
+    assert_eq!(got.currency, "GBP");
+    assert_eq!(got.price, Some(170.0));
+    assert_eq!(got.quoted_usd, Some(199.0));
+    skiplagging::fx::with_untrusted_rates(|| {
+        let usd = offer_in_usd(&got).unwrap();
+        assert_eq!(usd.price, Some(199.0));
+        assert_eq!(usd.currency, "USD");
+    });
+}
+
+#[test]
+fn duffel_tax_usd_is_not_a_fare() {
+    let raw = json!({
+        "total_amount": "170.00",
+        "total_currency": "GBP",
+        "tax_amount": "30.00",
+        "tax_currency": "USD"
+    });
+    assert_eq!(_usd_quote(&raw), None);
 }

@@ -17,7 +17,16 @@ fn seg(o: &str, d: &str, dep: &str, arr: &str, flight: &str, carrier: &str) -> S
 
 fn priced(oid: &str, price: f64, segs: Vec<Segment>, carrier: &str, currency: &str) -> Offer {
     let stops = (segs.len().saturating_sub(1)) as i32;
-    let mut o = offer_full(oid, Some(price), segs, stops, currency, "duffel", Some(true), None);
+    let mut o = offer_full(
+        oid,
+        Some(price),
+        segs,
+        stops,
+        currency,
+        "duffel",
+        Some(true),
+        None,
+    );
     o.carrier = carrier.into();
     o
 }
@@ -95,7 +104,13 @@ fn bridge_pairs_skip_when_two_tickets_already_work() {
         2
     )
     .is_empty());
-    assert!(bridge_pairs(&codes(&["ORD", "DTW", "ATL"]), &HashSet::new(), &HashSet::new(), 2).is_empty());
+    assert!(bridge_pairs(
+        &codes(&["ORD", "DTW", "ATL"]),
+        &HashSet::new(),
+        &HashSet::new(),
+        2
+    )
+    .is_empty());
     assert_eq!(
         bridge_pairs(&codes(&["DXB", "DOH"]), &hs(&["DXB"]), &hs(&["DOH"]), 2),
         [("DXB".into(), "DOH".into())]
@@ -122,8 +137,22 @@ fn stitch_two_tickets_three_stops_like_kayak() {
         "airasia",
         280.0,
         vec![
-            seg("BEY", "SHJ", "2026-11-19T12:15", "2026-11-19T16:20", "G9412", "G9"),
-            seg("SHJ", "KUL", "2026-11-19T21:25", "2026-11-20T08:40", "D7107", "AK"),
+            seg(
+                "BEY",
+                "SHJ",
+                "2026-11-19T12:15",
+                "2026-11-19T16:20",
+                "G9412",
+                "G9",
+            ),
+            seg(
+                "SHJ",
+                "KUL",
+                "2026-11-19T21:25",
+                "2026-11-20T08:40",
+                "D7107",
+                "AK",
+            ),
         ],
         "AK",
         "USD",
@@ -132,8 +161,22 @@ fn stitch_two_tickets_three_stops_like_kayak() {
         "virgin",
         437.0,
         vec![
-            seg("KUL", "DPS", "2026-11-20T15:35", "2026-11-20T18:30", "VA80", "VA"),
-            seg("DPS", "CBR", "2026-11-20T21:25", "2026-11-21T07:00", "VA81", "VA"),
+            seg(
+                "KUL",
+                "DPS",
+                "2026-11-20T15:35",
+                "2026-11-20T18:30",
+                "VA80",
+                "VA",
+            ),
+            seg(
+                "DPS",
+                "CBR",
+                "2026-11-20T21:25",
+                "2026-11-21T07:00",
+                "VA81",
+                "VA",
+            ),
         ],
         "VA",
         "USD",
@@ -152,7 +195,12 @@ fn stitch_two_tickets_three_stops_like_kayak() {
     );
     assert_eq!(joined.segments.last().unwrap().dest, "CBR");
     assert_eq!(joined.separate_tickets.len(), 2);
-    assert!(joined.note.as_deref().unwrap().to_lowercase().contains("not hidden-city"));
+    assert!(joined
+        .note
+        .as_deref()
+        .unwrap()
+        .to_lowercase()
+        .contains("not hidden-city"));
 }
 
 #[test]
@@ -160,21 +208,42 @@ fn stitch_three_tickets_two_self_transfers() {
     let a = priced(
         "t1",
         200.0,
-        vec![seg("BEY", "KUL", "2026-11-19T12:15", "2026-11-20T08:40", "AK1", "AK")],
+        vec![seg(
+            "BEY",
+            "KUL",
+            "2026-11-19T12:15",
+            "2026-11-20T08:40",
+            "AK1",
+            "AK",
+        )],
         "AK",
         "USD",
     );
     let b = priced(
         "t2",
         220.0,
-        vec![seg("KUL", "DPS", "2026-11-20T15:35", "2026-11-20T18:30", "AK2", "AK")],
+        vec![seg(
+            "KUL",
+            "DPS",
+            "2026-11-20T15:35",
+            "2026-11-20T18:30",
+            "AK2",
+            "AK",
+        )],
         "AK",
         "USD",
     );
     let c = priced(
         "t3",
         297.0,
-        vec![seg("DPS", "CBR", "2026-11-20T21:25", "2026-11-21T07:00", "VA81", "VA")],
+        vec![seg(
+            "DPS",
+            "CBR",
+            "2026-11-20T21:25",
+            "2026-11-21T07:00",
+            "VA81",
+            "VA",
+        )],
         "VA",
         "USD",
     );
@@ -189,14 +258,28 @@ fn stitch_rejects_tight_self_transfer() {
     let left = priced(
         "a",
         100.0,
-        vec![seg("BEY", "KUL", "2026-11-19T08:00", "2026-11-19T20:00", "AK1", "AK")],
+        vec![seg(
+            "BEY",
+            "KUL",
+            "2026-11-19T08:00",
+            "2026-11-19T20:00",
+            "AK1",
+            "AK",
+        )],
         "AK",
         "USD",
     );
     let right = priced(
         "b",
         100.0,
-        vec![seg("KUL", "CBR", "2026-11-19T21:00", "2026-11-20T10:00", "VA1", "VA")],
+        vec![seg(
+            "KUL",
+            "CBR",
+            "2026-11-19T21:00",
+            "2026-11-20T10:00",
+            "VA1",
+            "VA",
+        )],
         "VA",
         "USD",
     );
@@ -209,8 +292,22 @@ fn stitch_rejects_inbound_that_already_visits_b() {
         "via-cbr",
         400.0,
         vec![
-            seg("BEY", "CBR", "2026-11-19T08:00", "2026-11-20T10:00", "QF1", "QF"),
-            seg("CBR", "SYD", "2026-11-20T12:00", "2026-11-20T13:00", "QF2", "QF"),
+            seg(
+                "BEY",
+                "CBR",
+                "2026-11-19T08:00",
+                "2026-11-20T10:00",
+                "QF1",
+                "QF",
+            ),
+            seg(
+                "CBR",
+                "SYD",
+                "2026-11-20T12:00",
+                "2026-11-20T13:00",
+                "QF2",
+                "QF",
+            ),
         ],
         "QF",
         "USD",
@@ -218,7 +315,14 @@ fn stitch_rejects_inbound_that_already_visits_b() {
     let right = priced(
         "back",
         50.0,
-        vec![seg("SYD", "CBR", "2026-11-20T18:00", "2026-11-20T19:30", "VA9", "VA")],
+        vec![seg(
+            "SYD",
+            "CBR",
+            "2026-11-20T18:00",
+            "2026-11-20T19:30",
+            "VA9",
+            "VA",
+        )],
         "VA",
         "USD",
     );
@@ -230,14 +334,28 @@ fn stitch_rejects_mixed_currency() {
     let left = priced(
         "a",
         100.0,
-        vec![seg("BEY", "KUL", "2026-11-19T08:00", "2026-11-19T20:00", "AK1", "AK")],
+        vec![seg(
+            "BEY",
+            "KUL",
+            "2026-11-19T08:00",
+            "2026-11-19T20:00",
+            "AK1",
+            "AK",
+        )],
         "AK",
         "USD",
     );
     let right = priced(
         "b",
         100.0,
-        vec![seg("KUL", "CBR", "2026-11-20T08:00", "2026-11-20T22:00", "VA1", "VA")],
+        vec![seg(
+            "KUL",
+            "CBR",
+            "2026-11-20T08:00",
+            "2026-11-20T22:00",
+            "VA1",
+            "VA",
+        )],
         "VA",
         "EUR",
     );
@@ -249,14 +367,28 @@ fn stitch_rejects_cabin_mismatch() {
     let left = priced(
         "a",
         100.0,
-        vec![seg("BEY", "KUL", "2026-11-19T08:00", "2026-11-19T20:00", "AK1", "AK")],
+        vec![seg(
+            "BEY",
+            "KUL",
+            "2026-11-19T08:00",
+            "2026-11-19T20:00",
+            "AK1",
+            "AK",
+        )],
         "AK",
         "USD",
     );
     let mut right = priced(
         "b",
         100.0,
-        vec![seg("KUL", "CBR", "2026-11-20T08:00", "2026-11-20T22:00", "VA1", "VA")],
+        vec![seg(
+            "KUL",
+            "CBR",
+            "2026-11-20T08:00",
+            "2026-11-20T22:00",
+            "VA1",
+            "VA",
+        )],
         "VA",
         "USD",
     );
@@ -269,21 +401,42 @@ fn combine_keeps_cheapest() {
     let left = priced(
         "a",
         100.0,
-        vec![seg("BEY", "KUL", "2026-11-19T08:00", "2026-11-19T20:00", "AK1", "AK")],
+        vec![seg(
+            "BEY",
+            "KUL",
+            "2026-11-19T08:00",
+            "2026-11-19T20:00",
+            "AK1",
+            "AK",
+        )],
         "AK",
         "USD",
     );
     let cheap = priced(
         "b1",
         200.0,
-        vec![seg("KUL", "CBR", "2026-11-20T08:00", "2026-11-20T22:00", "VA1", "VA")],
+        vec![seg(
+            "KUL",
+            "CBR",
+            "2026-11-20T08:00",
+            "2026-11-20T22:00",
+            "VA1",
+            "VA",
+        )],
         "VA",
         "USD",
     );
     let dear = priced(
         "b2",
         900.0,
-        vec![seg("KUL", "CBR", "2026-11-20T09:00", "2026-11-20T23:00", "VA2", "VA")],
+        vec![seg(
+            "KUL",
+            "CBR",
+            "2026-11-20T09:00",
+            "2026-11-20T23:00",
+            "VA2",
+            "VA",
+        )],
         "VA",
         "USD",
     );
@@ -303,9 +456,30 @@ fn stitch_rejects_six_flights() {
         "a",
         200.0,
         vec![
-            seg("BEY", "SHJ", "2026-11-19T12:15", "2026-11-19T16:20", "G91", "AK"),
-            seg("SHJ", "KUL", "2026-11-19T21:25", "2026-11-20T08:40", "D71", "AK"),
-            seg("KUL", "SIN", "2026-11-20T11:00", "2026-11-20T12:30", "AK3", "AK"),
+            seg(
+                "BEY",
+                "SHJ",
+                "2026-11-19T12:15",
+                "2026-11-19T16:20",
+                "G91",
+                "AK",
+            ),
+            seg(
+                "SHJ",
+                "KUL",
+                "2026-11-19T21:25",
+                "2026-11-20T08:40",
+                "D71",
+                "AK",
+            ),
+            seg(
+                "KUL",
+                "SIN",
+                "2026-11-20T11:00",
+                "2026-11-20T12:30",
+                "AK3",
+                "AK",
+            ),
         ],
         "AK",
         "USD",
@@ -314,9 +488,30 @@ fn stitch_rejects_six_flights() {
         "b",
         200.0,
         vec![
-            seg("SIN", "DPS", "2026-11-20T16:00", "2026-11-20T18:30", "VA1", "VA"),
-            seg("DPS", "SYD", "2026-11-20T21:25", "2026-11-21T04:00", "VA2", "VA"),
-            seg("SYD", "CBR", "2026-11-21T08:00", "2026-11-21T09:00", "VA3", "VA"),
+            seg(
+                "SIN",
+                "DPS",
+                "2026-11-20T16:00",
+                "2026-11-20T18:30",
+                "VA1",
+                "VA",
+            ),
+            seg(
+                "DPS",
+                "SYD",
+                "2026-11-20T21:25",
+                "2026-11-21T04:00",
+                "VA2",
+                "VA",
+            ),
+            seg(
+                "SYD",
+                "CBR",
+                "2026-11-21T08:00",
+                "2026-11-21T09:00",
+                "VA3",
+                "VA",
+            ),
         ],
         "VA",
         "USD",
@@ -329,32 +524,60 @@ fn combine_keeps_three_ticket_only_when_cheaper() {
     let left = priced(
         "a",
         100.0,
-        vec![seg("BEY", "KUL", "2026-11-19T08:00", "2026-11-19T20:00", "AK1", "AK")],
+        vec![seg(
+            "BEY",
+            "KUL",
+            "2026-11-19T08:00",
+            "2026-11-19T20:00",
+            "AK1",
+            "AK",
+        )],
         "AK",
         "USD",
     );
     let two_right = priced(
         "b",
         200.0,
-        vec![seg("KUL", "CBR", "2026-11-20T08:00", "2026-11-20T22:00", "VA1", "VA")],
+        vec![seg(
+            "KUL",
+            "CBR",
+            "2026-11-20T08:00",
+            "2026-11-20T22:00",
+            "VA1",
+            "VA",
+        )],
         "VA",
         "USD",
     );
     let mid = priced(
         "m",
         50.0,
-        vec![seg("KUL", "DPS", "2026-11-20T08:00", "2026-11-20T12:00", "AK2", "AK")],
+        vec![seg(
+            "KUL",
+            "DPS",
+            "2026-11-20T08:00",
+            "2026-11-20T12:00",
+            "AK2",
+            "AK",
+        )],
         "AK",
         "USD",
     );
     let dear_last = priced(
         "c",
         400.0,
-        vec![seg("DPS", "CBR", "2026-11-20T16:00", "2026-11-21T06:00", "VA9", "VA")],
+        vec![seg(
+            "DPS",
+            "CBR",
+            "2026-11-20T16:00",
+            "2026-11-21T06:00",
+            "VA9",
+            "VA",
+        )],
         "VA",
         "USD",
     );
-    let mids = HashMap::from([( ("KUL".into(), "DPS".into()), vec![mid.clone()] )]);
+    let mids = HashMap::from([(("KUL".into(), "DPS".into()), vec![mid.clone()])]);
     let out = combine_at_hubs(
         &HashMap::from([("KUL".into(), vec![left.clone()])]),
         &HashMap::from([
@@ -370,7 +593,14 @@ fn combine_keeps_three_ticket_only_when_cheaper() {
     let cheap_last = priced(
         "c2",
         80.0,
-        vec![seg("DPS", "CBR", "2026-11-20T16:00", "2026-11-21T06:00", "VA8", "VA")],
+        vec![seg(
+            "DPS",
+            "CBR",
+            "2026-11-20T16:00",
+            "2026-11-21T06:00",
+            "VA8",
+            "VA",
+        )],
         "VA",
         "USD",
     );

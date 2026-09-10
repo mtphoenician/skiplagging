@@ -92,6 +92,7 @@ export interface Offer {
   base_price?: number | null;
   taxes?: number | null;
   currency: string;
+  quoted_usd?: number | null;
   cabin: Cabin;
   fare_basis: string;
   seats: number | null;
@@ -190,6 +191,8 @@ export interface SearchDebug {
   provider_calls?: number;
   provider_cost_usd?: number;
   reused_from_index?: number;
+  reused_honest?: boolean;
+  fx_live?: boolean;
   rejected: string[];
   cache: string;
   pending_self_transfer?: boolean;
@@ -267,6 +270,8 @@ export interface SourceDef {
   can_book: boolean;
   can_track: boolean;
   configured?: boolean;
+  status?: 'live' | 'sandbox' | 'oauth' | 'anonymous' | 'on' | 'off';
+  status_label?: string;
 }
 
 export interface SearchQuery {
@@ -279,6 +284,7 @@ export interface SearchQuery {
   currency: string;
   include_nearby: boolean;
   allow_synthetic: boolean;
+  refresh?: boolean;
 }
 
 export interface HiddenDeal {

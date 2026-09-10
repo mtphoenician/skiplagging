@@ -75,6 +75,9 @@ pub struct SearchQuery {
     pub include_nearby: bool,
     #[serde(default)]
     pub allow_synthetic: bool,
+    /// Request-only: skip the in-memory POST /search cache. Not part of the cache key.
+    #[serde(default, skip_serializing)]
+    pub refresh: bool,
 }
 
 impl SearchQuery {
@@ -349,6 +352,10 @@ pub struct Offer {
     pub base_price: Option<f64>,
     pub taxes: Option<f64>,
     pub currency: String,
+    /// Duffel's own USD total when the offer JSON includes one. Ranking uses
+    /// this without waiting for Frankfurter and without FALLBACK rates.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quoted_usd: Option<f64>,
     pub cabin: String,
     #[serde(default = "default_adults")]
     pub adults: i32,
@@ -391,6 +398,7 @@ impl Default for Offer {
             base_price: None,
             taxes: None,
             currency: "USD".into(),
+            quoted_usd: None,
             cabin: "ECONOMY".into(),
             adults: 1,
             fare_basis: String::new(),
@@ -517,6 +525,10 @@ pub struct SearchDebug {
     pub provider_cost_usd: f64,
     #[serde(default)]
     pub reused_from_index: i32,
+    #[serde(default)]
+    pub reused_honest: bool,
+    #[serde(default)]
+    pub fx_live: bool,
     #[serde(default)]
     pub rejected: Vec<String>,
     #[serde(default = "default_miss")]

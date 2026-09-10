@@ -25,57 +25,59 @@
   let adults = $state(1);
   let cabin = $state<Cabin>('ECONOMY');
   let include_nearby = $state(true);
+  let rechecking = $state(false);
+  let run: { cancel: boolean } | null = null;
 
-  $effect(() => {
-    const o = (params.get('origin') || '').toUpperCase();
-    const d = (params.get('destination') || '').toUpperCase();
-    const dt = params.get('date') || '';
-    const ret = params.get('return') || '';
-    const ad = Number(params.get('adults') || 1);
-    const cb = (params.get('cabin') || 'ECONOMY') as Cabin;
-    const near = params.get('nearby') !== '0';
-
-    origin = o;
-    destination = d;
-    date = dt;
-    return_date = ret;
-    adults = ad;
-    cabin = cb;
-    include_nearby = near;
-    loading = true;
-    error = '';
-    data = null;
-    deepPending = [];
-    deepSelf = false;
-    deepNote = '';
-
-    if (!/^(CITY-)?[A-Z]{3}$/.test(o) || !/^(CITY-)?[A-Z]{3}$/.test(d) || !dt) {
-      error = 'Choose two airports and a date.';
-      loading = false;
-      return;
+  function cacheNote(raw: string): string {
+    if (raw.startsWith('http-cache')) {
+      return 'Same search returned from memory. Recheck to shop again.';
     }
+    if (raw === 'index') return 'Priced from the offer index this request.';
+    if (raw === 'index+live') return 'Offer index plus a live shop this request.';
+    if (raw === 'miss') return 'Live shop this request.';
+    return '';
+  }
 
-    let cancelled = false;
-    const query: SearchQuery = {
-      origin: o,
-      destination: d,
-      date: dt,
-      return_date: ret || null,
-      adults: ad,
-      cabin: cb,
+  function searchQuery(): SearchQuery {
+    return {
+      origin,
+      destination,
+      date,
+      return_date: return_date || null,
+      adults,
+      cabin,
       currency: 'USD',
-      include_nearby: near,
+      include_nearby,
       allow_synthetic: false
     };
-    // Two-speed search: show the fast pass, then let the deep pass improve it.
-    searchFares(query)
+  }
+
+  function beginSearch(query: SearchQuery, bypass: boolean) {
+    if (run) run.cancel = true;
+    const thisRun = { cancel: false };
+    run = thisRun;
+    if (bypass) {
+      rechecking = true;
+    } else {
+      loading = true;
+      error = '';
+      data = null;
+      deepPending = [];
+      deepSelf = false;
+      deepNote = '';
+    }
+
+    searchFares(query, { bypassCache: bypass })
       .then((fast) => {
-        if (cancelled) return;
+        if (thisRun.cancel) return;
         data = fast;
         loading = false;
         const pending = fast.search_debug?.pending_candidates ?? [];
         const pendingSelf = Boolean(fast.search_debug?.pending_self_transfer);
-        if (!pending.length && !pendingSelf) return;
+        if (!pending.length && !pendingSelf) {
+          rechecking = false;
+          return;
+        }
         deepPending = pending;
         deepSelf = pendingSelf && !pending.length;
         const before = fast.hidden_if_cheaper?.through_offer.price ?? null;
@@ -83,7 +85,7 @@
         const beforeSelf = fast.channels.find((c) => c.kind === 'self-transfer')?.offers[0]?.price ?? null;
         return expandSearch(query, fast.search_debug?.expanded_destinations ?? [])
           .then((deep) => {
-            if (cancelled) return;
+            if (thisRun.cancel) return;
             const merged = mergeSearch(fast, deep);
             data = merged;
             const after = merged.hidden_if_cheaper?.through_offer.price ?? null;
@@ -102,24 +104,72 @@
             }
           })
           .catch(() => {
-            if (!cancelled) deepNote = 'Deep search did not finish. Results above are the fast pass.';
+            if (!thisRun.cancel) deepNote = 'Deep search did not finish. Results above are the fast pass.';
           })
           .finally(() => {
-            if (!cancelled) {
+            if (!thisRun.cancel) {
               deepPending = [];
               deepSelf = false;
+              rechecking = false;
             }
           });
       })
       .catch((e: Error) => {
-        if (!cancelled) {
+        if (!thisRun.cancel) {
           error = e.message;
           loading = false;
+          rechecking = false;
         }
       });
+  }
+
+  function recheckSearch() {
+    if (loading || rechecking) return;
+    beginSearch(data?.query ?? searchQuery(), true);
+  }
+
+  $effect(() => {
+    const o = (params.get('origin') || '').toUpperCase();
+    const d = (params.get('destination') || '').toUpperCase();
+    const dt = params.get('date') || '';
+    const ret = params.get('return') || '';
+    const ad = Number(params.get('adults') || 1);
+    const cb = (params.get('cabin') || 'ECONOMY') as Cabin;
+    const near = params.get('nearby') !== '0';
+
+    origin = o;
+    destination = d;
+    date = dt;
+    return_date = ret;
+    adults = ad;
+    cabin = cb;
+    include_nearby = near;
+
+    if (!/^(CITY-)?[A-Z]{3}$/.test(o) || !/^(CITY-)?[A-Z]{3}$/.test(d) || !dt) {
+      if (run) run.cancel = true;
+      error = 'Choose two airports and a date.';
+      loading = false;
+      data = null;
+      return;
+    }
+
+    beginSearch(
+      {
+        origin: o,
+        destination: d,
+        date: dt,
+        return_date: ret || null,
+        adults: ad,
+        cabin: cb,
+        currency: 'USD',
+        include_nearby: near,
+        allow_synthetic: false
+      },
+      false
+    );
 
     return () => {
-      cancelled = true;
+      if (run) run.cancel = true;
     };
   });
 
@@ -128,12 +178,43 @@
     Boolean(
       data &&
         data.cheapest_any == null &&
-        data.data_gaps.some((g) => g.includes('No Duffel token') || g.includes('mock is off'))
+        data.data_gaps.some((g) => g.toLowerCase().includes('no duffel token') || g.toLowerCase().includes('mock is off'))
     )
   );
-  const sandboxGap = $derived(
-    data?.data_gaps.find((g) => g.includes('sandbox') || g.includes('duffel_test')) || ''
-  );
+
+  function isLiveLayerGap(gap: string): boolean {
+    const l = gap.toLowerCase();
+    return (
+      l.includes('opensky') ||
+      l.includes('rapidapi') ||
+      l.includes('aerodatabox') ||
+      l.includes('fids') ||
+      l.includes('live transponder') ||
+      l.includes('live aircraft') ||
+      l.includes('live positions') ||
+      l.includes('tracker links')
+    );
+  }
+
+  function isSandboxGap(gap: string): boolean {
+    const l = gap.toLowerCase();
+    return l.includes('duffel_test') || l.includes('your duffel key is sandbox');
+  }
+
+  function isDuffelFailedGap(gap: string): boolean {
+    return gap.toLowerCase().includes('duffel shop failed');
+  }
+
+  function isEmptyMarketGap(gap: string): boolean {
+    const l = gap.toLowerCase();
+    return l.includes('no priced offers') || l.includes('not a live empty market');
+  }
+
+  const shopGaps = $derived((data?.data_gaps ?? []).filter((g) => g.trim() && !isLiveLayerGap(g)));
+  const liveGaps = $derived((data?.data_gaps ?? []).filter((g) => isLiveLayerGap(g)));
+  const sandboxGap = $derived(shopGaps.find(isSandboxGap) || '');
+  const duffelFailedGap = $derived(shopGaps.find(isDuffelFailedGap) || '');
+  const shopNotes = $derived(shopGaps.filter((g) => g !== sandboxGap && g !== duffelFailedGap));
   const roundTrip = $derived(Boolean(data?.query.return_date));
   const lists = $derived(data?.channels.filter((c) => c.kind !== 'hidden-city') ?? []);
   const listedCount = $derived(lists.reduce((n, c) => n + c.offers.length, 0));
@@ -173,6 +254,20 @@
     if (self?.price == null) return false;
     const honest = data?.honest_pick?.offer.price;
     return honest == null || self.price < honest;
+  });
+  const hasPriced = $derived(
+    Boolean(data?.honest_pick || data?.best_pick || data?.hidden_if_cheaper || listedCount || showSelf)
+  );
+  const emptyFlightsReason = $derived.by(() => {
+    if (!data || hasPriced) return '';
+    if (noShop) return 'No priced flights here — this app is not connected to a fare shop.';
+    if (duffelFailedGap) return duffelFailedGap;
+    const empty = shopGaps.find(isEmptyMarketGap);
+    if (empty) return empty;
+    if (sandboxGap) {
+      return 'No live fares in this result. The Duffel key is sandbox; live_mode=false offers are dropped.';
+    }
+    return 'No priced flight on this city pair for that date. Try another date or nearby airports.';
   });
 
   const hiddenSaving = $derived.by(() => {
@@ -256,13 +351,31 @@
     <p class="empty">{error}</p>
   {:else if data}
     <header class="results-head">
-      <h1>{data.origin.city} → {data.destination.city}</h1>
-      <p class="meta">
-        {data.origin.type === 'city' ? `${data.origin.city} (all)` : data.origin.iata}–{data.destination.type === 'city'
-          ? `${data.destination.city} (all)`
-          : data.destination.iata} · {data.query.date}{data.query.return_date ? `–${data.query.return_date}` : ''}
-        · {data.query.adults} adult{data.query.adults === 1 ? '' : 's'}
-      </p>
+      <div class="results-head-row">
+        <div>
+          <h1>{data.origin.city} → {data.destination.city}</h1>
+          <p class="meta">
+            {data.origin.type === 'city' ? `${data.origin.city} (all)` : data.origin.iata}–{data.destination.type === 'city'
+              ? `${data.destination.city} (all)`
+              : data.destination.iata} · {data.query.date}{data.query.return_date ? `–${data.query.return_date}` : ''}
+            · {data.query.adults} adult{data.query.adults === 1 ? '' : 's'}
+          </p>
+        </div>
+        <button
+          class="ghost"
+          type="button"
+          onclick={recheckSearch}
+          disabled={rechecking || deepPending.length > 0 || deepSelf}
+        >
+          {rechecking ? 'Rechecking…' : 'Recheck this search'}
+        </button>
+      </div>
+      {#if data.search_debug?.cache}
+        <p class="meta cache-line">
+          <span class="chip">{data.search_debug.cache}</span>
+          {cacheNote(data.search_debug.cache)}
+        </p>
+      {/if}
     </header>
 
     {#if sandboxGap}
@@ -271,6 +384,15 @@
       <p class="banner">
         No fare-shop keys are configured, so this app cannot price a ticket.
       </p>
+    {:else if duffelFailedGap}
+      <p class="banner">{duffelFailedGap}</p>
+    {/if}
+    {#if shopNotes.length}
+      <div class="shop-gaps">
+        {#each shopNotes as gap}
+          <p class="note">{gap}</p>
+        {/each}
+      </div>
     {/if}
 
     {#if deepPending.length}
@@ -352,12 +474,8 @@
       <HiddenCityCard match={data.hidden_if_cheaper} names={names} />
     {/if}
 
-    {#if !data.honest_pick && !data.best_pick && !data.hidden_if_cheaper && !showSelf && !listedCount}
-      <p class="empty">
-        {noShop
-          ? 'No priced flights here — this app is not connected to a fare shop.'
-          : 'No priced flight on this city pair for that date. Try another date or nearby airports.'}
-      </p>
+    {#if !hasPriced && emptyFlightsReason && !sandboxGap && !noShop && !duffelFailedGap && !shopGaps.some(isEmptyMarketGap)}
+      <p class="empty">{emptyFlightsReason}</p>
     {/if}
 
     {#if confirms.length}
@@ -420,7 +538,7 @@
           <p class="empty">No flight matches that stop filter.</p>
         {/if}
       {:else}
-        <p class="empty">No priced flights on this city pair for that date.</p>
+        <p class="empty">{emptyFlightsReason || 'No priced flights on this city pair for that date.'}</p>
       {/if}
     {:else if tab === 'hidden'}
       <p class="note">
@@ -442,18 +560,57 @@
         </p>
       {/if}
     {:else if tab === 'live'}
+      {#if liveGaps.length}
+        <div class="shop-gaps">
+          {#each liveGaps as gap}
+            <p class="note">{gap}</p>
+          {/each}
+        </div>
+      {/if}
       <TrafficPanel traffic={data.traffic_origin} label={data.origin.city} />
       <TrafficPanel traffic={data.traffic_destination} label={data.destination.city} />
+      {#if data.board_origin?.length}
+        <h2 class="section-title">FIDS board ({data.origin.iata})</h2>
+        <p class="note">Scheduled / estimated / actual — not a fare.</p>
+        <table class="mini">
+          <thead>
+            <tr>
+              <th>Flight</th>
+              <th>To</th>
+              <th>Scheduled</th>
+              <th>Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            {#each data.board_origin.slice(0, 12) as f}
+              <tr>
+                <td class="mono">{f.flight_number}</td>
+                <td>{f.dest || '—'}</td>
+                <td>{f.scheduled || f.estimated || '—'}</td>
+                <td>{f.status || '—'}</td>
+              </tr>
+            {/each}
+          </tbody>
+        </table>
+      {/if}
     {:else if tab === 'debug'}
       <p class="note">
         Hidden-city means a complete ticket continues past your city. We never turn that ticket into a fake local fare.
       </p>
+      {#if data.data_gaps.length}
+        <h2 class="section-title">Shop notes (data_gaps)</h2>
+        {#each data.data_gaps as gap}
+          <p class="note">{gap}</p>
+        {/each}
+      {/if}
       {#if data.search_debug}
         <h2 class="section-title">Search planner</h2>
         <p class="note">
           Providers: {data.search_debug.providers.join(', ') || 'none'} · Standard query:
           {data.search_debug.standard_query} · Pass: {data.search_debug.mode ?? 'fast'} · Cache: {data.search_debug.cache}
           · Reused offers: {data.search_debug.reused_from_index ?? 0}
+          {data.search_debug.reused_honest ? ' · Honest A→B reused (<60s live index)' : ''}
+          {data.search_debug.fx_live === false ? ' · FX unverified; non-USD omitted' : ''}
           · Paid supplier calls: {data.search_debug.provider_calls ?? 0}
           (${(data.search_debug.provider_cost_usd ?? 0).toFixed(3)})
         </p>
@@ -470,8 +627,9 @@
           <h2 class="section-title">Candidate destinations</h2>
           <p class="note">
             Score = 0.30 connection + 0.25 savings probability + 0.20 expected saving + 0.10 freshness + 0.10 hub + 0.05 supplier.
-            Learned from tickets we actually priced; nothing here is a summed leg price.
+            stats / edges / index are tickets this app priced. openflights is a frozen 2014–2017 prior, not a timetable.
           </p>
+          <div class="table-scroll">
           <table class="cand">
             <thead>
               <tr>
@@ -493,6 +651,7 @@
               {/each}
             </tbody>
           </table>
+          </div>
         {/if}
         {#each data.search_debug.rejected as row}
           <p class="note">{row}</p>
@@ -505,6 +664,20 @@
 </div>
 
 <style>
+  .results-head-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px 16px;
+  }
+  .cache-line {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    margin: 8px 0 0;
+  }
   .toolbar {
     display: flex;
     flex-wrap: wrap;
@@ -513,12 +686,19 @@
   }
   .seg-ctl {
     display: inline-flex;
+    max-width: 100%;
     border: 1px solid var(--line);
     border-radius: 999px;
-    overflow: hidden;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
     background: var(--surface);
   }
+  .seg-ctl::-webkit-scrollbar {
+    display: none;
+  }
   .seg-ctl button {
+    flex: 0 0 auto;
     border: 0;
     background: transparent;
     color: var(--muted);
@@ -541,8 +721,22 @@
     border: 1px dashed var(--line-2);
     border-radius: 10px;
   }
+  .shop-gaps {
+    margin: 8px 0 6px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .shop-gaps .note {
+    margin: 0;
+    padding: 8px 12px;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    background: var(--surface);
+  }
   .cand {
     width: 100%;
+    min-width: 640px;
     border-collapse: collapse;
     font-size: 0.85rem;
     margin: 8px 0 16px;

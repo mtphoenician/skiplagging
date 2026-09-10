@@ -75,9 +75,14 @@ pub fn assess(
         why: "Carrier contracts of carriage may allow cancellation, repricing, refusal of carriage or fare-difference collection when a passenger does not complete the ticketed itinerary.".into(),
     });
 
-    let gross = ((local.price.unwrap_or(0.0) - through.price.unwrap_or(0.0)).max(0.0) * 100.0).round()
+    let gross = ((local.price.unwrap_or(0.0) - through.price.unwrap_or(0.0)).max(0.0) * 100.0)
+        .round()
         / 100.0;
-    let extra_fees = if through.bags_included == 0 { 18.0 } else { 0.0 };
+    let extra_fees = if through.bags_included == 0 {
+        18.0
+    } else {
+        0.0
+    };
     let mut disruption = (gross * 0.22).min(local.price.unwrap_or(0.0) * 0.18);
     disruption = (disruption * 100.0).round() / 100.0;
     let mut enforcement = ((gross * 0.12).min(80.0) * 100.0).round() / 100.0;
@@ -135,13 +140,15 @@ pub fn attach_risk(
     hidden_country: &str,
     exit_segment_index: i32,
 ) -> HiddenCityMatch {
-    let mut first_match = !local.first_flight.is_empty() && local.first_flight == through.first_flight;
+    let mut first_match =
+        !local.first_flight.is_empty() && local.first_flight == through.first_flight;
     if !first_match && !local.segments.is_empty() && !through.segments.is_empty() {
         first_match = local.segments[0].origin == through.segments[0].origin
             && local.segments[0].dest == through.segments[0].dest
             && local.segments[0].carrier == through.segments[0].carrier;
     }
-    let gross = ((local.price.unwrap_or(0.0) - through.price.unwrap_or(0.0)) * 100.0).round() / 100.0;
+    let gross =
+        ((local.price.unwrap_or(0.0) - through.price.unwrap_or(0.0)) * 100.0).round() / 100.0;
     let pct = if let Some(lp) = local.price {
         if lp != 0.0 {
             (100.0 * gross / lp * 10.0).round() / 10.0
@@ -161,12 +168,22 @@ pub fn attach_risk(
         gross_saving: gross,
         saving_pct: pct,
         currency: through.currency.clone(),
-        risk: assess(local, through, hidden_city, true_dest, origin_country, hidden_country),
+        risk: assess(
+            local,
+            through,
+            hidden_city,
+            true_dest,
+            origin_country,
+            hidden_country,
+        ),
         bookers: vec![],
         ticketed_destination: ticketed_destination(through),
         intended_destination: true_dest.to_uppercase(),
         exit_segment_index,
-        warnings: HIDDEN_CITY_WARNINGS.iter().map(|s| (*s).to_string()).collect(),
+        warnings: HIDDEN_CITY_WARNINGS
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect(),
         result_type: "hidden_city".into(),
     }
 }

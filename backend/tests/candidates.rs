@@ -6,9 +6,11 @@ use chrono::{Duration, TimeZone, Utc};
 use skiplagging::budget::{provider_score, start_ledger, timed_shop, Ledger, LEDGER};
 use skiplagging::engines::candidates::{
     expected_value, freshness, hub_probabilities, is_dead, rank_candidates, score_candidate,
-    select_candidates, Candidate, RouteStat, COLD_START_PROBES, DEAD_AFTER_CHECKS, WEIGHTS,
+    select_candidates, source_priority, Candidate, RouteStat, COLD_START_PROBES, DEAD_AFTER_CHECKS,
+    LEARNED_HUB, OPENFLIGHTS_HUB, WEIGHTS,
 };
 use skiplagging::engines::learn::{build_batch, merge_savings, summarize_savings};
+use skiplagging::engines::shop::{_self_transfer_hub_cap, hidden_probe_budget};
 use skiplagging::models::{Offer, Segment};
 use skiplagging::providers::mock::jfk_ord_roundtrip;
 
@@ -23,7 +25,14 @@ fn now() -> chrono::DateTime<Utc> {
 }
 
 fn seg(o: &str, d: &str, flight: &str, carrier: &str) -> Segment {
-    let mut s = seg_carrier(o, d, "2026-10-10T08:00", "2026-10-10T10:00", flight, carrier);
+    let mut s = seg_carrier(
+        o,
+        d,
+        "2026-10-10T08:00",
+        "2026-10-10T10:00",
+        flight,
+        carrier,
+    );
     s.duration_min = 120;
     s
 }
@@ -50,25 +59,40 @@ fn priced(oid: &str, price: f64, segs: Vec<Segment>, currency: &str, source: &st
 }
 
 fn jfk_ord_batch(probed: &[&str]) -> skiplagging::engines::learn::LearnBatch {
-    let honest = priced("aa", 240.0, vec![seg("JFK", "ORD", "AA100", "AA")], "USD", "duffel");
+    let honest = priced(
+        "aa",
+        240.0,
+        vec![seg("JFK", "ORD", "AA100", "AA")],
+        "USD",
+        "duffel",
+    );
     let den = priced(
         "den",
         170.0,
-        vec![seg("JFK", "ORD", "UA200", "UA"), seg("ORD", "DEN", "UA300", "UA")],
+        vec![
+            seg("JFK", "ORD", "UA200", "UA"),
+            seg("ORD", "DEN", "UA300", "UA"),
+        ],
         "USD",
         "duffel",
     );
     let sea = priced(
         "sea",
         300.0,
-        vec![seg("JFK", "ORD", "AS400", "AS"), seg("ORD", "SEA", "AS500", "AS")],
+        vec![
+            seg("JFK", "ORD", "AS400", "AS"),
+            seg("ORD", "SEA", "AS500", "AS"),
+        ],
         "USD",
         "duffel",
     );
     let lax = priced(
         "lax",
         150.0,
-        vec![seg("JFK", "DFW", "AA600", "AA"), seg("DFW", "LAX", "AA700", "AA")],
+        vec![
+            seg("JFK", "DFW", "AA600", "AA"),
+            seg("DFW", "LAX", "AA700", "AA"),
+        ],
         "USD",
         "duffel",
     );
@@ -205,7 +229,7 @@ fn ranking_prefers_learned_history_over_hub_list() {
         &hs(&["ORD"]),
         &stats,
         &pool,
-        &hub_probabilities(&hs(&["ORD"]), &route_map),
+        &hub_probabilities(&hs(&["ORD"]), &route_map, &hs(&["DEN", "SEA", "MIA"])),
         &HashMap::from([("DEN".into(), 0.9)]),
         Some(now()),
     );
@@ -215,6 +239,39 @@ fn ranking_prefers_learned_history_over_hub_list() {
     let phx = ranked.iter().find(|c| c.code == "PHX").unwrap();
     assert!(bos.score > phx.score);
     assert!(ranked.iter().all(|c| c.code != "JFK" && c.code != "ORD"));
+}
+
+#[test]
+fn openflights_hub_is_a_prior_not_a_timetable() {
+    let of = HashMap::from([("ORD".into(), hs(&["BOS", "DEN"]))]);
+    let hub = hub_probabilities(&hs(&["ORD"]), &of, &hs(&["DEN"]));
+    assert_eq!(hub["BOS"], OPENFLIGHTS_HUB);
+    assert_eq!(hub["DEN"], LEARNED_HUB);
+    assert!(LEARNED_HUB > OPENFLIGHTS_HUB);
+}
+
+#[test]
+fn learned_edges_rank_above_openflights_without_stats() {
+    let pool = HashMap::from([
+        ("DEN".into(), "edges".into()),
+        ("BOS".into(), "openflights".into()),
+        ("ABQ".into(), "openflights".into()),
+    ]);
+    let of = HashMap::from([("ORD".into(), hs(&["BOS", "ABQ"]))]);
+    let ranked = rank_candidates(
+        "JFK",
+        &hs(&["ORD"]),
+        &HashMap::new(),
+        &pool,
+        &hub_probabilities(&hs(&["ORD"]), &of, &hs(&["DEN"])),
+        &HashMap::new(),
+        Some(now()),
+    );
+    assert_eq!(ranked[0].code, "DEN");
+    assert_eq!(ranked[0].source, "edges");
+    let bos = ranked.iter().find(|c| c.code == "BOS").unwrap();
+    assert!(ranked[0].score > bos.score);
+    assert!(source_priority("edges") > source_priority("openflights"));
 }
 
 #[test]
@@ -235,9 +292,9 @@ fn selection_threshold_and_cold_start() {
     let chosen = select_candidates(&mut ranked, 8, 0.35, COLD_START_PROBES, &HashSet::new());
     assert_eq!(
         chosen.iter().map(|c| c.code.as_str()).collect::<Vec<_>>(),
-        ["DEN", "SEA", "PHX"]
+        ["DEN", "SEA"]
     );
-    assert!(ranked[0].selected && ranked[1].selected && ranked[2].selected && !ranked[3].selected);
+    assert!(ranked[0].selected && ranked[1].selected && !ranked[2].selected);
 
     let mut cold: Vec<_> = ["DEN", "SEA", "SFO", "LAX"]
         .iter()
@@ -285,8 +342,12 @@ fn learner_records_every_fare_and_flight_edge() {
     assert_eq!(den.connections, ["ORD"]);
     assert_eq!(den.price, 170.0);
     assert_eq!(den.expires_at.as_deref(), Some("2026-09-08T12:30:00Z"));
-    assert!(batch.edges.contains_key(&("JFK".into(), "ORD".into(), "UA".into(), "UA200".into())));
-    assert!(batch.edges.contains_key(&("ORD".into(), "DEN".into(), "UA".into(), "UA300".into())));
+    assert!(batch
+        .edges
+        .contains_key(&("JFK".into(), "ORD".into(), "UA".into(), "UA200".into())));
+    assert!(batch
+        .edges
+        .contains_key(&("ORD".into(), "DEN".into(), "UA".into(), "UA300".into())));
     let edge = &batch.edges[&("JFK".into(), "ORD".into(), "UA".into(), "UA200".into())];
     assert!(edge.travel_dates.contains("2026-10-10"));
 }
@@ -299,7 +360,10 @@ fn learner_scores_probes_success_and_savings() {
     assert_eq!(den.successful_connections, 1);
     assert_eq!(den.cheaper_than_direct_count, 1);
     assert_eq!(den.savings, [70.0]);
-    assert_eq!(den.saving_pcts, [((100.0 * 70.0 / 240.0) * 100.0_f64).round() / 100.0]);
+    assert_eq!(
+        den.saving_pcts,
+        [((100.0 * 70.0 / 240.0) * 100.0_f64).round() / 100.0]
+    );
     assert_eq!(den.best_through_price, Some(170.0));
     let sea = &batch.stats[&("JFK".into(), "ORD".into(), "SEA".into())];
     assert_eq!(sea.observations, 1);
@@ -328,18 +392,31 @@ fn learner_counts_index_hits_without_double_counting_probes() {
 
 #[test]
 fn learner_converts_gbp_and_ignores_offers_from_other_origins() {
-    let honest = priced("aa", 240.0, vec![seg("JFK", "ORD", "AA100", "AA")], "USD", "duffel");
+    skiplagging::fx::mark_rates_trusted();
+    let honest = priced(
+        "aa",
+        240.0,
+        vec![seg("JFK", "ORD", "AA100", "AA")],
+        "USD",
+        "duffel",
+    );
     let gbp = priced(
         "gbp",
         80.0,
-        vec![seg("JFK", "ORD", "BA1", "BA"), seg("ORD", "DEN", "BA2", "BA")],
+        vec![
+            seg("JFK", "ORD", "BA1", "BA"),
+            seg("ORD", "DEN", "BA2", "BA"),
+        ],
         "GBP",
         "duffel",
     );
     let other = priced(
         "ewr",
         90.0,
-        vec![seg("EWR", "ORD", "UA9", "UA"), seg("ORD", "DEN", "UA10", "UA")],
+        vec![
+            seg("EWR", "ORD", "UA9", "UA"),
+            seg("ORD", "DEN", "UA10", "UA"),
+        ],
         "USD",
         "duffel",
     );
@@ -360,8 +437,12 @@ fn learner_converts_gbp_and_ignores_offers_from_other_origins() {
     let den = &batch.stats[&("JFK".into(), "ORD".into(), "DEN".into())];
     assert_eq!(den.successful_connections, 1);
     assert_eq!(den.cheaper_than_direct_count, 1);
-    assert!(batch.stats.contains_key(&("JFK".into(), "ORD".into(), "DEN".into())));
-    assert!(!batch.stats.contains_key(&("EWR".into(), "ORD".into(), "DEN".into())));
+    assert!(batch
+        .stats
+        .contains_key(&("JFK".into(), "ORD".into(), "DEN".into())));
+    assert!(!batch
+        .stats
+        .contains_key(&("EWR".into(), "ORD".into(), "DEN".into())));
     let uids: HashSet<_> = batch.fares.iter().map(|f| f.offer_uid.as_str()).collect();
     assert_eq!(uids, HashSet::from(["aa", "gbp"]));
     assert!(batch.fares.iter().all(|f| f.currency == "USD"));
@@ -396,44 +477,37 @@ fn learner_round_trip_ticketed_is_outbound_dest() {
     let fare = &batch.fares[0];
     assert_eq!(fare.ticketed, "ORD");
     assert!(fare.connections.is_empty());
-    assert!(!batch.edges.contains_key(&("ORD".into(), "JFK".into(), "AA".into(), "AA101".into())));
+    assert!(!batch
+        .edges
+        .contains_key(&("ORD".into(), "JFK".into(), "AA".into(), "AA101".into())));
     assert!(batch.stats.is_empty());
 }
 
 #[tokio::test]
 async fn ledger_records_paid_calls_and_free_mock() {
     let ledger = start_ledger(0.005, 12);
-    let sample = priced("x", 1.0, vec![seg("JFK", "ORD", "AA1", "AA")], "USD", "duffel");
+    let sample = priced(
+        "x",
+        1.0,
+        vec![seg("JFK", "ORD", "AA1", "AA")],
+        "USD",
+        "duffel",
+    );
     LEDGER
         .scope(ledger.clone(), async {
-            let got = timed_shop(
-                "duffel",
-                "JFK",
-                "DEN",
-                "2026-10-10",
-                "expand",
-                async { Ok::<_, String>(vec![sample.clone()]) },
-            )
+            let got = timed_shop("duffel", "JFK", "DEN", "2026-10-10", "expand", async {
+                Ok::<_, String>(vec![sample.clone()])
+            })
             .await;
             assert_eq!(got.len(), 1);
-            let boom = timed_shop(
-                "duffel",
-                "JFK",
-                "SEA",
-                "2026-10-10",
-                "expand",
-                async { Err::<Vec<Offer>, String>("supplier down".into()) },
-            )
+            let boom = timed_shop("duffel", "JFK", "SEA", "2026-10-10", "expand", async {
+                Err::<Vec<Offer>, String>("supplier down".into())
+            })
             .await;
             assert!(boom.is_empty());
-            let mock = timed_shop(
-                "mock",
-                "JFK",
-                "ORD",
-                "2026-10-10",
-                "direct",
-                async { Ok::<_, String>(vec![sample]) },
-            )
+            let mock = timed_shop("mock", "JFK", "ORD", "2026-10-10", "direct", async {
+                Ok::<_, String>(vec![sample])
+            })
             .await;
             assert!(!mock.is_empty());
         })
@@ -441,33 +515,33 @@ async fn ledger_records_paid_calls_and_free_mock() {
     assert_eq!(ledger.calls().len(), 3);
     assert_eq!(ledger.paid().len(), 2);
     assert_eq!(ledger.total_cost(), 0.01);
-    let failed = ledger.calls().into_iter().find(|c| c.dest == "SEA").unwrap();
+    let failed = ledger
+        .calls()
+        .into_iter()
+        .find(|c| c.dest == "SEA")
+        .unwrap();
     assert!(!failed.ok && failed.offers == 0);
 }
 
 #[tokio::test]
 async fn ledger_caps_paid_calls() {
     let ledger = start_ledger(0.005, 1);
-    let sample = priced("x", 1.0, vec![seg("JFK", "ORD", "AA1", "AA")], "USD", "duffel");
+    let sample = priced(
+        "x",
+        1.0,
+        vec![seg("JFK", "ORD", "AA1", "AA")],
+        "USD",
+        "duffel",
+    );
     LEDGER
         .scope(ledger.clone(), async {
-            let first = timed_shop(
-                "duffel",
-                "JFK",
-                "DEN",
-                "2026-10-10",
-                "expand",
-                async { Ok::<_, String>(vec![sample.clone()]) },
-            )
+            let first = timed_shop("duffel", "JFK", "DEN", "2026-10-10", "expand", async {
+                Ok::<_, String>(vec![sample.clone()])
+            })
             .await;
-            let second = timed_shop(
-                "duffel",
-                "JFK",
-                "SEA",
-                "2026-10-10",
-                "expand",
-                async { Ok::<_, String>(vec![sample]) },
-            )
+            let second = timed_shop("duffel", "JFK", "SEA", "2026-10-10", "expand", async {
+                Ok::<_, String>(vec![sample])
+            })
             .await;
             assert_eq!(first.len(), 1);
             assert!(second.is_empty());
@@ -479,7 +553,13 @@ async fn ledger_caps_paid_calls() {
 #[tokio::test]
 async fn ledger_caps_concurrent_paid_calls() {
     let ledger = start_ledger(0.005, 2);
-    let sample = priced("x", 1.0, vec![seg("JFK", "ORD", "AA1", "AA")], "USD", "duffel");
+    let sample = priced(
+        "x",
+        1.0,
+        vec![seg("JFK", "ORD", "AA1", "AA")],
+        "USD",
+        "duffel",
+    );
     LEDGER
         .scope(ledger.clone(), async {
             let ok = || {
@@ -494,7 +574,10 @@ async fn ledger_caps_concurrent_paid_calls() {
                 timed_shop("duffel", "JFK", "BBB", "2026-10-10", "direct", ok()),
                 timed_shop("duffel", "JFK", "CCC", "2026-10-10", "direct", ok()),
             );
-            let n = [parts.0, parts.1, parts.2].iter().filter(|p| !p.is_empty()).count();
+            let n = [parts.0, parts.1, parts.2]
+                .iter()
+                .filter(|p| !p.is_empty())
+                .count();
             assert_eq!(n, 2);
         })
         .await;
@@ -507,4 +590,80 @@ fn provider_score_rewards_hits_and_penalises_latency() {
     assert!(provider_score(9, 10, 800.0) > provider_score(5, 10, 800.0));
     assert!(provider_score(9, 10, 800.0) > provider_score(9, 10, 2500.0));
     assert_eq!(Ledger::default().total_cost(), 0.0);
+}
+
+#[test]
+fn live_search_floors_cs_and_calls() {
+    let mut settings = skiplagging::config::Settings::load();
+    settings.duffel_token = "duffel_live_x".into();
+    settings.fast_candidates = 3;
+    settings.max_hidden_candidates = 8;
+    settings.max_provider_calls = 12;
+    assert_eq!(settings.search_fast_candidates(), 5);
+    assert_eq!(settings.search_hidden_candidates(), 12);
+    assert_eq!(settings.search_call_cap(), 20);
+
+    settings.fast_candidates = 9;
+    settings.max_hidden_candidates = 15;
+    settings.max_provider_calls = 30;
+    assert_eq!(settings.search_fast_candidates(), 9);
+    assert_eq!(settings.search_hidden_candidates(), 15);
+    assert_eq!(settings.search_call_cap(), 30);
+
+    settings.duffel_token = "duffel_test_x".into();
+    settings.fast_candidates = 3;
+    settings.max_hidden_candidates = 8;
+    settings.max_provider_calls = 12;
+    assert_eq!(settings.search_fast_candidates(), 3);
+    assert_eq!(settings.search_hidden_candidates(), 8);
+    assert_eq!(settings.search_call_cap(), 12);
+}
+
+#[test]
+fn deep_c_budget_is_twelve_total_not_five_plus_twelve() {
+    assert_eq!(hidden_probe_budget("fast", 0, 5, 12), 5);
+    assert_eq!(hidden_probe_budget("deep", 5, 5, 12), 7);
+    assert_eq!(hidden_probe_budget("deep", 12, 5, 12), 0);
+    assert_eq!(hidden_probe_budget("deep", 0, 5, 12), 12);
+}
+
+#[test]
+fn self_transfer_leaves_room_for_cs() {
+    assert_eq!(_self_transfer_hub_cap("fast", 19, 5), 2);
+    assert_eq!(_self_transfer_hub_cap("fast", 6, 5), 0);
+    assert_eq!(_self_transfer_hub_cap("deep", 20, 7), 3);
+}
+
+#[tokio::test]
+async fn expand_cannot_spend_the_held_honest_slot() {
+    let ledger = start_ledger(0.005, 2);
+    ledger.hold_direct_slot();
+    let sample = priced(
+        "x",
+        1.0,
+        vec![seg("JFK", "ORD", "AA1", "AA")],
+        "USD",
+        "duffel",
+    );
+    LEDGER
+        .scope(ledger.clone(), async {
+            let expand = timed_shop("duffel", "JFK", "DEN", "2026-10-10", "expand", async {
+                Ok::<_, String>(vec![sample.clone()])
+            })
+            .await;
+            let expand2 = timed_shop("duffel", "JFK", "SEA", "2026-10-10", "expand", async {
+                Ok::<_, String>(vec![sample.clone()])
+            })
+            .await;
+            let direct = timed_shop("duffel", "JFK", "ORD", "2026-10-10", "direct", async {
+                Ok::<_, String>(vec![sample])
+            })
+            .await;
+            assert_eq!(expand.len(), 1);
+            assert!(expand2.is_empty());
+            assert_eq!(direct.len(), 1);
+        })
+        .await;
+    assert!(ledger.has_paid_direct());
+    assert_eq!(ledger.paid().len(), 2);
 }

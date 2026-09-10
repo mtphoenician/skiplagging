@@ -177,14 +177,17 @@ pub fn build_batch(
                 seg.carrier.to_uppercase(),
                 seg.flight_number.clone(),
             );
-            let edge = batch.edges.entry(key.clone()).or_insert_with(|| EdgeObservation {
-                origin: key.0,
-                dest: key.1,
-                carrier: key.2,
-                flight_number: key.3,
-                count: 0,
-                travel_dates: HashSet::new(),
-            });
+            let edge = batch
+                .edges
+                .entry(key.clone())
+                .or_insert_with(|| EdgeObservation {
+                    origin: key.0,
+                    dest: key.1,
+                    carrier: key.2,
+                    flight_number: key.3,
+                    count: 0,
+                    travel_dates: HashSet::new(),
+                });
             edge.count += 1;
             edge.travel_dates.insert(date.to_string());
         }

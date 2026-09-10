@@ -8,18 +8,12 @@ use skiplagging::engines::shop::{
     _route_pairs, _via_b, layover_minutes, pick_best, pick_honest, shop_tokens,
 };
 use skiplagging::models::{Offer, Segment};
-use skiplagging::providers::duffel::{offer_request_body, DUFFEL_MAX_CONNECTIONS, _dur};
+use skiplagging::providers::duffel::{_dur, offer_request_body, DUFFEL_MAX_CONNECTIONS};
 use skiplagging::providers::mock::jfk_ord_roundtrip;
 
 use common::{city, hc_match, offer, offer_full, seg, shop_req};
 
-fn connect(
-    oid: &str,
-    price: f64,
-    a: Segment,
-    b: Segment,
-    stops: i32,
-) -> Offer {
+fn connect(oid: &str, price: f64, a: Segment, b: Segment, stops: i32) -> Offer {
     offer(oid, Some(price), vec![a, b], stops)
 }
 
@@ -28,13 +22,25 @@ fn pick_prefers_cheapest_nonstop_over_dearer_connecting() {
     let cheap = offer(
         "n1",
         Some(200.0),
-        vec![seg("LHR", "JFK", "2026-10-22T08:00", "2026-10-22T11:00", "BA1")],
+        vec![seg(
+            "LHR",
+            "JFK",
+            "2026-10-22T08:00",
+            "2026-10-22T11:00",
+            "BA1",
+        )],
         0,
     );
     let dear = offer(
         "n2",
         Some(400.0),
-        vec![seg("LHR", "JFK", "2026-10-22T09:00", "2026-10-22T12:00", "BA1")],
+        vec![seg(
+            "LHR",
+            "JFK",
+            "2026-10-22T09:00",
+            "2026-10-22T12:00",
+            "BA1",
+        )],
         0,
     );
     let connect = connect(
@@ -55,7 +61,13 @@ fn pick_prefers_cheaper_connecting_over_nonstop() {
     let nonstop = offer(
         "n1",
         Some(400.0),
-        vec![seg("LHR", "JFK", "2026-10-22T08:00", "2026-10-22T11:00", "BA1")],
+        vec![seg(
+            "LHR",
+            "JFK",
+            "2026-10-22T08:00",
+            "2026-10-22T11:00",
+            "BA1",
+        )],
         0,
     );
     let connect = connect(
@@ -99,7 +111,13 @@ fn assess_none_local_price_does_not_raise() {
     let local = offer(
         "n",
         None,
-        vec![seg("JFK", "ORD", "2026-10-10T08:00", "2026-10-10T10:00", "BA1")],
+        vec![seg(
+            "JFK",
+            "ORD",
+            "2026-10-10T08:00",
+            "2026-10-10T10:00",
+            "BA1",
+        )],
         0,
     );
     let through = connect(
@@ -118,7 +136,13 @@ fn international_docs_risk_when_countries_differ() {
     let local = offer(
         "n",
         Some(400.0),
-        vec![seg("JFK", "LHR", "2026-10-10T08:00", "2026-10-10T20:00", "BA1")],
+        vec![seg(
+            "JFK",
+            "LHR",
+            "2026-10-10T08:00",
+            "2026-10-10T20:00",
+            "BA1",
+        )],
         0,
     );
     let through = connect(
@@ -165,16 +189,29 @@ fn pick_same_price_prefers_shorter_layover() {
 
 #[test]
 fn pick_converts_foreign_currency_to_usd() {
+    skiplagging::fx::mark_rates_trusted();
     let usd = offer(
         "n1",
         Some(400.0),
-        vec![seg("LHR", "JFK", "2026-10-22T08:00", "2026-10-22T11:00", "BA1")],
+        vec![seg(
+            "LHR",
+            "JFK",
+            "2026-10-22T08:00",
+            "2026-10-22T11:00",
+            "BA1",
+        )],
         0,
     );
     let gbp = offer_full(
         "n2",
         Some(80.0),
-        vec![seg("LHR", "JFK", "2026-10-22T09:00", "2026-10-22T12:00", "BA1")],
+        vec![seg(
+            "LHR",
+            "JFK",
+            "2026-10-22T09:00",
+            "2026-10-22T12:00",
+            "BA1",
+        )],
         0,
         "GBP",
         "duffel",
@@ -188,17 +225,68 @@ fn pick_converts_foreign_currency_to_usd() {
 }
 
 #[test]
+fn untrusted_gbp_is_not_ranked_on_fallback() {
+    skiplagging::fx::with_untrusted_rates(|| {
+        let usd = offer(
+            "n1",
+            Some(240.0),
+            vec![seg(
+                "JFK",
+                "ORD",
+                "2026-10-22T08:00",
+                "2026-10-22T10:00",
+                "AA1",
+            )],
+            0,
+        );
+        let gbp = offer_full(
+            "n2",
+            Some(170.0),
+            vec![seg(
+                "LHR",
+                "JFK",
+                "2026-10-22T09:00",
+                "2026-10-22T12:00",
+                "BA1",
+            )],
+            0,
+            "GBP",
+            "duffel",
+            Some(true),
+            None,
+        );
+        let pick = pick_honest(&[usd, gbp], &[], Some("USD")).unwrap();
+        assert_eq!(pick.offer.id, "n1");
+        assert_eq!(pick.offer.currency, "USD");
+        assert_eq!(pick.offer.price, Some(240.0));
+    });
+}
+
+#[test]
 fn pick_uses_requested_currency_when_present() {
+    skiplagging::fx::mark_rates_trusted();
     let usd = offer(
         "n1",
         Some(400.0),
-        vec![seg("LHR", "JFK", "2026-10-22T08:00", "2026-10-22T11:00", "BA1")],
+        vec![seg(
+            "LHR",
+            "JFK",
+            "2026-10-22T08:00",
+            "2026-10-22T11:00",
+            "BA1",
+        )],
         0,
     );
     let gbp = offer_full(
         "n2",
         Some(80.0),
-        vec![seg("LHR", "JFK", "2026-10-22T09:00", "2026-10-22T12:00", "BA1")],
+        vec![seg(
+            "LHR",
+            "JFK",
+            "2026-10-22T09:00",
+            "2026-10-22T12:00",
+            "BA1",
+        )],
         0,
         "GBP",
         "duffel",
@@ -216,7 +304,13 @@ fn hidden_only_when_cheaper_than_honest_pick() {
         &[offer(
             "n1",
             Some(300.0),
-            vec![seg("LHR", "BOS", "2026-10-22T08:00", "2026-10-22T11:00", "BA1")],
+            vec![seg(
+                "LHR",
+                "BOS",
+                "2026-10-22T08:00",
+                "2026-10-22T11:00",
+                "BA1",
+            )],
             0,
         )],
         &[],
@@ -248,11 +342,18 @@ fn hidden_only_when_cheaper_than_honest_pick() {
 
 #[test]
 fn hidden_shown_when_converted_price_is_cheaper() {
+    skiplagging::fx::mark_rates_trusted();
     let honest = pick_honest(
         &[offer(
             "n1",
             Some(300.0),
-            vec![seg("LHR", "BOS", "2026-10-22T08:00", "2026-10-22T11:00", "BA1")],
+            vec![seg(
+                "LHR",
+                "BOS",
+                "2026-10-22T08:00",
+                "2026-10-22T11:00",
+                "BA1",
+            )],
             0,
         )],
         &[],
@@ -272,16 +373,27 @@ fn hidden_shown_when_converted_price_is_cheaper() {
         Some(true),
         None,
     );
-    assert!(_hidden_if_cheaper(&[hc_match("m1", gbp_through, honest.offer.clone(), 220.0)], Some(&honest)).is_some());
+    assert!(_hidden_if_cheaper(
+        &[hc_match("m1", gbp_through, honest.offer.clone(), 220.0)],
+        Some(&honest)
+    )
+    .is_some());
 }
 
 #[test]
 fn hidden_not_shown_when_converted_price_is_not_cheaper() {
+    skiplagging::fx::mark_rates_trusted();
     let honest = pick_honest(
         &[offer(
             "n1",
             Some(300.0),
-            vec![seg("LHR", "BOS", "2026-10-22T08:00", "2026-10-22T11:00", "BA1")],
+            vec![seg(
+                "LHR",
+                "BOS",
+                "2026-10-22T08:00",
+                "2026-10-22T11:00",
+                "BA1",
+            )],
             0,
         )],
         &[],
@@ -301,10 +413,11 @@ fn hidden_not_shown_when_converted_price_is_not_cheaper() {
         Some(true),
         None,
     );
-    assert!(
-        _hidden_if_cheaper(&[hc_match("m1", gbp_through, honest.offer.clone(), -500.0)], Some(&honest))
-            .is_none()
-    );
+    assert!(_hidden_if_cheaper(
+        &[hc_match("m1", gbp_through, honest.offer.clone(), -500.0)],
+        Some(&honest)
+    )
+    .is_none());
 }
 
 #[test]
@@ -340,7 +453,13 @@ fn via_b_allows_any_intermediate_stop() {
     let nonstop = offer(
         "n1",
         Some(300.0),
-        vec![seg("LHR", "JFK", "2026-10-22T08:00", "2026-10-22T11:00", "BA1")],
+        vec![seg(
+            "LHR",
+            "JFK",
+            "2026-10-22T08:00",
+            "2026-10-22T11:00",
+            "BA1",
+        )],
         0,
     );
     assert!(!_via_b(&nonstop, "LHR", "BOS", "JFK"));
@@ -351,13 +470,25 @@ fn keep_on_route_drops_other_airports() {
     let paris_london = offer(
         "n1",
         Some(110.0),
-        vec![seg("CDG", "LGW", "2026-09-19T10:00", "2026-09-19T10:55", "BA1")],
+        vec![seg(
+            "CDG",
+            "LGW",
+            "2026-09-19T10:00",
+            "2026-09-19T10:55",
+            "BA1",
+        )],
         0,
     );
     let junk = offer(
         "n2",
         Some(41.0),
-        vec![seg("VIY", "SEN", "2026-09-19T13:56", "2026-09-19T13:57", "BA1")],
+        vec![seg(
+            "VIY",
+            "SEN",
+            "2026-09-19T13:56",
+            "2026-09-19T13:57",
+            "BA1",
+        )],
         0,
     );
     let kept = _keep_on_route(
@@ -365,7 +496,10 @@ fn keep_on_route_drops_other_airports() {
         &HashSet::from(["CDG".into(), "ORY".into(), "PAR".into()]),
         &HashSet::from(["LGW".into(), "LHR".into(), "LON".into()]),
     );
-    assert_eq!(kept.iter().map(|o| o.id.as_str()).collect::<Vec<_>>(), ["n1"]);
+    assert_eq!(
+        kept.iter().map(|o| o.id.as_str()).collect::<Vec<_>>(),
+        ["n1"]
+    );
 }
 
 #[test]
@@ -373,7 +507,13 @@ fn codeshare_keeps_one_itinerary() {
     let ib = offer(
         "ib",
         Some(41.0),
-        vec![seg("CDG", "LHR", "2026-09-19T13:56", "2026-09-19T14:56", "IB1")],
+        vec![seg(
+            "CDG",
+            "LHR",
+            "2026-09-19T13:56",
+            "2026-09-19T14:56",
+            "IB1",
+        )],
         0,
     );
     let mut ba = ib.clone();
@@ -393,7 +533,13 @@ fn drop_sandbox_duffel_keeps_live_and_mock() {
     let mut fake = offer_full(
         "ba-test",
         Some(71.0),
-        vec![seg("JFK", "ORD", "2026-10-10T06:58", "2026-10-10T08:08", "BA0105")],
+        vec![seg(
+            "JFK",
+            "ORD",
+            "2026-10-10T06:58",
+            "2026-10-10T08:08",
+            "BA0105",
+        )],
         0,
         "GBP",
         "duffel",
@@ -404,14 +550,26 @@ fn drop_sandbox_duffel_keeps_live_and_mock() {
     let mut live = offer(
         "ba-live",
         Some(410.0),
-        vec![seg("JFK", "LHR", "2026-10-10T18:00", "2026-10-11T06:10", "BA0112")],
+        vec![seg(
+            "JFK",
+            "LHR",
+            "2026-10-10T18:00",
+            "2026-10-11T06:10",
+            "BA0112",
+        )],
         0,
     );
     live.live = Some(true);
     let mock = offer_full(
         "aa",
         Some(240.0),
-        vec![seg("JFK", "ORD", "2026-10-10T08:00", "2026-10-10T10:15", "AA100")],
+        vec![seg(
+            "JFK",
+            "ORD",
+            "2026-10-10T08:00",
+            "2026-10-10T10:15",
+            "AA100",
+        )],
         0,
         "USD",
         "mock",
@@ -430,26 +588,46 @@ fn prefer_real_carriers_skips_duffel_airways() {
     let mut zz = offer(
         "zz",
         Some(41.0),
-        vec![seg("CDG", "LHR", "2026-09-19T13:56", "2026-09-19T14:56", "ZZ1")],
+        vec![seg(
+            "CDG",
+            "LHR",
+            "2026-09-19T13:56",
+            "2026-09-19T14:56",
+            "ZZ1",
+        )],
         0,
     );
     zz.carrier = "ZZ".into();
     let ba = offer(
         "ba",
         Some(110.0),
-        vec![seg("CDG", "LHR", "2026-09-19T10:00", "2026-09-19T11:00", "BA1")],
+        vec![seg(
+            "CDG",
+            "LHR",
+            "2026-09-19T10:00",
+            "2026-09-19T11:00",
+            "BA1",
+        )],
         0,
     );
     let kept = _prefer_real_carriers(vec![zz, ba]);
-    assert_eq!(kept.iter().map(|o| o.id.as_str()).collect::<Vec<_>>(), ["ba"]);
+    assert_eq!(
+        kept.iter().map(|o| o.id.as_str()).collect::<Vec<_>>(),
+        ["ba"]
+    );
 }
 
 #[test]
 fn duffel_offer_request_uses_supplier_max_connections() {
     let connecting = offer_request_body(&shop_req("JFK", "DEN", "2026-11-19"));
-    assert_eq!(connecting["data"]["max_connections"], DUFFEL_MAX_CONNECTIONS);
+    assert_eq!(
+        connecting["data"]["max_connections"],
+        DUFFEL_MAX_CONNECTIONS
+    );
     assert_eq!(DUFFEL_MAX_CONNECTIONS, 2);
-    assert!(connecting["data"]["slices"][0].get("max_connections").is_none());
+    assert!(connecting["data"]["slices"][0]
+        .get("max_connections")
+        .is_none());
     let mut ns = shop_req("JFK", "ORD", "2026-11-19");
     ns.nonstop = true;
     let nonstop = offer_request_body(&ns);
@@ -470,7 +648,13 @@ fn best_is_nonstop_when_cheapest_is_connecting() {
     let nonstop = offer_full(
         "n1",
         Some(400.0),
-        vec![seg("LHR", "JFK", "2026-10-22T08:00", "2026-10-22T11:00", "BA1")],
+        vec![seg(
+            "LHR",
+            "JFK",
+            "2026-10-22T08:00",
+            "2026-10-22T11:00",
+            "BA1",
+        )],
         0,
         "USD",
         "duffel",
@@ -502,7 +686,13 @@ fn best_omitted_when_cheapest_is_already_the_nonstop() {
     let cheap_ns = offer_full(
         "n1",
         Some(200.0),
-        vec![seg("LHR", "JFK", "2026-10-22T08:00", "2026-10-22T11:00", "BA1")],
+        vec![seg(
+            "LHR",
+            "JFK",
+            "2026-10-22T08:00",
+            "2026-10-22T11:00",
+            "BA1",
+        )],
         0,
         "USD",
         "duffel",
@@ -512,7 +702,13 @@ fn best_omitted_when_cheapest_is_already_the_nonstop() {
     let dear_ns = offer_full(
         "n2",
         Some(350.0),
-        vec![seg("LHR", "JFK", "2026-10-22T12:00", "2026-10-22T15:00", "BA1")],
+        vec![seg(
+            "LHR",
+            "JFK",
+            "2026-10-22T12:00",
+            "2026-10-22T15:00",
+            "BA1",
+        )],
         0,
         "USD",
         "duffel",
@@ -528,7 +724,13 @@ fn best_stays_cheapest_nonstop_not_faster_dearer() {
     let slow = offer_full(
         "n1",
         Some(200.0),
-        vec![seg("LHR", "JFK", "2026-10-22T08:00", "2026-10-22T16:00", "BA1")],
+        vec![seg(
+            "LHR",
+            "JFK",
+            "2026-10-22T08:00",
+            "2026-10-22T16:00",
+            "BA1",
+        )],
         0,
         "USD",
         "duffel",
@@ -538,7 +740,13 @@ fn best_stays_cheapest_nonstop_not_faster_dearer() {
     let fast = offer_full(
         "n2",
         Some(220.0),
-        vec![seg("LHR", "JFK", "2026-10-22T09:00", "2026-10-22T15:00", "BA1")],
+        vec![seg(
+            "LHR",
+            "JFK",
+            "2026-10-22T09:00",
+            "2026-10-22T15:00",
+            "BA1",
+        )],
         0,
         "USD",
         "duffel",

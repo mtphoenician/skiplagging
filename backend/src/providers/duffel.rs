@@ -8,7 +8,11 @@ use crate::models::{Offer, Segment, ShopRequest};
 pub const DUFFEL_MAX_CONNECTIONS: i32 = 2;
 
 pub fn offer_request_body(req: &ShopRequest) -> Value {
-    let connections = if req.nonstop { 0 } else { DUFFEL_MAX_CONNECTIONS };
+    let connections = if req.nonstop {
+        0
+    } else {
+        DUFFEL_MAX_CONNECTIONS
+    };
     let mut slices = vec![json!({
         "origin": req.origin,
         "destination": req.dest,
@@ -149,7 +153,12 @@ impl DuffelProvider {
 
     pub async fn refresh_offer(&self, offer: &Offer) -> anyhow::Result<Option<Offer>> {
         let fresh = self
-            .get_offer(&offer.id, Some(&offer.cabin), Some("USD"), Some(offer.adults))
+            .get_offer(
+                &offer.id,
+                Some(&offer.cabin),
+                Some("USD"),
+                Some(offer.adults),
+            )
             .await?;
         if let Some(fresh) = fresh {
             if fresh.live != Some(false) {
@@ -233,7 +242,10 @@ pub fn _one(raw: &Value, req: &ShopRequest, now: &str) -> Option<Offer> {
                 .to_string();
             let mkt = s.get("marketing_carrier").cloned().unwrap_or(json!({}));
             let op = s.get("operating_carrier").cloned().unwrap_or(json!({}));
-            let mkt_code = mkt.get("iata_code").and_then(|v| v.as_str()).unwrap_or("XX");
+            let mkt_code = mkt
+                .get("iata_code")
+                .and_then(|v| v.as_str())
+                .unwrap_or("XX");
             let flight_n = s
                 .get("marketing_carrier_flight_number")
                 .map(|v| match v {
@@ -246,10 +258,21 @@ pub fn _one(raw: &Value, req: &ShopRequest, now: &str) -> Option<Offer> {
                 origin,
                 dest,
                 carrier: mkt_code.to_string(),
-                operating_carrier: op.get("iata_code").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                operating_carrier: op
+                    .get("iata_code")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
                 flight_number: format!("{mkt_code}{flight_n}"),
-                dep: s.get("departing_at").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                arr: s.get("arriving_at").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                dep: s
+                    .get("departing_at")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                arr: s
+                    .get("arriving_at")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
                 duration_min: dur(s.get("duration").and_then(|v| v.as_str())),
                 rbd: String::new(),
                 aircraft: s
@@ -324,6 +347,7 @@ pub fn _one(raw: &Value, req: &ShopRequest, now: &str) -> Option<Offer> {
             .and_then(|v| v.as_str())
             .unwrap_or(&req.currency)
             .to_string(),
+        quoted_usd: usd_quote(raw),
         cabin: req.cabin.clone(),
         adults,
         fare_basis: String::new(),
@@ -372,6 +396,30 @@ fn as_f(v: Option<&Value>) -> Option<f64> {
         Value::String(s) => s.parse().ok(),
         _ => None,
     })
+}
+
+/// Prefer a USD total Duffel already put on the offer. `tax_amount` is not a fare.
+pub fn _usd_quote(raw: &Value) -> Option<f64> {
+    usd_quote(raw)
+}
+
+fn usd_quote(raw: &Value) -> Option<f64> {
+    const PAIRS: &[(&str, &str)] = &[
+        ("total_amount", "total_currency"),
+        ("available_amount", "available_currency"),
+        ("converted_amount", "converted_currency"),
+    ];
+    for (amt, ccy) in PAIRS {
+        let c = raw.get(*ccy).and_then(|v| v.as_str()).unwrap_or("");
+        if !c.eq_ignore_ascii_case("USD") {
+            continue;
+        }
+        let v = as_f(raw.get(*amt))?;
+        if v > 0.0 {
+            return Some(v);
+        }
+    }
+    None
 }
 
 pub fn dur(iso: Option<&str>) -> i32 {

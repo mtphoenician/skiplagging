@@ -4,9 +4,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use axum::Router;
-use skiplagging::models::{
-    Airport, HiddenCityMatch, Offer, RiskAssessment, Segment, ShopRequest,
-};
+use skiplagging::models::{Airport, HiddenCityMatch, Offer, RiskAssessment, Segment, ShopRequest};
 
 pub fn hs(codes: &[&str]) -> HashSet<String> {
     codes.iter().map(|s| (*s).to_string()).collect()
@@ -38,13 +36,17 @@ pub fn seg_carrier(
     }
 }
 
-pub fn offer(
-    oid: &str,
-    price: Option<f64>,
-    segments: Vec<Segment>,
-    stops: i32,
-) -> Offer {
-    offer_full(oid, price, segments, stops, "USD", "duffel", Some(true), None)
+pub fn offer(oid: &str, price: Option<f64>, segments: Vec<Segment>, stops: i32) -> Offer {
+    offer_full(
+        oid,
+        price,
+        segments,
+        stops,
+        "USD",
+        "duffel",
+        Some(true),
+        None,
+    )
 }
 
 pub fn offer_full(
@@ -103,7 +105,11 @@ pub fn risk() -> RiskAssessment {
 }
 
 pub fn hc_match(oid: &str, through: Offer, local: Offer, saving: f64) -> HiddenCityMatch {
-    let hidden = through.segments.last().map(|s| s.dest.clone()).unwrap_or_default();
+    let hidden = through
+        .segments
+        .last()
+        .map(|s| s.dest.clone())
+        .unwrap_or_default();
     HiddenCityMatch {
         id: oid.into(),
         hidden_city: hidden,
@@ -147,7 +153,9 @@ pub async fn pool() -> sqlx::PgPool {
     let pool = skiplagging::db::pool::connect_with(&settings)
         .await
         .expect("PostgreSQL (createdb skiplagging; cargo run --bin ingest)");
-    skiplagging::db::schema::init_db(&pool).await.expect("init_db");
+    skiplagging::db::schema::init_db(&pool)
+        .await
+        .expect("init_db");
     pool
 }
 

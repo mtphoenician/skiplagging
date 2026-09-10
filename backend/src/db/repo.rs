@@ -9,11 +9,10 @@ use sqlx::{FromRow, PgPool, Row};
 use unicode_normalization::char::is_combining_mark;
 use unicode_normalization::UnicodeNormalization;
 
+use crate::budget::provider_score;
 use crate::engines::candidates::{score_candidate, RouteStat};
 use crate::engines::expiry::{offer_unexpired, unexpired};
-use crate::engines::hidden::{
-    hidden_city_savings, meaningful_saving, HIDDEN_CITY_WARNINGS,
-};
+use crate::engines::hidden::{hidden_city_savings, meaningful_saving, HIDDEN_CITY_WARNINGS};
 use crate::engines::index::observation_meta;
 use crate::engines::learn::{merge_savings, summarize_savings, LearnBatch};
 use crate::engines::risk::assess;
@@ -24,7 +23,6 @@ use crate::models::{
 };
 use crate::providers::bookers::booker_links;
 use crate::providers::sandbox::is_live_fare;
-use crate::budget::provider_score;
 
 static CONTINENTS: Mutex<Option<HashMap<String, String>>> = Mutex::new(None);
 static TOKEN_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[a-z0-9]+").expect("token regex"));
@@ -40,7 +38,11 @@ const TYPE_W: &[(&str, i32)] = &[
 ];
 
 fn type_weight(t: &str) -> i32 {
-    TYPE_W.iter().find(|(k, _)| *k == t).map(|(_, v)| *v).unwrap_or(-15)
+    TYPE_W
+        .iter()
+        .find(|(k, _)| *k == t)
+        .map(|(_, v)| *v)
+        .unwrap_or(-15)
 }
 
 fn iata3(s: &str) -> String {
@@ -282,7 +284,10 @@ pub fn to_airport(
     }
 }
 
-pub async fn airports_by_iata(pool: &PgPool, codes: &[String]) -> anyhow::Result<HashMap<String, Airport>> {
+pub async fn airports_by_iata(
+    pool: &PgPool,
+    codes: &[String],
+) -> anyhow::Result<HashMap<String, Airport>> {
     let clean: Vec<String> = codes
         .iter()
         .filter(|c| !c.is_empty())
@@ -319,7 +324,11 @@ async fn fetch_country(pool: &PgPool, iso2: &str) -> anyhow::Result<Option<Count
         .await?)
 }
 
-pub async fn get_airport(pool: &PgPool, iata: &str, detail: bool) -> anyhow::Result<Option<Airport>> {
+pub async fn get_airport(
+    pool: &PgPool,
+    iata: &str,
+    detail: bool,
+) -> anyhow::Result<Option<Airport>> {
     let Some(row) = fetch_airport(pool, iata).await? else {
         return Ok(None);
     };
@@ -428,14 +437,18 @@ async fn city_cluster(pool: &PgPool, seed: &AirportRow) -> anyhow::Result<Vec<Ai
         let same_city = fold(&city_label(&raw.municipality, &raw.name)) == city
             && raw.iso_country == seed.iso_country;
         let catalog = catalog_code_for_member(&seed.iata);
-        let in_same_metro =
-            catalog.is_some_and(|c| catalog_code_for_member(&raw.iata) == Some(c));
+        let in_same_metro = catalog.is_some_and(|c| catalog_code_for_member(&raw.iata) == Some(c));
         if same_city || in_same_metro {
             have.insert(raw.iata.clone());
             rows.push(raw);
         }
     }
-    rows.sort_by_key(|r| (if r.type_ == "large_airport" { 0 } else { 1 }, r.iata.clone()));
+    rows.sort_by_key(|r| {
+        (
+            if r.type_ == "large_airport" { 0 } else { 1 },
+            r.iata.clone(),
+        )
+    });
     Ok(rows)
 }
 
@@ -503,13 +516,16 @@ fn metro_matches(needle: &str, code: &str, city: &str, aliases: &[&str]) -> bool
     if q == fold(code) || q == fold(city) {
         return true;
     }
-    if q.len() >= 3 && (has_phrase(city, needle) || fold(city).starts_with(&q)) {
+    if q.len() >= 2 && (has_phrase(city, needle) || fold(city).starts_with(&q)) {
         return true;
     }
     if aliases.iter().any(|a| q == fold(a)) {
         return true;
     }
-    q.len() >= 3 && aliases.iter().any(|a| fold(a).starts_with(&q) || has_phrase(a, needle))
+    q.len() >= 2
+        && aliases
+            .iter()
+            .any(|a| fold(a).starts_with(&q) || has_phrase(a, needle))
 }
 
 pub fn fold(s: &str) -> String {
@@ -551,7 +567,10 @@ pub fn has_phrase(hay: &str, needle: &str) -> bool {
     if n.is_empty() || h.is_empty() {
         return false;
     }
-    if h == n || h.starts_with(&(n.clone() + " ")) || h.starts_with(&(n.clone() + "(")) || h.starts_with(&(n.clone() + ","))
+    if h == n
+        || h.starts_with(&(n.clone() + " "))
+        || h.starts_with(&(n.clone() + "("))
+        || h.starts_with(&(n.clone() + ","))
     {
         return true;
     }
@@ -598,14 +617,19 @@ pub fn score_airport(row: &AirportRow, needle: &str) -> i32 {
 
     if iata == q || icao == q {
         score += 1000;
-    } else if iata.starts_with(&q) && q.len() >= 2 {
+    } else if iata.starts_with(&q) && q.len() >= 3 {
         score += 720;
+    } else if iata.starts_with(&q) && q.len() == 2 {
+        // "pa" is also Paris; two-letter IATA prefixes must not bury city names.
+        score += 160;
     } else if icao.starts_with(&q) && q.len() >= 4 {
         score += 700;
     }
 
-    if !matches!(row.type_.as_str(), "large_airport" | "medium_airport" | "small_airport")
-        && iata != q
+    if !matches!(
+        row.type_.as_str(),
+        "large_airport" | "medium_airport" | "small_airport"
+    ) && iata != q
         && icao != q
     {
         return 0;
@@ -647,7 +671,8 @@ pub fn score_airport(row: &AirportRow, needle: &str) -> i32 {
     if has_phrase(&name, &q) {
         score += 160;
         text_hit = true;
-    } else if fold(&name).starts_with(&(q.clone() + " ")) || fold(&name).starts_with(&(q.clone() + "-"))
+    } else if fold(&name).starts_with(&(q.clone() + " "))
+        || fold(&name).starts_with(&(q.clone() + "-"))
     {
         score += 100;
         text_hit = true;
@@ -792,7 +817,10 @@ pub async fn search_airports(pool: &PgPool, q: &str, limit: i64) -> anyhow::Resu
         }
     }
     let folded = fold(&needle);
-    if rows.is_empty() && country_iso.is_none() && (folded != needle.to_lowercase() || folded.contains(' ')) {
+    if rows.is_empty()
+        && country_iso.is_none()
+        && (folded != needle.to_lowercase() || folded.contains(' '))
+    {
         let token = folded.split_whitespace().next().unwrap_or(&folded);
         let like = format!("%{token}%");
         let extra: Vec<AirportRow> = sqlx::query_as(
@@ -817,7 +845,9 @@ pub async fn search_airports(pool: &PgPool, q: &str, limit: i64) -> anyhow::Resu
                 fold(&r.region_name),
             ]
             .join(" ");
-            if blob.contains(&folded) || has_phrase(&r.municipality, &folded) || has_phrase(&r.name, &folded)
+            if blob.contains(&folded)
+                || has_phrase(&r.municipality, &folded)
+                || has_phrase(&r.name, &folded)
             {
                 have.insert(r.iata.clone());
                 rows.push(r);
@@ -832,15 +862,22 @@ pub async fn search_airports(pool: &PgPool, q: &str, limit: i64) -> anyhow::Resu
     if let Some(iso) = &country_iso {
         ranked = ranked
             .into_iter()
-            .map(|(s, r)| (s + if r.iso_country == *iso { 400 } else { 0 }, r))
+            .map(|(s, r)| {
+                let boost = if needle.chars().count() >= 3 { 400 } else { 40 };
+                (s + if r.iso_country == *iso { boost } else { 0 }, r)
+            })
             .collect();
-        let in_country: Vec<_> = ranked
-            .iter()
-            .filter(|(_, r)| r.iso_country == *iso)
-            .cloned()
-            .collect();
-        if !in_country.is_empty() {
-            ranked = in_country;
+        // ISO2 is also a city prefix (PA→Paris, FR→Frankfurt). Keep a small
+        // country boost, but only exclusive-filter on a name or ISO3.
+        if needle.chars().count() >= 3 {
+            let in_country: Vec<_> = ranked
+                .iter()
+                .filter(|(_, r)| r.iso_country == *iso)
+                .cloned()
+                .collect();
+            if !in_country.is_empty() {
+                ranked = in_country;
+            }
         }
     }
     ranked.retain(|(s, _)| *s >= 50);
@@ -908,8 +945,16 @@ pub async fn search_airports(pool: &PgPool, q: &str, limit: i64) -> anyhow::Resu
             .iter()
             .any(|(_, r)| fold(&needle) == r.iata.to_lowercase());
     ranked.sort_by(|a, b| {
-        let sa = if a.1.scheduled_service || exact_code { 0 } else { 1 };
-        let sb = if b.1.scheduled_service || exact_code { 0 } else { 1 };
+        let sa = if a.1.scheduled_service || exact_code {
+            0
+        } else {
+            1
+        };
+        let sb = if b.1.scheduled_service || exact_code {
+            0
+        } else {
+            1
+        };
         sa.cmp(&sb)
             .then_with(|| b.0.cmp(&a.0))
             .then_with(|| a.1.iata.cmp(&b.1.iata))
@@ -950,7 +995,11 @@ pub async fn search_airports(pool: &PgPool, q: &str, limit: i64) -> anyhow::Resu
     }
     let metro_ids: HashSet<String> = metros.iter().map(|m| m.place_id.clone()).collect();
     let mut out = metros;
-    out.extend(airports.into_iter().filter(|a| !metro_ids.contains(&a.iata)));
+    out.extend(
+        airports
+            .into_iter()
+            .filter(|a| !metro_ids.contains(&a.iata)),
+    );
     out.truncate(limit as usize);
     Ok(out)
 }
@@ -1009,7 +1058,11 @@ async fn metros_for_query(
     Ok(out)
 }
 
-pub async fn nearby_airports(pool: &PgPool, iata: &str, max_km: f64) -> anyhow::Result<Vec<Airport>> {
+pub async fn nearby_airports(
+    pool: &PgPool,
+    iata: &str,
+    max_km: f64,
+) -> anyhow::Result<Vec<Airport>> {
     let Some(origin) = fetch_airport(pool, iata).await? else {
         return Ok(vec![]);
     };
@@ -1146,7 +1199,10 @@ pub async fn busiest_airports(
     Ok(out)
 }
 
-pub async fn continents_for(pool: &PgPool, codes: &[String]) -> anyhow::Result<HashMap<String, String>> {
+pub async fn continents_for(
+    pool: &PgPool,
+    codes: &[String],
+) -> anyhow::Result<HashMap<String, String>> {
     let want: Vec<String> = codes
         .iter()
         .filter(|c| !c.is_empty())
@@ -1214,7 +1270,11 @@ pub async fn list_navaids(pool: &PgPool, ident: Option<&str>) -> anyhow::Result<
         .collect())
 }
 
-fn to_country(row: &CountryRow, airport_count: i32, continents: &HashMap<String, String>) -> Country {
+fn to_country(
+    row: &CountryRow,
+    airport_count: i32,
+    continents: &HashMap<String, String>,
+) -> Country {
     Country {
         iso2: row.iso2.clone(),
         iso3: row.iso3.clone(),
@@ -1314,7 +1374,9 @@ pub async fn search_countries(pool: &PgPool, q: &str, limit: i64) -> anyhow::Res
         let n: i64 = row.try_get(1)?;
         count_map.insert(iso, n as i32);
     }
-    let rows: Vec<CountryRow> = sqlx::query_as("SELECT * FROM countries").fetch_all(pool).await?;
+    let rows: Vec<CountryRow> = sqlx::query_as("SELECT * FROM countries")
+        .fetch_all(pool)
+        .await?;
     let names = continent_names(pool).await?;
     let needle = q.trim();
     if needle.is_empty() {
@@ -1382,7 +1444,9 @@ async fn matching_country_iso(pool: &PgPool, needle: &str) -> anyhow::Result<Opt
     if let Some(alias) = country_alias(&qf) {
         return Ok(Some(alias.to_string()));
     }
-    let rows: Vec<CountryRow> = sqlx::query_as("SELECT * FROM countries").fetch_all(pool).await?;
+    let rows: Vec<CountryRow> = sqlx::query_as("SELECT * FROM countries")
+        .fetch_all(pool)
+        .await?;
     let mut ranked: Vec<(i32, CountryRow)> = rows
         .into_iter()
         .map(|r| (score_country(&r, needle), r))
@@ -1396,13 +1460,18 @@ async fn matching_country_iso(pool: &PgPool, needle: &str) -> anyhow::Result<Opt
             return Ok(Some(r.1.iso2.clone()));
         }
     } else if qf.len() == 3 {
-        if let Some(r) = ranked.iter().find(|(_, r)| fold(r.iso3.as_deref().unwrap_or("")) == qf) {
+        if let Some(r) = ranked
+            .iter()
+            .find(|(_, r)| fold(r.iso3.as_deref().unwrap_or("")) == qf)
+        {
             return Ok(Some(r.1.iso2.clone()));
         }
     }
     ranked.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.name.cmp(&b.1.name)));
     let top = &ranked[0].1;
-    if qf == fold(&top.iso2) || qf == fold(top.iso3.as_deref().unwrap_or("")) || qf == fold(&top.name)
+    if qf == fold(&top.iso2)
+        || qf == fold(top.iso3.as_deref().unwrap_or(""))
+        || qf == fold(&top.name)
     {
         return Ok(Some(top.iso2.clone()));
     }
@@ -1484,7 +1553,10 @@ pub async fn counts(pool: &PgPool) -> anyhow::Result<HashMap<String, i64>> {
         ("airlines".into(), c(pool, "airlines").await?),
         ("routes".into(), c(pool, "routes").await?),
         ("hidden_deals".into(), c(pool, "hidden_deals").await?),
-        ("fare_observations".into(), c(pool, "fare_observations").await?),
+        (
+            "fare_observations".into(),
+            c(pool, "fare_observations").await?,
+        ),
         ("route_edges".into(), c(pool, "route_edges").await?),
         (
             "hidden_city_route_stats".into(),
@@ -1731,7 +1803,10 @@ pub async fn persist_tracks(
     Ok(())
 }
 
-pub async fn airlines_by_iata(pool: &PgPool, codes: &[String]) -> anyhow::Result<Vec<(String, String)>> {
+pub async fn airlines_by_iata(
+    pool: &PgPool,
+    codes: &[String],
+) -> anyhow::Result<Vec<(String, String)>> {
     let clean: Vec<String> = codes
         .iter()
         .filter(|c| !c.is_empty() && c.len() >= 2)
@@ -1801,7 +1876,16 @@ fn call_bookers(
     cabin: &str,
     return_date: Option<&str>,
 ) -> Vec<BookerLink> {
-    booker_links(origin, dest, date, adults, airlines, currency, cabin, return_date)
+    booker_links(
+        origin,
+        dest,
+        date,
+        adults,
+        airlines,
+        currency,
+        cabin,
+        return_date,
+    )
 }
 
 pub async fn persist_hidden_deals(
@@ -1957,7 +2041,16 @@ pub fn deal_from_row(row: &HiddenDealRow) -> Option<HiddenDeal> {
     } else {
         row.saving_pct
     };
-    let bookers = call_bookers(&row.origin, &row.hidden_city, &row.date, 1, &[], "USD", "ECONOMY", None);
+    let bookers = call_bookers(
+        &row.origin,
+        &row.hidden_city,
+        &row.date,
+        1,
+        &[],
+        "USD",
+        "ECONOMY",
+        None,
+    );
     let local = raw_local.as_ref().and_then(offer_in_usd);
     let through_offer = raw_through.as_ref().and_then(offer_in_usd);
     if through_offer.as_ref().is_some_and(|o| !offer_unexpired(o)) {
@@ -2044,7 +2137,9 @@ pub async fn list_hidden_deals(
 }
 
 pub async fn clear_hidden_deals(pool: &PgPool) -> anyhow::Result<i64> {
-    let res = sqlx::query("DELETE FROM hidden_deals").execute(pool).await?;
+    let res = sqlx::query("DELETE FROM hidden_deals")
+        .execute(pool)
+        .await?;
     Ok(res.rows_affected() as i64)
 }
 
@@ -2087,7 +2182,11 @@ pub async fn load_route_stats(
     origins: &HashSet<String>,
     intended: &HashSet<String>,
 ) -> anyhow::Result<HashMap<String, RouteStat>> {
-    let a_codes: Vec<String> = origins.iter().filter(|o| !o.is_empty()).map(|o| iata3(o)).collect();
+    let a_codes: Vec<String> = origins
+        .iter()
+        .filter(|o| !o.is_empty())
+        .map(|o| iata3(o))
+        .collect();
     let b_codes: Vec<String> = intended
         .iter()
         .filter(|b| !b.is_empty())
@@ -2152,12 +2251,52 @@ pub async fn load_route_stats(
     Ok(merged)
 }
 
+/// Destinations we have actually seen as B→C inside priced tickets.
+/// Stronger than OpenFlights for “who still flies beyond the intended city.”
+pub async fn learned_beyond(
+    pool: &PgPool,
+    from: &HashSet<String>,
+    limit: i64,
+) -> anyhow::Result<HashMap<String, i32>> {
+    let codes: Vec<String> = from
+        .iter()
+        .filter(|c| !c.is_empty())
+        .map(|c| iata3(c))
+        .collect();
+    if codes.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let rows = sqlx::query(
+        "SELECT dest, SUM(observation_count)::int AS n \
+         FROM route_edges WHERE origin = ANY($1::text[]) \
+         GROUP BY dest ORDER BY SUM(observation_count) DESC LIMIT $2",
+    )
+    .bind(&codes)
+    .bind(limit.max(1).min(80))
+    .fetch_all(pool)
+    .await?;
+    let mut out = HashMap::new();
+    for row in rows {
+        let dest: String = row.try_get("dest")?;
+        let n: i32 = row.try_get("n")?;
+        let dest = dest.to_uppercase();
+        if dest.len() == 3 && !codes.iter().any(|c| c == &dest) {
+            out.insert(dest, n);
+        }
+    }
+    Ok(out)
+}
+
 pub async fn provider_rates_for(
     pool: &PgPool,
     origins: &HashSet<String>,
     dests: &[String],
 ) -> anyhow::Result<HashMap<String, f64>> {
-    let a_codes: Vec<String> = origins.iter().filter(|o| !o.is_empty()).map(|o| iata3(o)).collect();
+    let a_codes: Vec<String> = origins
+        .iter()
+        .filter(|o| !o.is_empty())
+        .map(|o| iata3(o))
+        .collect();
     let d_codes: Vec<String> = dests
         .iter()
         .filter(|d| !d.is_empty())
@@ -2326,7 +2465,10 @@ pub async fn budget_summary(pool: &PgPool, hours: i64) -> anyhow::Result<Value> 
     }))
 }
 
-pub async fn apply_learning(pool: &PgPool, batch: &LearnBatch) -> anyhow::Result<HashMap<String, i32>> {
+pub async fn apply_learning(
+    pool: &PgPool,
+    batch: &LearnBatch,
+) -> anyhow::Result<HashMap<String, i32>> {
     let now = batch.observed_at;
     let mut written = HashMap::from([
         ("fares".into(), 0i32),
@@ -2363,8 +2505,20 @@ pub async fn apply_learning(pool: &PgPool, batch: &LearnBatch) -> anyhow::Result
     }
 
     if !batch.edges.is_empty() {
-        let origins: Vec<String> = batch.edges.keys().map(|k| k.0.clone()).collect::<HashSet<_>>().into_iter().collect();
-        let dests: Vec<String> = batch.edges.keys().map(|k| k.1.clone()).collect::<HashSet<_>>().into_iter().collect();
+        let origins: Vec<String> = batch
+            .edges
+            .keys()
+            .map(|k| k.0.clone())
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+        let dests: Vec<String> = batch
+            .edges
+            .keys()
+            .map(|k| k.1.clone())
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
         let existing: Vec<RouteEdgeRow> = sqlx::query_as(
             "SELECT * FROM route_edges WHERE origin = ANY($1::text[]) AND dest = ANY($2::text[])",
         )
@@ -2374,11 +2528,22 @@ pub async fn apply_learning(pool: &PgPool, batch: &LearnBatch) -> anyhow::Result
         .await?;
         let mut by_key: HashMap<(String, String, String, String), RouteEdgeRow> = existing
             .into_iter()
-            .map(|r| ((r.origin.clone(), r.dest.clone(), r.carrier.clone(), r.flight_number.clone()), r))
+            .map(|r| {
+                (
+                    (
+                        r.origin.clone(),
+                        r.dest.clone(),
+                        r.carrier.clone(),
+                        r.flight_number.clone(),
+                    ),
+                    r,
+                )
+            })
             .collect();
         for (key, edge) in &batch.edges {
             if let Some(row) = by_key.get_mut(key) {
-                let mut dates: HashSet<String> = json_strings(&row.travel_dates.0).into_iter().collect();
+                let mut dates: HashSet<String> =
+                    json_strings(&row.travel_dates.0).into_iter().collect();
                 dates.extend(edge.travel_dates.iter().cloned());
                 let mut dates: Vec<String> = dates.into_iter().collect();
                 dates.sort();
@@ -2423,9 +2588,27 @@ pub async fn apply_learning(pool: &PgPool, batch: &LearnBatch) -> anyhow::Result
     }
 
     if !batch.stats.is_empty() {
-        let a_codes: Vec<String> = batch.stats.keys().map(|k| k.0.clone()).collect::<HashSet<_>>().into_iter().collect();
-        let b_codes: Vec<String> = batch.stats.keys().map(|k| k.1.clone()).collect::<HashSet<_>>().into_iter().collect();
-        let c_codes: Vec<String> = batch.stats.keys().map(|k| k.2.clone()).collect::<HashSet<_>>().into_iter().collect();
+        let a_codes: Vec<String> = batch
+            .stats
+            .keys()
+            .map(|k| k.0.clone())
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+        let b_codes: Vec<String> = batch
+            .stats
+            .keys()
+            .map(|k| k.1.clone())
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+        let c_codes: Vec<String> = batch
+            .stats
+            .keys()
+            .map(|k| k.2.clone())
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
         let existing: Vec<RouteStatRow> = sqlx::query_as(
             "SELECT * FROM hidden_city_route_stats WHERE origin = ANY($1::text[]) AND intended = ANY($2::text[]) AND ticketed = ANY($3::text[])",
         )
@@ -2436,7 +2619,12 @@ pub async fn apply_learning(pool: &PgPool, batch: &LearnBatch) -> anyhow::Result
         .await?;
         let mut by_key: HashMap<(String, String, String), RouteStatRow> = existing
             .into_iter()
-            .map(|r| ((r.origin.clone(), r.intended.clone(), r.ticketed.clone()), r))
+            .map(|r| {
+                (
+                    (r.origin.clone(), r.intended.clone(), r.ticketed.clone()),
+                    r,
+                )
+            })
             .collect();
         for (key, d) in &batch.stats {
             let mut row = by_key.remove(key).unwrap_or(RouteStatRow {
@@ -2483,9 +2671,12 @@ pub async fn apply_learning(pool: &PgPool, batch: &LearnBatch) -> anyhow::Result
             row.successful_connections += d.successful_connections;
             row.cheaper_than_direct_count = prev_cheaper + d.cheaper_than_direct_count;
             row.observations = row.observations.max(row.successful_connections);
-            row.successful_connections = row.successful_connections.max(row.cheaper_than_direct_count);
+            row.successful_connections = row
+                .successful_connections
+                .max(row.cheaper_than_direct_count);
             row.success_rate = if row.observations > 0 {
-                (row.successful_connections as f64 / row.observations as f64 * 10000.0).round() / 10000.0
+                (row.successful_connections as f64 / row.observations as f64 * 10000.0).round()
+                    / 10000.0
             } else {
                 0.0
             };
@@ -2499,7 +2690,8 @@ pub async fn apply_learning(pool: &PgPool, batch: &LearnBatch) -> anyhow::Result
                 let n_new = d.saving_pcts.len() as i32;
                 let total = prev_cheaper + n_new;
                 row.average_saving_percent = if total > 0 {
-                    ((row.average_saving_percent * prev_cheaper as f64 + d.saving_pcts.iter().sum::<f64>())
+                    ((row.average_saving_percent * prev_cheaper as f64
+                        + d.saving_pcts.iter().sum::<f64>())
                         / total as f64
                         * 100.0)
                         .round()
@@ -2680,7 +2872,11 @@ pub async fn route_edges_snapshot(
         .collect())
 }
 
-pub async fn price_history(pool: &PgPool, fingerprint: &str, limit: i64) -> anyhow::Result<Vec<Value>> {
+pub async fn price_history(
+    pool: &PgPool,
+    fingerprint: &str,
+    limit: i64,
+) -> anyhow::Result<Vec<Value>> {
     let rows = sqlx::query(
         "SELECT price, currency, provider, observed_at, expires_at FROM fare_observations \
          WHERE fingerprint = $1 ORDER BY observed_at DESC LIMIT $2",

@@ -22,6 +22,9 @@ struct LedgerInner {
     cost_per_call: f64,
     max_paid: i32,
     reserved: i32,
+    /// Held until a paid `direct` (honest A→B) call, or released after that shop.
+    /// Extra C probes must not spend this slot to “save” budget.
+    hold_direct: bool,
     calls: Vec<ProviderCall>,
 }
 
@@ -43,6 +46,7 @@ impl Ledger {
                 cost_per_call,
                 max_paid,
                 reserved: 0,
+                hold_direct: false,
                 calls: vec![],
             })),
         }
@@ -72,16 +76,47 @@ impl Ledger {
 
     pub fn remaining(&self) -> i32 {
         let g = self.lock();
-        (g.max_paid - g.calls.iter().filter(|c| c.cost_usd > 0.0).count() as i32 - g.reserved).max(0)
+        Self::slots_left(&g)
+    }
+
+    fn slots_left(g: &LedgerInner) -> i32 {
+        let paid = g.calls.iter().filter(|c| c.cost_usd > 0.0).count() as i32;
+        let hold = if g.hold_direct { 1 } else { 0 };
+        (g.max_paid - paid - g.reserved - hold).max(0)
+    }
+
+    /// Keep one paid slot for honest A→B. C / nearby / expand cannot take it.
+    pub fn hold_direct_slot(&self) {
+        self.lock().hold_direct = true;
+    }
+
+    /// Honest shop finished (paid, mock, or failed). Do not starve Cs of an unused hold.
+    pub fn release_direct_hold(&self) {
+        self.lock().hold_direct = false;
+    }
+
+    pub fn has_paid_direct(&self) -> bool {
+        self.lock()
+            .calls
+            .iter()
+            .any(|c| c.purpose == "direct" && c.cost_usd > 0.0)
     }
 
     pub fn reserve(&self, n: i32) -> bool {
+        self.reserve_purpose(n, "")
+    }
+
+    pub fn reserve_purpose(&self, n: i32, purpose: &str) -> bool {
         if n <= 0 {
             return true;
         }
         let mut g = self.lock();
-        let paid = g.calls.iter().filter(|c| c.cost_usd > 0.0).count() as i32;
-        if g.max_paid - paid - g.reserved < n {
+        if purpose == "direct" && g.hold_direct {
+            g.hold_direct = false;
+            g.reserved += n;
+            return true;
+        }
+        if Self::slots_left(&g) < n {
             return false;
         }
         g.reserved += n;
@@ -131,7 +166,7 @@ where
     let paid = !FREE_PROVIDERS.iter().any(|p| *p == provider);
     if paid {
         if let Some(ledger) = &ledger {
-            if !ledger.reserve(1) {
+            if !ledger.reserve_purpose(1, purpose) {
                 return vec![];
             }
         }

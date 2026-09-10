@@ -6,10 +6,45 @@ use crate::models::SearchResponse;
 
 pub type SearchCache = Cache<String, SearchResponse>;
 
+/// Live Duffel: POST /search memory TTL. Mock/sandbox keep CACHE_TTL_SECONDS (180).
+pub const LIVE_HTTP_CACHE_TTL_SECS: u64 = 45;
+
+/// Live Duffel: cap the HTTP search cache at 45s so a repeat is not a 3-minute-old shop.
+/// Honest A→B reuse is a separate 60s rule inside the shop planner.
+pub fn search_cache_ttl(settings: &Settings) -> u64 {
+    if settings.duffel_live() {
+        settings
+            .cache_ttl_seconds
+            .min(LIVE_HTTP_CACHE_TTL_SECS)
+            .max(1)
+    } else {
+        settings.cache_ttl_seconds.max(1)
+    }
+}
+
+/// `Cache-Control: no-cache` / `no-store` / `max-age=0` skip the in-memory search cache.
+pub fn cache_control_bypasses(header: Option<&str>) -> bool {
+    let Some(raw) = header else {
+        return false;
+    };
+    raw.split(',').any(|directive| {
+        let d = directive.trim().to_ascii_lowercase();
+        d == "no-cache" || d == "no-store" || d == "max-age=0"
+    })
+}
+
+pub fn stamp_http_cache_hit(planner: &str) -> String {
+    let inner = planner
+        .strip_prefix("http-cache(")
+        .and_then(|s| s.strip_suffix(')'))
+        .unwrap_or(planner);
+    format!("http-cache({inner})")
+}
+
 pub fn build_cache(settings: &Settings) -> SearchCache {
     Cache::builder()
         .max_capacity(512)
-        .time_to_live(Duration::from_secs(settings.cache_ttl_seconds.max(1)))
+        .time_to_live(Duration::from_secs(search_cache_ttl(settings)))
         .build()
 }
 
@@ -35,4 +70,38 @@ pub fn search_key(
         nearby,
         live
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn live_duffel_caps_http_cache_at_45s() {
+        let mut settings = crate::config::Settings::load();
+        settings.cache_ttl_seconds = 180;
+        settings.duffel_token = "duffel_live_unit".into();
+        assert_eq!(search_cache_ttl(&settings), 45);
+        settings.duffel_token = "duffel_test_abc".into();
+        assert_eq!(search_cache_ttl(&settings), 180);
+        settings.duffel_token = String::new();
+        settings.cache_ttl_seconds = 0;
+        assert_eq!(search_cache_ttl(&settings), 1);
+    }
+
+    #[test]
+    fn cache_control_no_cache_bypasses() {
+        assert!(!cache_control_bypasses(None));
+        assert!(!cache_control_bypasses(Some("max-age=180")));
+        assert!(cache_control_bypasses(Some("no-cache")));
+        assert!(cache_control_bypasses(Some("no-store")));
+        assert!(cache_control_bypasses(Some("max-age=0")));
+        assert!(cache_control_bypasses(Some("private, no-cache, max-age=0")));
+        assert_eq!(stamp_http_cache_hit("index+live"), "http-cache(index+live)");
+        assert_eq!(
+            stamp_http_cache_hit("http-cache(index)"),
+            "http-cache(index)"
+        );
+        assert_ne!(stamp_http_cache_hit("index+live"), "fresh");
+    }
 }

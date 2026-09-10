@@ -9,7 +9,9 @@ use skiplagging::engines::hidden::{
     meaningful_saving, refresh_keeps_hidden_city, ticketed_destination,
 };
 use skiplagging::engines::index::{classify_for_search, observation_meta, ticketed_dests_through};
-use skiplagging::engines::shop::{_cache_state, _classify_hidden, _needs_city_nonstop};
+use skiplagging::engines::shop::{
+    _cache_state, _classify_hidden, _needs_city_nonstop, _reuse_indexed_honest,
+};
 use skiplagging::models::{Airport, Offer, Segment};
 use skiplagging::providers::mock::{
     jfk_dfw_den, jfk_dfw_lax, jfk_ord_den, jfk_ord_nonstop, jfk_ord_sea, MockProvider,
@@ -36,7 +38,11 @@ fn two_stop_exit_b() -> Offer {
         kind: "connecting".into(),
         channel: "ndc".into(),
         source: "duffel".into(),
-        segments: vec![s("JFK", "CLT", "UA1"), s("CLT", "ORD", "UA2"), s("ORD", "DEN", "UA3")],
+        segments: vec![
+            s("JFK", "CLT", "UA1"),
+            s("CLT", "ORD", "UA2"),
+            s("ORD", "DEN", "UA3"),
+        ],
         price: Some(180.0),
         currency: "USD".into(),
         cabin: "ECONOMY".into(),
@@ -118,7 +124,10 @@ fn hidden_when_intended_is_the_second_stop() {
     assert_eq!(hit.exit_airport, "ORD");
     assert_eq!(hit.exit_segment_index, 1);
     assert_eq!(
-        hit.unused_segments.iter().map(|s| s.dest.as_str()).collect::<Vec<_>>(),
+        hit.unused_segments
+            .iter()
+            .map(|s| s.dest.as_str())
+            .collect::<Vec<_>>(),
         ["DEN"]
     );
     let honest = jfk_ord_nonstop("2026-11-19");
@@ -136,7 +145,10 @@ fn hidden_when_intended_is_the_third_stop() {
     let honest = jfk_ord_nonstop("2026-11-19");
     let (matches, _) = _classify_hidden(&[through], &hs(&["ORD", "MDW"]), &honest, None, 20.0);
     assert_eq!(
-        matches.iter().map(|m| m.through_offer.id.as_str()).collect::<Vec<_>>(),
+        matches
+            .iter()
+            .map(|m| m.through_offer.id.as_str())
+            .collect::<Vec<_>>(),
         ["three-stop-exit-b"]
     );
 }
@@ -243,7 +255,10 @@ fn mock_jfk_ord_first_target() {
     ];
     let standard = jfk_ord_nonstop(date);
     let (matches, rejected) = _classify_hidden(&offers, &hs(&["ORD"]), &standard, None, 20.0);
-    let ids: HashSet<_> = matches.iter().map(|m| m.through_offer.id.as_str()).collect();
+    let ids: HashSet<_> = matches
+        .iter()
+        .map(|m| m.through_offer.id.as_str())
+        .collect();
     assert_eq!(ids, HashSet::from(["mock-jfk-ord-den", "mock-jfk-ord-sea"]));
     let savings: std::collections::HashMap<_, _> = matches
         .iter()
@@ -274,7 +289,10 @@ fn index_one_offer_serves_two_searches() {
         classify_for_search(&through, &hs(&["JFK"]), &hs(&["ORD"])),
         Some("hidden_city")
     );
-    assert_eq!(classify_for_search(&through, &hs(&["JFK"]), &hs(&["SEA"])), None);
+    assert_eq!(
+        classify_for_search(&through, &hs(&["JFK"]), &hs(&["SEA"])),
+        None
+    );
     assert_eq!(
         ticketed_dests_through(&[through, jfk_dfw_lax("2026-10-10")], &hs(&["ORD"])),
         hs(&["DEN"])
@@ -398,4 +416,57 @@ fn discover_via_stops_include_later_connections() {
     let (ticketed, vias) = _via_stops(&offer, "JFK");
     assert_eq!(ticketed, "DEN");
     assert_eq!(vias, [(0, "CLT".into()), (1, "ORD".into())]);
+}
+
+fn live_honest(age_secs: i64) -> Offer {
+    let mut offer = Offer {
+        id: "live-ab".into(),
+        kind: "nonstop".into(),
+        channel: "ndc".into(),
+        source: "duffel".into(),
+        segments: vec![Segment {
+            origin: "JFK".into(),
+            dest: "ORD".into(),
+            carrier: "AA".into(),
+            flight_number: "AA100".into(),
+            dep: "2026-11-19T08:00".into(),
+            arr: "2026-11-19T10:15".into(),
+            duration_min: 135,
+            rbd: "Y".into(),
+            ..Segment::default()
+        }],
+        price: Some(240.0),
+        currency: "USD".into(),
+        cabin: "ECONOMY".into(),
+        carrier: "AA".into(),
+        duration_min: 135,
+        stops: 0,
+        first_flight: "AA100".into(),
+        live: Some(true),
+        ..Offer::default()
+    };
+    offer.retrieved_at = Some(
+        (chrono::Utc::now() - chrono::Duration::seconds(age_secs))
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+    );
+    offer
+}
+
+#[test]
+fn reuse_indexed_honest_only_fresh_live_duffel() {
+    let fresh = live_honest(5);
+    assert!(!_reuse_indexed_honest(&[fresh.clone()], true, true));
+    assert!(!_reuse_indexed_honest(&[fresh.clone()], false, false));
+    assert!(_reuse_indexed_honest(&[fresh.clone()], false, true));
+    let stale = live_honest(90);
+    assert!(!_reuse_indexed_honest(&[stale], false, true));
+    let mut mock = live_honest(5);
+    mock.source = "mock".into();
+    assert!(!_reuse_indexed_honest(&[mock], false, true));
+    let mut sandbox = live_honest(5);
+    sandbox.live = Some(false);
+    assert!(!_reuse_indexed_honest(&[sandbox], false, true));
+    let mut missing = live_honest(5);
+    missing.retrieved_at = None;
+    assert!(!_reuse_indexed_honest(&[missing], false, true));
 }

@@ -11,7 +11,11 @@ pub const MAX_LEG_FLIGHTS: usize = 3;
 
 pub fn next_day(date: &str) -> String {
     NaiveDate::parse_from_str(date, "%Y-%m-%d")
-        .map(|d| (d + chrono::Duration::days(1)).format("%Y-%m-%d").to_string())
+        .map(|d| {
+            (d + chrono::Duration::days(1))
+                .format("%Y-%m-%d")
+                .to_string()
+        })
         .unwrap_or_else(|_| date.to_string())
 }
 
@@ -60,11 +64,22 @@ pub fn bridge_pairs(
     if from_u.is_empty() || into_u.is_empty() {
         return vec![];
     }
-    if chosen.iter().any(|h| from_u.contains(h) && into_u.contains(h)) {
+    if chosen
+        .iter()
+        .any(|h| from_u.contains(h) && into_u.contains(h))
+    {
         return vec![];
     }
-    let lefts: Vec<String> = chosen.iter().filter(|h| from_u.contains(*h)).cloned().collect();
-    let rights: Vec<String> = chosen.iter().filter(|h| into_u.contains(*h)).cloned().collect();
+    let lefts: Vec<String> = chosen
+        .iter()
+        .filter(|h| from_u.contains(*h))
+        .cloned()
+        .collect();
+    let rights: Vec<String> = chosen
+        .iter()
+        .filter(|h| into_u.contains(*h))
+        .cloned()
+        .collect();
     let mut out = Vec::new();
     for h1 in &lefts {
         for h2 in &rights {
@@ -109,7 +124,11 @@ pub fn pick_transfer_hubs(
         .map(|h| h.to_uppercase())
         .filter(|h| h.len() == 3 && !exclude.contains(h))
         .collect();
-    let extra_rank: HashMap<String, usize> = extra.iter().enumerate().map(|(i, h)| (h.clone(), i)).collect();
+    let extra_rank: HashMap<String, usize> = extra
+        .iter()
+        .enumerate()
+        .map(|(i, h)| (h.clone(), i))
+        .collect();
     let mut seen = HashSet::new();
     let mut ranked: Vec<(i32, usize, String)> = Vec::new();
     for hub in from_u.iter().chain(into_u.iter()).chain(extra.iter()) {
@@ -117,7 +136,11 @@ pub fn pick_transfer_hubs(
             continue;
         }
         let overlap = i32::from(from_u.contains(hub)) + i32::from(into_u.contains(hub));
-        ranked.push((-overlap, extra_rank.get(hub).copied().unwrap_or(80), hub.clone()));
+        ranked.push((
+            -overlap,
+            extra_rank.get(hub).copied().unwrap_or(80),
+            hub.clone(),
+        ));
     }
     ranked.sort();
     let origin_c = continents.get(&origin_u).cloned().unwrap_or_default();
@@ -165,7 +188,10 @@ pub fn stitch_chain(parts: &[Offer], intended: impl Intended) -> Option<Offer> {
         return None;
     }
     let dests = intended.codes();
-    if parts.iter().any(|p| p.price.map(|x| x <= 0.0).unwrap_or(true)) {
+    if parts
+        .iter()
+        .any(|p| p.price.map(|x| x <= 0.0).unwrap_or(true))
+    {
         return None;
     }
     if parts.iter().any(|p| p.segments.is_empty()) {
@@ -312,7 +338,8 @@ pub fn combine_at_hubs(
         for ((h1, h2), middles) in mids {
             for left in cheapest(inbound.get(h1).map(|v| v.as_slice()).unwrap_or(&[]), 4) {
                 for mid in cheapest(middles, 3) {
-                    for right in cheapest(outbound.get(h2).map(|v| v.as_slice()).unwrap_or(&[]), 4) {
+                    for right in cheapest(outbound.get(h2).map(|v| v.as_slice()).unwrap_or(&[]), 4)
+                    {
                         if let Some(joined) =
                             stitch_chain(&[left.clone(), mid.clone(), right], intended)
                         {
@@ -351,11 +378,20 @@ pub fn combine_at_hubs(
             uniq.push(offer);
         }
     }
-    let twos: Vec<_> = uniq.iter().filter(|o| o.separate_tickets.len() <= 2).cloned().collect();
-    let mut threes: Vec<_> = uniq.iter().filter(|o| o.separate_tickets.len() >= 3).cloned().collect();
-    let best_two = twos.iter().filter_map(|o| o.price).fold(None, |acc, p| {
-        Some(acc.map(|a: f64| a.min(p)).unwrap_or(p))
-    });
+    let twos: Vec<_> = uniq
+        .iter()
+        .filter(|o| o.separate_tickets.len() <= 2)
+        .cloned()
+        .collect();
+    let mut threes: Vec<_> = uniq
+        .iter()
+        .filter(|o| o.separate_tickets.len() >= 3)
+        .cloned()
+        .collect();
+    let best_two = twos
+        .iter()
+        .filter_map(|o| o.price)
+        .fold(None, |acc, p| Some(acc.map(|a: f64| a.min(p)).unwrap_or(p)));
     if let Some(best_two) = best_two {
         threes.retain(|o| o.price.unwrap_or(1e12) < best_two);
     }

@@ -1,7 +1,7 @@
-use skiplagging::db::repo::{deal_from_row, HiddenDealRow};
-use skiplagging::providers::bookers::{booker_links, google_flights_url, google_tfs};
 use chrono::Utc;
 use serde_json::json;
+use skiplagging::db::repo::{deal_from_row, HiddenDealRow};
+use skiplagging::providers::bookers::{booker_links, google_flights_url, google_tfs};
 use sqlx::types::Json;
 
 #[test]
@@ -24,7 +24,10 @@ fn google_url_prefills_search_not_hash() {
 #[test]
 fn all_bookers_carry_route_and_date() {
     let links = booker_links("JFK", "ORD", "2026-10-10", 1, &[], "USD", "ECONOMY", None);
-    let by_id: std::collections::HashMap<_, _> = links.iter().map(|b| (b.id.as_str(), b.url.as_str())).collect();
+    let by_id: std::collections::HashMap<_, _> = links
+        .iter()
+        .map(|b| (b.id.as_str(), b.url.as_str()))
+        .collect();
     assert!(by_id["google-flights"].contains("tfs="));
     assert!(by_id["kayak"].contains("JFK-ORD/2026-10-10"));
     assert!(by_id["skyscanner"].contains("/jfk/ord/261010/"));
@@ -61,7 +64,10 @@ fn round_trip_bookers_use_return_date() {
         "ECONOMY",
         Some("2026-10-17"),
     );
-    let by_id: std::collections::HashMap<_, _> = links.iter().map(|b| (b.id.as_str(), b.url.as_str())).collect();
+    let by_id: std::collections::HashMap<_, _> = links
+        .iter()
+        .map(|b| (b.id.as_str(), b.url.as_str()))
+        .collect();
     assert!(by_id["google-flights"].contains(&google_tfs(
         "JFK",
         "ORD",
@@ -140,7 +146,13 @@ fn bookers_have_no_carrier_website_roster() {
         env!("CARGO_MANIFEST_DIR"),
         "/src/providers/bookers.rs"
     ));
-    for banned in ["aa.com", "delta.com", "united.com", "lufthansa.com", "emirates.com"] {
+    for banned in [
+        "aa.com",
+        "delta.com",
+        "united.com",
+        "lufthansa.com",
+        "emirates.com",
+    ] {
         assert!(!src.contains(banned), "{banned}");
     }
     let links = booker_links(
@@ -148,18 +160,30 @@ fn bookers_have_no_carrier_website_roster() {
         "YYY",
         "2026-11-02",
         1,
-        &[("ZZ".into(), "Zed Air".into()), ("BA".into(), "British Airways".into())],
+        &[
+            ("ZZ".into(), "Zed Air".into()),
+            ("BA".into(), "British Airways".into()),
+        ],
         "USD",
         "ECONOMY",
         None,
     );
     let hosts: Vec<_> = links.iter().map(|u| u.url.as_str()).collect();
-    assert!(hosts.iter().any(|u| u.contains("XXX") && u.contains("YYY") && u.contains("2026-11-02")));
-    let google = links.iter().find(|b| b.id == "google-flights").unwrap().url.as_str();
+    assert!(hosts
+        .iter()
+        .any(|u| u.contains("XXX") && u.contains("YYY") && u.contains("2026-11-02")));
+    let google = links
+        .iter()
+        .find(|b| b.id == "google-flights")
+        .unwrap()
+        .url
+        .as_str();
     assert!(google.contains("tfs="));
     assert!(!google.contains("#flt="));
     assert!(hosts.iter().all(|u| !u.contains("Zed")));
-    assert!(links.iter().any(|b| b.id == "carrier-BA" && b.name.starts_with("British")));
+    assert!(links
+        .iter()
+        .any(|b| b.id == "carrier-BA" && b.name.starts_with("British")));
     assert!(links.iter().any(|b| b.layer == "meta-search"));
     assert!(links.iter().any(|b| b.layer == "ota" && b.issues_ticket));
     let names: std::collections::HashSet<_> = links.iter().map(|b| b.name.as_str()).collect();
@@ -188,7 +212,12 @@ fn bookers_have_no_carrier_website_roster() {
         && b.url.contains("XXX.AIRPORT")
         && b.url.contains("YYY.AIRPORT")));
     let paris = booker_links("PAR", "LON", "2026-11-02", 1, &[], "USD", "ECONOMY", None);
-    let booking = paris.iter().find(|b| b.id == "booking-com").unwrap().url.as_str();
+    let booking = paris
+        .iter()
+        .find(|b| b.id == "booking-com")
+        .unwrap()
+        .url
+        .as_str();
     assert!(booking.contains("PAR.CITY") && booking.contains("LON.CITY"));
     assert!(paris
         .iter()
@@ -196,8 +225,12 @@ fn bookers_have_no_carrier_website_roster() {
         .unwrap()
         .url
         .contains("tfs="));
-    assert!(links.iter().any(|b| b.url.contains("trip.com") && b.url.contains("xxx") && b.url.contains("yyy")));
-    assert!(links.iter().any(|b| b.url.contains("kiwi.com") && b.url.contains("xxx") && b.url.contains("yyy")));
+    assert!(links
+        .iter()
+        .any(|b| b.url.contains("trip.com") && b.url.contains("xxx") && b.url.contains("yyy")));
+    assert!(links
+        .iter()
+        .any(|b| b.url.contains("kiwi.com") && b.url.contains("xxx") && b.url.contains("yyy")));
     assert!(links.iter().any(|b| b.url.contains("momondo.com")));
 }
 

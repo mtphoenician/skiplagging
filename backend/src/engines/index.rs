@@ -1,6 +1,8 @@
 use std::collections::HashSet;
 
-use crate::engines::hidden::{detect_hidden_city, is_standard_to, itinerary_fingerprint, ticketed_destination};
+use crate::engines::hidden::{
+    detect_hidden_city, is_standard_to, itinerary_fingerprint, ticketed_destination,
+};
 use crate::models::Offer;
 
 #[derive(Debug, Clone)]

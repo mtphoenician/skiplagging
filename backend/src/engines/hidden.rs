@@ -79,7 +79,11 @@ pub fn ticketed_destination(offer: &Offer) -> String {
             return last;
         }
     }
-    offer.segments.last().map(|s| s.dest.to_uppercase()).unwrap_or_default()
+    offer
+        .segments
+        .last()
+        .map(|s| s.dest.to_uppercase())
+        .unwrap_or_default()
 }
 
 pub fn detect_hidden_city(offer: &Offer, intended: impl Intended) -> Option<HiddenCityHit> {
@@ -141,7 +145,11 @@ pub fn itinerary_fingerprint(offer: &Offer) -> String {
         .join("|")
 }
 
-pub fn refresh_keeps_hidden_city(original: &Offer, refreshed: &Offer, intended: impl Intended) -> bool {
+pub fn refresh_keeps_hidden_city(
+    original: &Offer,
+    refreshed: &Offer,
+    intended: impl Intended,
+) -> bool {
     let dests = intended.codes();
     match (
         detect_hidden_city(original, &dests),

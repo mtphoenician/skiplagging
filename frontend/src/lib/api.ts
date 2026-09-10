@@ -24,8 +24,8 @@ export async function fetchAirport(iata: string): Promise<Airport | null> {
   return r.json();
 }
 
-export async function searchAirports(q: string): Promise<Airport[]> {
-  const r = await fetch(`${prefix}/airports?q=${encodeURIComponent(q)}`);
+export async function searchAirports(q: string, signal?: AbortSignal): Promise<Airport[]> {
+  const r = await fetch(`${prefix}/airports?q=${encodeURIComponent(q)}`, { signal });
   if (!r.ok) {
     const body = await r.json().catch(() => ({ detail: r.statusText }));
     throw new Error(apiDetail(body, 'Airport lookup failed'));
@@ -33,11 +33,20 @@ export async function searchAirports(q: string): Promise<Airport[]> {
   return r.json();
 }
 
-export async function searchFares(query: SearchQuery): Promise<SearchResponse> {
+export async function searchFares(
+  query: SearchQuery,
+  opts?: { bypassCache?: boolean }
+): Promise<SearchResponse> {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  const body: SearchQuery = { ...query };
+  if (opts?.bypassCache) {
+    headers['Cache-Control'] = 'no-cache';
+    body.refresh = true;
+  }
   const r = await fetch(`${prefix}/search`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(query)
+    headers,
+    body: JSON.stringify(body)
   });
   if (!r.ok) {
     const body = await r.json().catch(() => ({ detail: r.statusText }));
@@ -100,7 +109,7 @@ export function mergeSearch(fast: SearchResponse, deep: SearchResponse): SearchR
       return f ?? d;
     })
     .filter((c): c is ChannelGroup => Boolean(c));
-  return {
+    return {
     ...deep,
     honest_pick: deep.honest_pick ?? fast.honest_pick,
     best_pick: deep.best_pick ?? fast.best_pick,
@@ -109,6 +118,7 @@ export function mergeSearch(fast: SearchResponse, deep: SearchResponse): SearchR
     channels,
     bookers: deep.bookers?.length ? deep.bookers : fast.bookers,
     airline_names: { ...(fast.airline_names ?? {}), ...(deep.airline_names ?? {}) },
+    data_gaps: [...new Set([...(deep.data_gaps ?? []), ...(fast.data_gaps ?? [])])],
     traffic_origin: deep.traffic_origin?.aircraft?.length ? deep.traffic_origin : fast.traffic_origin,
     traffic_destination: deep.traffic_destination?.aircraft?.length
       ? deep.traffic_destination

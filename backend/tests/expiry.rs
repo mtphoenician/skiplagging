@@ -12,7 +12,13 @@ fn priced(expires: Option<&str>) -> Offer {
     let mut o = offer(
         "o",
         Some(200.0),
-        vec![seg("JFK", "ORD", "2026-10-10T08:00", "2026-10-10T10:00", "AA1")],
+        vec![seg(
+            "JFK",
+            "ORD",
+            "2026-10-10T08:00",
+            "2026-10-10T10:00",
+            "AA1",
+        )],
         0,
     );
     o.carrier = "AA".into();
@@ -39,7 +45,10 @@ fn past_expires_at_is_dropped() {
     assert!(!offer_unexpired_at(&dead, Some(now)));
     assert!(offer_unexpired_at(&live, Some(now)));
     let kept = unexpired_at(&[dead, live.clone()], Some(now));
-    assert_eq!(kept.iter().map(|o| o.id.as_str()).collect::<Vec<_>>(), ["o"]);
+    assert_eq!(
+        kept.iter().map(|o| o.id.as_str()).collect::<Vec<_>>(),
+        ["o"]
+    );
     assert_eq!(kept[0].expires_at, live.expires_at);
 }
 
@@ -67,8 +76,12 @@ fn sandbox_gap_names_the_test_token() {
         ..LiveTraffic::default()
     };
     let gaps = _gaps(&settings, None, None, &[], &[], &traffic, &[], None, false);
-    assert!(gaps.iter().any(|g| g.contains("sandbox") && g.contains("duffel_test_")));
-    assert!(!gaps.iter().any(|g| g.to_lowercase().contains("test inventory")));
+    assert!(gaps
+        .iter()
+        .any(|g| g.contains("sandbox") && g.contains("duffel_test_")));
+    assert!(!gaps
+        .iter()
+        .any(|g| g.to_lowercase().contains("test inventory")));
 }
 
 #[test]

@@ -22,7 +22,11 @@ pub fn _scan_dates() -> Vec<String> {
     let today = Local::now().date_naive();
     [21i64, 35, 49]
         .into_iter()
-        .map(|offset| (today + chrono::Duration::days(offset)).format("%Y-%m-%d").to_string())
+        .map(|offset| {
+            (today + chrono::Duration::days(offset))
+                .format("%Y-%m-%d")
+                .to_string()
+        })
         .collect()
 }
 
@@ -70,11 +74,7 @@ pub fn _cheapest_to(offers: &[Offer], dest: &str) -> Option<Offer> {
     })
 }
 
-async fn shop(
-    req: &ShopRequest,
-    duffel: Option<&DuffelProvider>,
-    sem: &Semaphore,
-) -> Vec<Offer> {
+async fn shop(req: &ShopRequest, duffel: Option<&DuffelProvider>, sem: &Semaphore) -> Vec<Offer> {
     let _g = match sem.acquire().await {
         Ok(g) => g,
         Err(_) => return vec![],
@@ -293,9 +293,7 @@ pub async fn discover_hidden_deals(
                         let gap = if lp != 0.0 { tp / lp } else { 99.0 };
                         closest.push((
                             gap,
-                            format!(
-                                "{origin}->{dest_b}->{dest_c} through={tp} local={lp} USD"
-                            ),
+                            format!("{origin}->{dest_b}->{dest_c} through={tp} local={lp} USD"),
                         ));
                         continue;
                     }
@@ -303,12 +301,7 @@ pub async fn discover_hidden_deals(
                     if !meaningful_saving(Some(saving), Some(settings.min_hidden_saving)) {
                         continue;
                     }
-                    let key = (
-                        origin.clone(),
-                        dest_b.clone(),
-                        dest_c.clone(),
-                        date.clone(),
-                    );
+                    let key = (origin.clone(), dest_b.clone(), dest_c.clone(), date.clone());
                     if !seen.insert(key) {
                         continue;
                     }
@@ -329,16 +322,8 @@ pub async fn discover_hidden_deals(
                         &c_ap.country,
                         exit_i,
                     );
-                    match_.bookers = booker_links(
-                        origin,
-                        &dest_c,
-                        date,
-                        1,
-                        &[],
-                        "USD",
-                        "ECONOMY",
-                        None,
-                    );
+                    match_.bookers =
+                        booker_links(origin, &dest_c, date, 1, &[], "USD", "ECONOMY", None);
                     repo::persist_hidden_deals(
                         pool,
                         &[match_.clone()],

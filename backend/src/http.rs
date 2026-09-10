@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use axum::extract::{Path, Query, State};
-use axum::http::{HeaderValue, Method, StatusCode};
+use axum::http::{HeaderMap, HeaderValue, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -10,7 +10,9 @@ use serde_json::{json, Value};
 use sqlx::PgPool;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 
-use crate::cache::{build_cache, search_key, SearchCache};
+use crate::cache::{
+    build_cache, cache_control_bypasses, search_key, stamp_http_cache_hit, SearchCache,
+};
 use crate::catalog::sources_payload;
 use crate::config::Settings;
 use crate::db::repo;
@@ -77,11 +79,24 @@ async fn health(State(st): State<AppState>) -> Json<Value> {
         "ok": true,
         "database": "postgresql",
         "shop": {
-            "duffel": s.duffel_enabled(),
+            "duffel": if s.duffel_live() {
+                "live"
+            } else if s.duffel_sandbox() {
+                "sandbox"
+            } else {
+                "off"
+            },
             "duffel_live": s.duffel_live(),
             "publish_deals": s.publish_deals(),
+            "fast_candidates": s.search_fast_candidates(),
+            "max_hidden_candidates": s.search_hidden_candidates(),
+            "max_provider_calls": s.search_call_cap(),
         },
-        "track": {"opensky": true, "aerodatabox": s.aerodatabox_enabled()},
+        "fx": {"live": crate::fx::rates_are_live()},
+        "track": {
+            "opensky": if s.opensky_oauth() { "oauth" } else { "anonymous" },
+            "aerodatabox": s.aerodatabox_enabled()
+        },
         "tables": db,
     }))
 }
@@ -90,6 +105,9 @@ async fn sources(State(st): State<AppState>) -> Json<Value> {
     let s = &st.settings;
     let enabled = std::collections::HashMap::from([
         ("duffel".into(), s.duffel_enabled()),
+        ("duffel_live".into(), s.duffel_live()),
+        ("duffel_sandbox".into(), s.duffel_sandbox()),
+        ("opensky_oauth".into(), s.opensky_oauth()),
         ("aerodatabox".into(), s.aerodatabox_enabled()),
     ]);
     Json(json!({
@@ -97,9 +115,9 @@ async fn sources(State(st): State<AppState>) -> Json<Value> {
             "reference — OurAirports countries/regions/airports/runways/navaids + GeoNames countryInfo",
             "historical-route-map — who used to fly B→C (OpenFlights, stale)",
             "schedule-status — FIDS board (AeroDataBox if keyed)",
-            "priced-offer — NDC shop (Duffel if keyed)",
+            "priced-offer — NDC shop (Duffel live token; test tokens are dropped)",
             "order-pnr — not implemented; we never create a reservation",
-            "live-track — ADS-B state vectors (OpenSky)",
+            "live-track — ADS-B state vectors (OpenSky anonymous or OAuth)",
             "meta-search / ota / airline-direct — booker deep-links only",
         ],
         "sources": sources_payload(&enabled),
@@ -108,7 +126,9 @@ async fn sources(State(st): State<AppState>) -> Json<Value> {
 
 async fn defaults(State(st): State<AppState>) -> Response {
     match repo::default_pair(&st.pool).await {
-        Ok((Some(origin), Some(dest))) => Json(json!({"origin": origin, "destination": dest})).into_response(),
+        Ok((Some(origin), Some(dest))) => {
+            Json(json!({"origin": origin, "destination": dest})).into_response()
+        }
         _ => err(
             StatusCode::SERVICE_UNAVAILABLE,
             "Route table is empty. Run cargo run --bin ingest",
@@ -117,7 +137,9 @@ async fn defaults(State(st): State<AppState>) -> Response {
 }
 
 async fn continents(State(st): State<AppState>) -> Json<Value> {
-    Json(json!(repo::list_continents(&st.pool).await.unwrap_or_default()))
+    Json(json!(repo::list_continents(&st.pool)
+        .await
+        .unwrap_or_default()))
 }
 
 #[derive(Deserialize)]
@@ -127,9 +149,9 @@ struct Q {
 }
 
 async fn countries(State(st): State<AppState>, Query(q): Query<Q>) -> Json<Value> {
-    Json(json!(
-        repo::search_countries(&st.pool, &q.q, 300).await.unwrap_or_default()
-    ))
+    Json(json!(repo::search_countries(&st.pool, &q.q, 300)
+        .await
+        .unwrap_or_default()))
 }
 
 async fn country(State(st): State<AppState>, Path(iso2): Path<String>) -> Response {
@@ -143,9 +165,9 @@ async fn country(State(st): State<AppState>, Path(iso2): Path<String>) -> Respon
 }
 
 async fn country_regions(State(st): State<AppState>, Path(iso2): Path<String>) -> Json<Value> {
-    Json(json!(
-        repo::regions_for(&st.pool, &iso2).await.unwrap_or_default()
-    ))
+    Json(json!(repo::regions_for(&st.pool, &iso2)
+        .await
+        .unwrap_or_default()))
 }
 
 async fn airports(State(st): State<AppState>, Query(q): Query<Q>) -> Response {
@@ -250,11 +272,11 @@ async fn deals(State(st): State<AppState>, Query(q): Query<DealsQ>) -> Json<Valu
         return Json(json!([]));
     }
     let limit = q.limit.clamp(1, 120);
-    Json(json!(
-        repo::list_hidden_deals(&st.pool, limit, &q.origin, &q.dest)
-            .await
-            .unwrap_or_default()
-    ))
+    Json(json!(repo::list_hidden_deals(
+        &st.pool, limit, &q.origin, &q.dest
+    )
+    .await
+    .unwrap_or_default()))
 }
 
 fn cache_key(query: &SearchQuery) -> String {
@@ -309,20 +331,26 @@ fn json_err(e: axum::extract::rejection::JsonRejection) -> Response {
 
 async fn search(
     State(st): State<AppState>,
+    headers: HeaderMap,
     body: Result<Json<SearchQuery>, axum::extract::rejection::JsonRejection>,
 ) -> Response {
     let Json(query) = match body {
         Ok(j) => j,
         Err(e) => return json_err(e),
     };
-    let query = match validate_query(query) {
+    let mut query = match validate_query(query) {
         Ok(q) => q,
         Err(r) => return r,
     };
+    let bypass = query.refresh
+        || cache_control_bypasses(headers.get("cache-control").and_then(|v| v.to_str().ok()));
+    query.refresh = false;
     let key = cache_key(&query);
-    if let Some(mut cached) = st.cache.get(&key) {
+    if bypass {
+        st.cache.invalidate(&key);
+    } else if let Some(mut cached) = st.cache.get(&key) {
         if let Some(debug) = cached.search_debug.as_mut() {
-            debug.cache = "fresh".into();
+            debug.cache = stamp_http_cache_hit(&debug.cache);
         }
         return Json(cached).into_response();
     }
@@ -464,6 +492,12 @@ async fn debug_budget(State(st): State<AppState>, Query(q): Query<BudgetQ>) -> J
         }
     }
     summary["cost_per_call_usd"] = json!(st.settings.search_cost_usd);
+    summary["search_budget"] = json!({
+        "fast_candidates": st.settings.search_fast_candidates(),
+        "max_hidden_candidates": st.settings.search_hidden_candidates(),
+        "max_provider_calls": st.settings.search_call_cap(),
+        "duffel_live": st.settings.duffel_live(),
+    });
     Json(summary)
 }
 
@@ -489,6 +523,7 @@ pub async fn serve() -> anyhow::Result<()> {
         .pool_max_idle_per_host(20)
         .build()?;
     let cache = build_cache(&settings);
+    crate::fx::spawn_background_refresh(http.clone());
     let app = router(AppState {
         settings,
         pool,

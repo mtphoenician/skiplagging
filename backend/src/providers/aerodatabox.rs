@@ -21,7 +21,9 @@ impl AeroDataBoxProvider {
     pub async fn board(&self, iata: &str, direction: &str) -> anyhow::Result<Vec<BoardFlight>> {
         let r = self
             .client
-            .get(format!("https://aerodatabox.p.rapidapi.com/flights/airports/iata/{iata}"))
+            .get(format!(
+                "https://aerodatabox.p.rapidapi.com/flights/airports/iata/{iata}"
+            ))
             .query(&[
                 ("offsetMinutes", "-120"),
                 ("durationMinutes", "720"),
@@ -47,7 +49,12 @@ impl AeroDataBoxProvider {
             "arrivals"
         };
         let mut flights = Vec::new();
-        for raw in body.get(key).and_then(|v| v.as_array()).cloned().unwrap_or_default() {
+        for raw in body
+            .get(key)
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default()
+        {
             if let Some(parsed) = one(&raw, iata, direction) {
                 flights.push(parsed);
             }
@@ -67,10 +74,18 @@ fn one(raw: &Value, iata: &str, direction: &str) -> Option<BoardFlight> {
         .and_then(|a| a.get("iata").or_else(|| a.get("name")))
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
-    let dep = raw.get("departure").or_else(|| raw.get("movement")).cloned().unwrap_or(serde_json::json!({}));
+    let dep = raw
+        .get("departure")
+        .or_else(|| raw.get("movement"))
+        .cloned()
+        .unwrap_or(serde_json::json!({}));
     let arr = raw.get("arrival").cloned().unwrap_or(serde_json::json!({}));
-    let (origin, dest, sched, est, terminal, gate) = if direction.to_lowercase().starts_with("dep") {
-        let other = arr.get("airport").and_then(|a| a.get("iata")).and_then(|v| v.as_str());
+    let (origin, dest, sched, est, terminal, gate) = if direction.to_lowercase().starts_with("dep")
+    {
+        let other = arr
+            .get("airport")
+            .and_then(|a| a.get("iata"))
+            .and_then(|v| v.as_str());
         let sched = dep
             .get("scheduledTime")
             .and_then(|t| t.get("local"))
@@ -82,13 +97,23 @@ fn one(raw: &Value, iata: &str, direction: &str) -> Option<BoardFlight> {
         (
             Some(iata.to_string()),
             other.map(|s| s.to_string()),
-            sched.and_then(|v| v.as_str()).map(|s| s.chars().take(19).collect()),
-            est.and_then(|v| v.as_str()).map(|s| s.chars().take(19).collect()),
-            dep.get("terminal").and_then(|v| v.as_str()).map(|s| s.to_string()),
-            dep.get("gate").and_then(|v| v.as_str()).map(|s| s.to_string()),
+            sched
+                .and_then(|v| v.as_str())
+                .map(|s| s.chars().take(19).collect()),
+            est.and_then(|v| v.as_str())
+                .map(|s| s.chars().take(19).collect()),
+            dep.get("terminal")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            dep.get("gate")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
         )
     } else {
-        let other = dep.get("airport").and_then(|a| a.get("iata")).and_then(|v| v.as_str());
+        let other = dep
+            .get("airport")
+            .and_then(|a| a.get("iata"))
+            .and_then(|v| v.as_str());
         let sched = arr
             .get("scheduledTime")
             .and_then(|t| t.get("local"))
@@ -100,10 +125,17 @@ fn one(raw: &Value, iata: &str, direction: &str) -> Option<BoardFlight> {
         (
             other.map(|s| s.to_string()),
             Some(iata.to_string()),
-            sched.and_then(|v| v.as_str()).map(|s| s.chars().take(19).collect()),
-            est.and_then(|v| v.as_str()).map(|s| s.chars().take(19).collect()),
-            arr.get("terminal").and_then(|v| v.as_str()).map(|s| s.to_string()),
-            arr.get("gate").and_then(|v| v.as_str()).map(|s| s.to_string()),
+            sched
+                .and_then(|v| v.as_str())
+                .map(|s| s.chars().take(19).collect()),
+            est.and_then(|v| v.as_str())
+                .map(|s| s.chars().take(19).collect()),
+            arr.get("terminal")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            arr.get("gate")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
         )
     };
     let status = raw.get("status").and_then(|v| {

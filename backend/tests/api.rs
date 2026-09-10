@@ -26,12 +26,25 @@ async fn get(app: axum::Router, uri: &str) -> (StatusCode, Value) {
 }
 
 async fn post(app: axum::Router, uri: &str, body: Value) -> (StatusCode, Value) {
+    post_with(app, uri, body, &[]).await
+}
+
+async fn post_with(
+    app: axum::Router,
+    uri: &str,
+    body: Value,
+    extra: &[(&str, &str)],
+) -> (StatusCode, Value) {
+    let mut builder = Request::builder()
+        .method("POST")
+        .uri(uri)
+        .header("content-type", "application/json");
+    for (k, v) in extra {
+        builder = builder.header(*k, *v);
+    }
     let response = app
         .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri(uri)
-                .header("content-type", "application/json")
+            builder
                 .body(Body::from(serde_json::to_vec(&body).unwrap()))
                 .unwrap(),
         )
@@ -63,8 +76,16 @@ async fn continents_and_countries_come_from_tables() {
     let fr = repo::get_country(&pool, "FR").await.unwrap().unwrap();
     let regions = repo::regions_for(&pool, "US").await.unwrap();
     assert!(!names.is_empty());
-    assert!(!us.name.is_empty() && us.iso3.as_deref() == Some("USA") && !us.capital.is_empty() && !us.currency_code.is_empty());
-    assert_eq!(us.continent_name, names.get(&us.continent).cloned().unwrap_or_default());
+    assert!(
+        !us.name.is_empty()
+            && us.iso3.as_deref() == Some("USA")
+            && !us.capital.is_empty()
+            && !us.currency_code.is_empty()
+    );
+    assert_eq!(
+        us.continent_name,
+        names.get(&us.continent).cloned().unwrap_or_default()
+    );
     assert!(!fr.capital.is_empty());
     assert!(regions.len() >= 50);
 }
@@ -83,21 +104,30 @@ async fn airport_search_ranks_cities_not_substrings() {
     let stub = repo::search_airports(&pool, "par", 12).await.unwrap();
     assert_eq!(paris[0].type_, "city");
     assert_eq!(paris[0].iata, "PAR");
-    assert!(["CDG", "ORY"].iter().all(|c| paris[1..4].iter().any(|a| a.iata == *c)));
+    assert!(["CDG", "ORY"]
+        .iter()
+        .all(|c| paris[1..4].iter().any(|a| a.iata == *c)));
     assert!(paris.iter().all(|a| {
-        !a.region_name.to_lowercase().contains("parish") || a.city.to_lowercase().starts_with("paris")
+        !a.region_name.to_lowercase().contains("parish")
+            || a.city.to_lowercase().starts_with("paris")
     }));
     assert_eq!(stub[0].type_, "city");
     assert_eq!(stub[0].iata, "PAR");
     assert_eq!(nyc[0].type_, "city");
     assert_eq!(nyc[0].iata, "NYC");
-    assert!(["JFK", "LGA", "EWR"].iter().all(|c| nyc[1..4].iter().any(|a| a.iata == *c)));
+    assert!(["JFK", "LGA", "EWR"]
+        .iter()
+        .all(|c| nyc[1..4].iter().any(|a| a.iata == *c)));
     assert_eq!(tokyo[0].type_, "city");
     assert_eq!(tokyo[0].iata, "TYO");
-    assert!(["HND", "NRT"].iter().all(|c| tokyo[1..3].iter().any(|a| a.iata == *c)));
+    assert!(["HND", "NRT"]
+        .iter()
+        .all(|c| tokyo[1..3].iter().any(|a| a.iata == *c)));
     assert_eq!(sao[0].type_, "city");
     assert_eq!(sao[0].iata, "SAO");
-    assert!(["GRU", "CGH"].iter().all(|c| sao[1..3].iter().any(|a| a.iata == *c)));
+    assert!(["GRU", "CGH"]
+        .iter()
+        .all(|c| sao[1..3].iter().any(|a| a.iata == *c)));
     assert_eq!(rome[0].type_, "city");
     assert_eq!(rome[0].iata, "ROM");
     assert_eq!(nice[0].iata, "NCE");
@@ -107,6 +137,16 @@ async fn airport_search_ranks_cities_not_substrings() {
     assert!(london[0].members.iter().any(|m| m == "LHR"));
     assert_eq!(ny[0].type_, "city");
     assert_eq!(ny[0].iata, "NYC");
+    let pa = repo::search_airports(&pool, "pa", 12).await.unwrap();
+    let pa_codes: Vec<_> = pa
+        .iter()
+        .map(|a| format!("{}:{}:{}", a.iata, a.city, a.country))
+        .collect();
+    assert!(
+        pa.iter()
+            .any(|a| a.iata == "PAR" || a.city.to_lowercase().starts_with("paris")),
+        "two-letter ISO PA must not hide Paris behind Panama, got {pa_codes:?}"
+    );
 }
 
 #[tokio::test]
@@ -119,8 +159,12 @@ async fn country_lookup_is_exact_for_codes() {
     let cote = repo::search_countries(&pool, "cote", 300).await.unwrap();
     let tokyo = repo::search_countries(&pool, "tokyo", 300).await.unwrap();
     let united = repo::search_countries(&pool, "united", 300).await.unwrap();
-    let de = repo::search_countries(&pool, "deutschland", 300).await.unwrap();
-    let ivory = repo::search_countries(&pool, "ivory coast", 300).await.unwrap();
+    let de = repo::search_countries(&pool, "deutschland", 300)
+        .await
+        .unwrap();
+    let ivory = repo::search_countries(&pool, "ivory coast", 300)
+        .await
+        .unwrap();
     let uk = repo::search_countries(&pool, "UK", 300).await.unwrap();
     assert_eq!(us.len(), 1);
     assert_eq!(us[0].iso2, "US");
@@ -128,10 +172,14 @@ async fn country_lookup_is_exact_for_codes() {
     assert_eq!(usa[0].iso3.as_deref(), Some("USA"));
     assert_eq!(fr.len(), 1);
     assert_eq!(fr[0].iso2, "FR");
-    assert_eq!(france.iter().map(|c| c.iso2.as_str()).collect::<Vec<_>>(), ["FR"]);
+    assert_eq!(
+        france.iter().map(|c| c.iso2.as_str()).collect::<Vec<_>>(),
+        ["FR"]
+    );
     assert_eq!(cote[0].iso2, "CI");
     assert_eq!(tokyo[0].iso2, "JP");
-    let united_codes: std::collections::HashSet<_> = united.iter().map(|c| c.iso2.as_str()).collect();
+    let united_codes: std::collections::HashSet<_> =
+        united.iter().map(|c| c.iso2.as_str()).collect();
     assert!(["US", "GB", "AE"].iter().all(|c| united_codes.contains(c)));
     assert_eq!(de.len(), 1);
     assert_eq!(de[0].iso2, "DE");
@@ -144,7 +192,9 @@ async fn country_lookup_is_exact_for_codes() {
 #[tokio::test]
 async fn airport_search_by_country_and_region_names() {
     let pool = pool().await;
-    let by_name = repo::search_airports(&pool, "united states", 12).await.unwrap();
+    let by_name = repo::search_airports(&pool, "united states", 12)
+        .await
+        .unwrap();
     let by_region = repo::search_airports(&pool, "illinois", 12).await.unwrap();
     let france = repo::search_airports(&pool, "france", 12).await.unwrap();
     let (origin, dest) = repo::default_pair(&pool).await.unwrap();
@@ -155,7 +205,9 @@ async fn airport_search_by_country_and_region_names() {
     assert!(france.iter().all(|a| a.country == "FR"));
     assert!(france.iter().any(|a| a.iata == "CDG" || a.iata == "ORY"));
     assert!(!by_region.is_empty());
-    assert!(by_region.iter().any(|a| a.region_name.to_lowercase() == "illinois"));
+    assert!(by_region
+        .iter()
+        .any(|a| a.region_name.to_lowercase() == "illinois"));
     let origin = origin.unwrap();
     let dest = dest.unwrap();
     assert_ne!(origin.iata, dest.iata);
@@ -167,9 +219,17 @@ async fn airport_detail_has_real_runways() {
     let pool = pool().await;
     let (origin, _) = repo::default_pair(&pool).await.unwrap();
     let origin = origin.unwrap();
-    let detail = repo::get_airport(&pool, &origin.iata, true).await.unwrap().unwrap();
+    let detail = repo::get_airport(&pool, &origin.iata, true)
+        .await
+        .unwrap()
+        .unwrap();
     assert!(!detail.runways.is_empty());
-    let longest = detail.runways.iter().filter_map(|r| r.length_ft).max().unwrap_or(0);
+    let longest = detail
+        .runways
+        .iter()
+        .filter_map(|r| r.length_ft)
+        .max()
+        .unwrap_or(0);
     assert!(longest > 3000);
 }
 
@@ -178,9 +238,13 @@ async fn hidden_city_candidates_are_route_rows() {
     let pool = pool().await;
     let (_, dest) = repo::default_pair(&pool).await.unwrap();
     let dest = dest.unwrap();
-    let spokes = repo::destinations_from(&pool, &dest.iata, 12).await.unwrap();
+    let spokes = repo::destinations_from(&pool, &dest.iata, 12)
+        .await
+        .unwrap();
     assert!(!spokes.is_empty());
-    assert!(spokes.iter().all(|(code, airline, _)| code.len() == 3 && !airline.is_empty()));
+    assert!(spokes
+        .iter()
+        .all(|(code, airline, _)| code.len() == 3 && !airline.is_empty()));
 }
 
 #[tokio::test]
@@ -191,15 +255,27 @@ async fn health_and_defaults_and_search() {
     assert_eq!(health["ok"], true);
     assert!(health["tables"]["countries"].as_i64().unwrap() >= 200);
     assert_eq!(health["database"], "postgresql");
+    let duffel_mode = health["shop"]["duffel"].as_str().unwrap();
+    assert!(matches!(duffel_mode, "live" | "sandbox" | "off"));
+    let opensky_mode = health["track"]["opensky"].as_str().unwrap();
+    assert!(matches!(opensky_mode, "oauth" | "anonymous"));
 
     let (st, defaults) = get(app.clone(), "/defaults").await;
     assert_eq!(st, StatusCode::OK);
     let o = defaults["origin"]["iata"].as_str().unwrap();
     let d = defaults["destination"]["iata"].as_str().unwrap();
     assert_ne!(o, d);
-    assert!(!defaults["origin"]["country_name"].as_str().unwrap().is_empty());
+    assert!(!defaults["origin"]["country_name"]
+        .as_str()
+        .unwrap()
+        .is_empty());
 
-    let q = defaults["origin"]["country_name"].as_str().unwrap().chars().take(6).collect::<String>();
+    let q = defaults["origin"]["country_name"]
+        .as_str()
+        .unwrap()
+        .chars()
+        .take(6)
+        .collect::<String>();
     let (st, countries) = get(app.clone(), &format!("/countries?q={q}")).await;
     assert_eq!(st, StatusCode::OK);
     assert!(countries.as_array().unwrap().len() > 0);
@@ -225,7 +301,10 @@ async fn health_and_defaults_and_search() {
     .await;
     assert_eq!(st, StatusCode::OK);
     assert_eq!(data["origin"]["iata"], o);
-    assert!(!data["destination"]["country_name"].as_str().unwrap().is_empty());
+    assert!(!data["destination"]["country_name"]
+        .as_str()
+        .unwrap()
+        .is_empty());
     assert!(data["bookers"].as_array().unwrap().len() > 0);
     assert!(data["bookers"]
         .as_array()
@@ -261,7 +340,11 @@ async fn health_and_defaults_and_search() {
     )
     .await;
     assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY);
-    assert!(cabin["detail"].as_str().unwrap().to_lowercase().contains("cabin"));
+    assert!(cabin["detail"]
+        .as_str()
+        .unwrap()
+        .to_lowercase()
+        .contains("cabin"));
 
     let (st, date) = post(
         app.clone(),
@@ -270,7 +353,11 @@ async fn health_and_defaults_and_search() {
     )
     .await;
     assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY);
-    assert!(date["detail"].as_str().unwrap().to_lowercase().contains("date"));
+    assert!(date["detail"]
+        .as_str()
+        .unwrap()
+        .to_lowercase()
+        .contains("date"));
 
     let (st, _) = post(
         app,
@@ -291,8 +378,12 @@ async fn mock_jfk_ord_search_shows_hidden_city() {
     )
     .await;
     assert_eq!(st, StatusCode::OK);
+    assert_eq!(data["search_debug"]["reused_honest"], false);
+    assert_ne!(data["search_debug"]["cache"], "fresh");
     assert_eq!(data["honest_pick"]["offer"]["price"], 240.0);
-    let hidden = data["hidden_if_cheaper"]["through_offer"]["id"].as_str().unwrap();
+    let hidden = data["hidden_if_cheaper"]["through_offer"]["id"]
+        .as_str()
+        .unwrap();
     assert!(hidden.contains("den") || hidden.contains("sea"));
     let ids: Vec<_> = data["hidden_city"]
         .as_array()
@@ -317,6 +408,61 @@ async fn mock_jfk_ord_search_shows_hidden_city() {
         .unwrap()
         .iter()
         .any(|i| i["id"] == "documents"));
+    let gaps: Vec<_> = data["data_gaps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|g| g.as_str().unwrap().to_lowercase())
+        .collect();
+    assert!(!gaps.iter().any(|g| g.contains("no priced inversion")));
+}
+
+#[tokio::test]
+async fn sources_mark_duffel_live_sandbox_or_off() {
+    let app = app().await;
+    let (st, body) = get(app, "/sources").await;
+    assert_eq!(st, StatusCode::OK);
+    let duffel = body["sources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["id"] == "duffel")
+        .unwrap();
+    let status = duffel["status"].as_str().unwrap();
+    let label = duffel["status_label"].as_str().unwrap();
+    assert_ne!(status, "on");
+    assert_ne!(label, "On");
+    let settings = skiplagging::config::Settings::load();
+    if settings.duffel_live() {
+        assert_eq!(status, "live");
+        assert_eq!(label, "Live");
+        assert_eq!(duffel["configured"], true);
+    } else if settings.duffel_sandbox() {
+        assert_eq!(status, "sandbox");
+        assert_eq!(label, "Sandbox — offers dropped");
+        assert_eq!(duffel["configured"], false);
+    } else {
+        assert_eq!(status, "off");
+        assert_eq!(label, "Needs a key");
+        assert_eq!(duffel["configured"], false);
+    }
+
+    let opensky = body["sources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["id"] == "opensky")
+        .unwrap();
+    let os_status = opensky["status"].as_str().unwrap();
+    assert_ne!(os_status, "on");
+    if settings.opensky_oauth() {
+        assert_eq!(os_status, "oauth");
+        assert_eq!(opensky["status_label"], "OAuth");
+    } else {
+        assert_eq!(os_status, "anonymous");
+        assert_eq!(opensky["status_label"], "Anonymous");
+    }
+    assert_eq!(opensky["configured"], true);
 }
 
 #[tokio::test]
@@ -337,6 +483,14 @@ async fn mock_round_trip_is_honest_only_http() {
     assert_eq!(st, StatusCode::OK);
     assert_eq!(data["honest_pick"]["offer"]["price"], 430.0);
     assert!(data["hidden_if_cheaper"].is_null());
+    let gaps: Vec<_> = data["data_gaps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|g| g.as_str().unwrap().to_lowercase())
+        .collect();
+    assert!(gaps.iter().any(|g| g.contains("one-way")));
+    assert!(!gaps.iter().any(|g| g.contains("no priced inversion")));
 }
 
 #[tokio::test]
@@ -350,8 +504,14 @@ async fn track_uses_opensky_or_explains_gap() {
     assert!(traffic["trackers"].as_array().unwrap().len() > 0);
     assert_eq!(traffic["layer"], "live-track");
     assert!(
-        traffic["aircraft"].as_array().map(|a| !a.is_empty()).unwrap_or(false)
-            || traffic["note"].as_str().map(|n| !n.is_empty()).unwrap_or(false)
+        traffic["aircraft"]
+            .as_array()
+            .map(|a| !a.is_empty())
+            .unwrap_or(false)
+            || traffic["note"]
+                .as_str()
+                .map(|n| !n.is_empty())
+                .unwrap_or(false)
     );
 }
 
@@ -412,4 +572,56 @@ async fn refresh_endpoint_matches_mock_contract() {
     let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let parsed: Value = serde_json::from_slice(&bytes).unwrap();
     assert!(parsed["detail"].as_str().unwrap().len() > 0);
+}
+
+fn jfk_ord_body() -> Value {
+    json!({"origin": "JFK", "destination": "ORD", "date": "2026-10-10", "include_nearby": false})
+}
+
+#[tokio::test]
+async fn repeat_search_stamps_http_cache_not_fresh() {
+    let app = app().await;
+    let body = jfk_ord_body();
+    let (st, first) = post(app.clone(), "/search", body.clone()).await;
+    assert_eq!(st, StatusCode::OK);
+    let c1 = first["search_debug"]["cache"].as_str().unwrap();
+    assert_ne!(c1, "fresh");
+    assert!(!c1.starts_with("http-cache"));
+    assert!(c1 == "miss" || c1 == "index" || c1 == "index+live", "{c1}");
+
+    let (st, second) = post(app.clone(), "/search", body).await;
+    assert_eq!(st, StatusCode::OK);
+    let c2 = second["search_debug"]["cache"].as_str().unwrap();
+    assert!(c2.starts_with("http-cache("), "{c2}");
+    assert!(!c2.contains("fresh"));
+    assert_eq!(
+        second["honest_pick"]["offer"]["price"],
+        first["honest_pick"]["offer"]["price"]
+    );
+}
+
+#[tokio::test]
+async fn recheck_refresh_flag_bypasses_http_cache() {
+    let app = app().await;
+    let body = jfk_ord_body();
+    let _ = post(app.clone(), "/search", body.clone()).await;
+    let mut refresh = body;
+    refresh["refresh"] = json!(true);
+    let (st, data) = post(app, "/search", refresh).await;
+    assert_eq!(st, StatusCode::OK);
+    let cache = data["search_debug"]["cache"].as_str().unwrap();
+    assert!(!cache.starts_with("http-cache"), "{cache}");
+    assert_ne!(cache, "fresh");
+}
+
+#[tokio::test]
+async fn recheck_cache_control_bypasses_http_cache() {
+    let app = app().await;
+    let body = jfk_ord_body();
+    let _ = post(app.clone(), "/search", body.clone()).await;
+    let (st, data) = post_with(app, "/search", body, &[("cache-control", "no-cache")]).await;
+    assert_eq!(st, StatusCode::OK);
+    let cache = data["search_debug"]["cache"].as_str().unwrap();
+    assert!(!cache.starts_with("http-cache"), "{cache}");
+    assert_ne!(cache, "fresh");
 }

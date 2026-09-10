@@ -12,11 +12,12 @@ use crate::budget::{start_ledger, timed_shop, LEDGER};
 use crate::config::Settings;
 use crate::db::repo;
 use crate::engines::candidates::{
-    hub_probabilities, rank_candidates, record_offer, select_candidates, Candidate,
+    assign_source, hub_probabilities, rank_candidates, record_offer, select_candidates, Candidate,
 };
 use crate::engines::expiry::{offer_unexpired, unexpired};
 use crate::engines::hidden::{
-    detect_hidden_city, hidden_city_savings, is_standard_to, meaningful_saving, ticketed_destination,
+    detect_hidden_city, hidden_city_savings, is_standard_to, meaningful_saving,
+    ticketed_destination,
 };
 use crate::engines::index::{classify_for_search, ticketed_dests_through};
 use crate::engines::learn::build_batch;
@@ -26,17 +27,84 @@ use crate::engines::self_transfer::{
 };
 use crate::fx::{offer_in_usd, offers_in_usd, refresh_rates};
 use crate::models::{
-    Airport, BoardFlight, CandidateTrace, ChannelGroup, ConnectionHint, HiddenCityMatch, HonestPick,
-    LiveTraffic, Offer, SearchDebug, SearchQuery, SearchResponse, ShopRequest,
+    Airport, BoardFlight, CandidateTrace, ChannelGroup, ConnectionHint, HiddenCityMatch,
+    HonestPick, LiveTraffic, Offer, SearchDebug, SearchQuery, SearchResponse, ShopRequest,
 };
 use crate::providers::aerodatabox::AeroDataBoxProvider;
 use crate::providers::bookers::booker_links;
 use crate::providers::duffel::DuffelProvider;
 use crate::providers::mock::MockProvider;
 use crate::providers::opensky::{tracker_links, OpenSkyProvider};
-use crate::providers::sandbox::{is_sandbox_offer, is_test_carrier};
+use crate::providers::sandbox::{is_live_fare, is_sandbox_offer, is_test_carrier};
 
 pub const SIDE_TIMEOUT: Duration = Duration::from_millis(1200);
+/// Reuse indexed honest A→B only when it is a live Duffel fare this fresh.
+/// Offer TTL (900s) still applies to hidden-city through tickets. HTTP cache is
+/// separately capped at 45s in live mode. Recheck / Cache-Control: no-cache skips it.
+/// Freshness only — never skip honest A→B to free ledger slots for extra Cs.
+pub const HONEST_LIVE_MAX_AGE_SECS: i64 = 60;
+
+/// Ticketed-C shops this pass. Fast uses FAST_CANDIDATES. Deep shops the rest
+/// up to MAX_HIDDEN_CANDIDATES (`already_probed` = fast `expanded_destinations`,
+/// not covered through-dests we already have for free).
+pub fn hidden_probe_budget(mode: &str, already_probed: usize, fast: usize, hidden: usize) -> usize {
+    if mode == "fast" {
+        fast
+    } else {
+        hidden.saturating_sub(already_probed)
+    }
+}
+
+/// Self-transfer hubs this pass after leaving `cs_reserve` paid slots for Cs.
+pub fn _self_transfer_hub_cap(mode: &str, remaining: i32, cs_reserve: i32) -> i32 {
+    let want: i32 = if mode == "fast" { 2 } else { 3 };
+    let per_hub: i32 = if mode == "fast" { 2 } else { 3 };
+    if per_hub <= 0 {
+        return 0;
+    }
+    let left = (remaining - cs_reserve).max(0);
+    want.min(left / per_hub)
+}
+
+fn parse_retrieved_at(raw: &str) -> Option<DateTime<Utc>> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    if let Ok(dt) = DateTime::parse_from_rfc3339(raw) {
+        return Some(dt.with_timezone(&Utc));
+    }
+    if let Ok(dt) = DateTime::parse_from_rfc3339(&format!("{raw}Z")) {
+        return Some(dt.with_timezone(&Utc));
+    }
+    let compact = raw.trim_end_matches(" UTC").trim().replace(' ', "T");
+    DateTime::parse_from_rfc3339(&format!("{compact}Z"))
+        .ok()
+        .map(|d| d.with_timezone(&Utc))
+}
+
+fn offer_age_secs(offer: &Offer) -> Option<i64> {
+    let parsed = parse_retrieved_at(offer.retrieved_at.as_deref()?.trim())?;
+    Some((Utc::now() - parsed).num_seconds())
+}
+
+fn is_fresh_live_honest(offer: &Offer) -> bool {
+    is_live_fare(offer)
+        && offer_age_secs(offer)
+            .map(|age| age <= HONEST_LIVE_MAX_AGE_SECS)
+            .unwrap_or(false)
+}
+
+pub fn _reuse_indexed_honest(offers: &[Offer], mock_enabled: bool, duffel_live: bool) -> bool {
+    if mock_enabled || !duffel_live {
+        return false;
+    }
+    offers.iter().any(is_fresh_live_honest)
+}
+
+fn reuse_indexed_honest(offers: &[Offer], settings: &Settings) -> bool {
+    _reuse_indexed_honest(offers, settings.mock_enabled, settings.duffel_live())
+}
 
 fn members_of(place: &Airport) -> Vec<String> {
     if place.members.is_empty() {
@@ -84,7 +152,10 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<str>,
 {
-    codes.into_iter().map(|s| s.as_ref().to_uppercase()).collect()
+    codes
+        .into_iter()
+        .map(|s| s.as_ref().to_uppercase())
+        .collect()
 }
 
 pub async fn search_all_ways(
@@ -95,7 +166,7 @@ pub async fn search_all_ways(
     mode: &str,
     exclude: Option<&[String]>,
 ) -> anyhow::Result<SearchResponse> {
-    let ledger = start_ledger(settings.search_cost_usd, settings.max_provider_calls);
+    let ledger = start_ledger(settings.search_cost_usd, settings.search_call_cap());
     LEDGER
         .scope(
             ledger,
@@ -116,6 +187,7 @@ async fn search_all_ways_inner(
     let mode = if mode == "deep" { "deep" } else { "fast" };
     query.currency = "USD".into();
     refresh_rates(client).await;
+    let fx_live = crate::fx::rates_are_live();
     let origin = query.origin.clone();
     let dest = query.destination.clone();
 
@@ -167,8 +239,14 @@ async fn search_all_ways_inner(
     };
     let city_search = airport_kind(&o_ap) == "city" || airport_kind(&d_ap) == "city";
     let req = ShopRequest {
-        origin: o_tokens.first().cloned().unwrap_or_else(|| o_ap.iata.clone()),
-        dest: d_tokens.first().cloned().unwrap_or_else(|| d_ap.iata.clone()),
+        origin: o_tokens
+            .first()
+            .cloned()
+            .unwrap_or_else(|| o_ap.iata.clone()),
+        dest: d_tokens
+            .first()
+            .cloned()
+            .unwrap_or_else(|| d_ap.iata.clone()),
         date: query.date.clone(),
         adults: query.adults,
         cabin: query.cabin.clone(),
@@ -226,8 +304,12 @@ async fn search_all_ways_inner(
         .first()
         .cloned()
         .unwrap_or_else(|| o_ap.iata.clone());
+    let reuse_honest = reuse_indexed_honest(&indexed_honest, settings);
+    if !reuse_honest {
+        LEDGER.try_with(|l| l.hold_direct_slot()).ok();
+    }
     let shop_fut = async {
-        if !indexed_honest.is_empty() {
+        if reuse_honest {
             shop_mock_only(&req, &o_ap, &d_ap, mock.as_deref()).await
         } else {
             shop_place(&req, &o_ap, &d_ap, duffel.as_deref(), mock.as_deref()).await
@@ -258,12 +340,21 @@ async fn search_all_ways_inner(
     if let Some(b) = g3 {
         board = b;
     }
+    LEDGER.try_with(|l| l.release_direct_hold()).ok();
 
     let indexed_useful: Vec<Offer> = indexed
         .iter()
-        .filter(|o| classify_for_search(o, &route_origins, &route_dests).is_some())
+        .filter(
+            |o| match classify_for_search(o, &route_origins, &route_dests) {
+                Some("hidden_city") => true,
+                Some("standard") => is_fresh_live_honest(o),
+                _ => false,
+            },
+        )
         .cloned()
         .collect();
+    let reused_from_index = indexed_useful.len() as i32;
+    let index_cache = cache_state(&indexed_useful, &shop_local);
     let mut merged = indexed_useful;
     merged.extend(shop_local.iter().cloned());
     let mut raw_local = offers_in_usd(&_drop_sandbox(&_dedupe(&merged)));
@@ -310,10 +401,7 @@ async fn search_all_ways_inner(
             let ccy = first.currency.clone();
             nearby_offers.retain(|o| o.currency == ccy);
         }
-        if local_offers
-            .iter()
-            .any(|o| !is_test_carrier(&o.carrier))
-        {
+        if local_offers.iter().any(|o| !is_test_carrier(&o.carrier)) {
             nearby_offers.retain(|o| !is_test_carrier(&o.carrier));
         }
     }
@@ -346,6 +434,10 @@ async fn search_all_ways_inner(
     let covered = ticketed_dests_through(&raw_local, &route_dests);
     let mut skipped: Vec<String> = covered.iter().cloned().collect();
     skipped.sort();
+    let already_probed = exclude.map(|e| e.len()).unwrap_or(0);
+    let fast_n = settings.search_fast_candidates();
+    let hidden_n = settings.search_hidden_candidates();
+    let c_budget = hidden_probe_budget(mode, already_probed, fast_n, hidden_n);
     let mut excluded = upper_set(exclude.unwrap_or(&[]).iter());
     excluded.extend(covered.iter().cloned());
     let can_shop = (duffel.is_some() || mock.is_some()) && !round_trip;
@@ -362,6 +454,7 @@ async fn search_all_ways_inner(
             &d_ap,
             &route_dests,
             mode,
+            c_budget as i32,
         )
         .await
         {
@@ -380,23 +473,19 @@ async fn search_all_ways_inner(
     }
     if can_shop {
         if let Some(hp) = honest_pick.as_ref() {
-            let budget = if mode == "fast" {
-                settings.fast_candidates
-            } else {
-                settings.max_hidden_candidates
-            };
-            let mut ranked = match plan_candidates(pool, settings, &route_origins, &route_dests, &d_members)
-                .await
-            {
-                Ok(v) => v,
-                Err(_) => vec![],
-            };
+            let mut ranked =
+                match plan_candidates(pool, settings, &route_origins, &route_dests, &d_members)
+                    .await
+                {
+                    Ok(v) => v,
+                    Err(_) => vec![],
+                };
             if !(mode == "fast" && !hidden_from_local.is_empty()) {
                 let chosen = select_candidates(
                     &mut ranked,
-                    budget,
+                    c_budget,
                     settings.candidate_min_score,
-                    settings.fast_candidates,
+                    fast_n,
                     &excluded,
                 );
                 expanded = chosen.iter().map(|c| c.code.clone()).collect();
@@ -406,9 +495,9 @@ async fn search_all_ways_inner(
                 preview_exclude.extend(expanded.iter().cloned());
                 let preview = select_candidates(
                     &mut ranked,
-                    settings.max_hidden_candidates,
+                    hidden_n.saturating_sub(expanded.len()),
                     settings.candidate_min_score,
-                    settings.fast_candidates,
+                    fast_n,
                     &preview_exclude,
                 );
                 pending = preview.iter().map(|c| c.code.clone()).collect();
@@ -487,7 +576,14 @@ async fn search_all_ways_inner(
     learned_src.extend(hidden_matches.iter().map(|m| m.through_offer.clone()));
     let mut learned_offers = _drop_sandbox(&_dedupe(&learned_src));
     learned_offers.retain(|o| !is_self_transfer(o));
-    let _ = repo::remember_offers(pool, &learned_offers, &query.date, query.adults, &query.cabin).await;
+    let _ = repo::remember_offers(
+        pool,
+        &learned_offers,
+        &query.date,
+        query.adults,
+        &query.cabin,
+    )
+    .await;
     let batch = build_batch(
         &learned_offers,
         &route_origins,
@@ -535,25 +631,42 @@ async fn search_all_ways_inner(
         candidates: trace,
         provider_calls: paid_len as i32,
         provider_cost_usd: total_cost,
-        reused_from_index: indexed.len() as i32,
+        reused_from_index,
+        reused_honest: reuse_honest,
+        fx_live,
         rejected: rejected.into_iter().take(24).collect(),
-        cache: cache_state(&indexed, &shop_local),
+        cache: index_cache,
         pending_self_transfer: duffel.is_some() && !mock_covered && !round_trip && mode == "fast",
     };
 
     let compare_ccy = honest_pick.as_ref().map(|p| p.offer.currency.clone());
     let local_cmp: Vec<Offer> = priced
         .iter()
-        .filter(|o| compare_ccy.as_ref().map(|c| &o.currency == c).unwrap_or(true))
+        .filter(|o| {
+            compare_ccy
+                .as_ref()
+                .map(|c| &o.currency == c)
+                .unwrap_or(true)
+        })
         .cloned()
         .collect();
-    let cheapest_local = local_cmp.iter().filter_map(|o| o.price).fold(None, |acc, p| {
-        Some(acc.map(|a: f64| a.min(p)).unwrap_or(p))
-    });
+    let cheapest_local = local_cmp
+        .iter()
+        .filter_map(|o| o.price)
+        .fold(None, |acc, p| Some(acc.map(|a: f64| a.min(p)).unwrap_or(p)));
     let mut pool_offers = local_cmp.clone();
-    pool_offers.extend(nearby_offers.iter().filter(|o| {
-        o.price.is_some() && compare_ccy.as_ref().map(|c| &o.currency == c).unwrap_or(true)
-    }).cloned());
+    pool_offers.extend(
+        nearby_offers
+            .iter()
+            .filter(|o| {
+                o.price.is_some()
+                    && compare_ccy
+                        .as_ref()
+                        .map(|c| &o.currency == c)
+                        .unwrap_or(true)
+            })
+            .cloned(),
+    );
     pool_offers.extend(hidden_matches.iter().filter_map(|m| {
         if m.through_offer.price.is_some()
             && compare_ccy
@@ -566,9 +679,18 @@ async fn search_all_ways_inner(
             None
         }
     }));
-    pool_offers.extend(self_transfer_offers.iter().filter(|o| {
-        o.price.is_some() && compare_ccy.as_ref().map(|c| &o.currency == c).unwrap_or(true)
-    }).cloned());
+    pool_offers.extend(
+        self_transfer_offers
+            .iter()
+            .filter(|o| {
+                o.price.is_some()
+                    && compare_ccy
+                        .as_ref()
+                        .map(|c| &o.currency == c)
+                        .unwrap_or(true)
+            })
+            .cloned(),
+    );
     let cheapest_any = pool_offers
         .iter()
         .filter_map(|o| o.price)
@@ -740,12 +862,15 @@ async fn search_all_ways_inner(
         &board,
         mock.as_deref(),
         round_trip,
+        reuse_honest,
+        reused_from_index,
+        fx_live,
     );
     let notes = vec![
         "Reference / track / schedule / priced-offer / booker are different layers. A tracker is not a ticket. A metasearch link is not a PNR.".into(),
         "Ranking: this is a price comparator first. Cheapest regular ticket, then the best (fewest stops) and fastest. Self-transfer and hidden-city rows are additions shown only when they cost less than the cheapest regular ticket.".into(),
         "Hidden-city rows are complete one-way tickets that continue past the intended city. The priced itinerary is never rewritten into a fake A→B fare. Round-trip searches compare honest return tickets only.".into(),
-        "Every priced row is converted to USD before ranking, so GBP and other airline quotes never mix with dollar fares.".into(),
+        "Every priced row is USD before ranking. A Duffel USD amount on the offer is preferred. Frankfurter converts the rest only after a successful fetch (`fetched_at`). Baked-in rates are never used to rank.".into(),
         "Self-transfer rows are separate tickets stitched at a hub, at most five flights. The sum is not one PNR and is not hidden-city.".into(),
         "This API never calls Duffel Orders.".into(),
     ];
@@ -784,7 +909,10 @@ async fn search_all_ways_inner(
             .collect();
         let _ = repo::persist_tracks(
             pool,
-            members_of(&o_ap).first().map(|s| s.as_str()).unwrap_or(&o_ap.iata),
+            members_of(&o_ap)
+                .first()
+                .map(|s| s.as_str())
+                .unwrap_or(&o_ap.iata),
             &states,
             traffic_o.api_time.map(|t| t as i32),
         )
@@ -850,14 +978,20 @@ fn cache_state(indexed: &[Offer], shopped: &[Offer]) -> String {
     _cache_state(indexed, shopped)
 }
 
-pub fn _needs_city_nonstop(origin_place: &Airport, dest_place: &Airport, pair_index: usize) -> bool {
-    pair_index == 0
-        && (airport_kind(origin_place) == "city" || airport_kind(dest_place) == "city")
+pub fn _needs_city_nonstop(
+    origin_place: &Airport,
+    dest_place: &Airport,
+    pair_index: usize,
+) -> bool {
+    pair_index == 0 && (airport_kind(origin_place) == "city" || airport_kind(dest_place) == "city")
 }
 
 fn traffic_placeholder(place: &Airport) -> LiveTraffic {
     let members = members_of(place);
-    let iata = members.first().cloned().unwrap_or_else(|| place.iata.clone());
+    let iata = members
+        .first()
+        .cloned()
+        .unwrap_or_else(|| place.iata.clone());
     let icao = place
         .icao
         .clone()
@@ -1258,8 +1392,20 @@ pub async fn _shop_self_transfers(
     dest_place: &Airport,
     intended: &HashSet<String>,
     mode: &str,
+    cs_reserve: i32,
 ) -> anyhow::Result<(Vec<Offer>, Vec<Offer>)> {
-    shop_self_transfers(req, settings, pool, duffel, origin_place, dest_place, intended, mode).await
+    shop_self_transfers(
+        req,
+        settings,
+        pool,
+        duffel,
+        origin_place,
+        dest_place,
+        intended,
+        mode,
+        cs_reserve,
+    )
+    .await
 }
 
 async fn shop_self_transfers(
@@ -1271,6 +1417,7 @@ async fn shop_self_transfers(
     dest_place: &Airport,
     intended: &HashSet<String>,
     mode: &str,
+    cs_reserve: i32,
 ) -> anyhow::Result<(Vec<Offer>, Vec<Offer>)> {
     let origin = members_of(origin_place)
         .into_iter()
@@ -1299,16 +1446,10 @@ async fn shop_self_transfers(
     continent_codes.extend(into.iter().cloned());
     continent_codes.extend(extra.iter().cloned());
     let continents = repo::continents_for(pool, &continent_codes).await?;
-    let mut n_hubs: i32 = if mode == "fast" { 2 } else { 3 };
-    let left = LEDGER
+    let remaining = LEDGER
         .try_with(|l| l.remaining() as i32)
-        .unwrap_or(settings.max_provider_calls);
-    let per_hub: i32 = if mode == "fast" { 2 } else { 3 };
-    if per_hub != 0 {
-        n_hubs = n_hubs.min(left / per_hub);
-    } else {
-        n_hubs = 0;
-    }
+        .unwrap_or(settings.search_call_cap());
+    let n_hubs = _self_transfer_hub_cap(mode, remaining, cs_reserve);
     if n_hubs < 1 {
         return Ok((vec![], vec![]));
     }
@@ -1420,7 +1561,11 @@ async fn shop_self_transfers(
         }
     }
     let mut legs = Vec::new();
-    for group in inbound.values().chain(outbound.values()).chain(mids.values()) {
+    for group in inbound
+        .values()
+        .chain(outbound.values())
+        .chain(mids.values())
+    {
         legs.extend(group.iter().cloned());
     }
     Ok((
@@ -1448,7 +1593,20 @@ async fn plan_candidates(
 ) -> anyhow::Result<Vec<Candidate>> {
     let origin = route_origins.iter().cloned().min().unwrap_or_default();
     let stats = repo::load_route_stats(pool, route_origins, route_dests).await?;
+    let recall = (settings.search_hidden_candidates() * 3) as i64;
+    let learned_edges = repo::learned_beyond(pool, route_dests, recall)
+        .await
+        .unwrap_or_default();
     let mut pool_map: HashMap<String, String> = HashMap::new();
+    let dest_slice: Vec<String> = dest_members.iter().take(4).cloned().collect();
+    let route_map = repo::route_map_from(pool, &dest_slice, 60).await?;
+    for spokes in route_map.values() {
+        let mut codes: Vec<String> = spokes.iter().cloned().collect();
+        codes.sort();
+        for c in codes {
+            assign_source(&mut pool_map, c, "openflights");
+        }
+    }
     for c in repo::recall_candidate_dests(
         pool,
         route_origins,
@@ -1457,23 +1615,22 @@ async fn plan_candidates(
         0,
         "",
         30 * 24 * 3600,
-        (settings.max_hidden_candidates * 3) as i64,
+        (settings.search_hidden_candidates() * 3) as i64,
         true,
     )
     .await?
     {
-        pool_map.entry(c).or_insert_with(|| "index".into());
+        assign_source(&mut pool_map, c, "index");
     }
-    let dest_slice: Vec<String> = dest_members.iter().take(4).cloned().collect();
-    let route_map = repo::route_map_from(pool, &dest_slice, 60).await?;
-    for spokes in route_map.values() {
-        let mut codes: Vec<String> = spokes.iter().cloned().collect();
-        codes.sort();
-        for c in codes {
-            pool_map.entry(c).or_insert_with(|| "openflights".into());
-        }
+    for c in learned_edges.keys() {
+        assign_source(&mut pool_map, c.clone(), "edges");
     }
-    let hub_prob = hub_probabilities(route_dests, &route_map);
+    for c in stats.keys() {
+        assign_source(&mut pool_map, c.clone(), "stats");
+    }
+    let mut learned_hubs: HashSet<String> = stats.keys().cloned().collect();
+    learned_hubs.extend(learned_edges.keys().cloned());
+    let hub_prob = hub_probabilities(route_dests, &route_map, &learned_hubs);
     let mut dest_codes: Vec<String> = pool_map.keys().cloned().collect();
     dest_codes.extend(stats.keys().cloned());
     let provider_rate = repo::provider_rates_for(pool, route_origins, &dest_codes).await?;
@@ -1506,7 +1663,17 @@ pub async fn _probe_candidates(
     local: &Offer,
     candidates: &[String],
 ) -> anyhow::Result<(Vec<HiddenCityMatch>, Vec<Offer>)> {
-    probe_candidates(req, settings, duffel, mock, origin_place, intended, local, candidates).await
+    probe_candidates(
+        req,
+        settings,
+        duffel,
+        mock,
+        origin_place,
+        intended,
+        local,
+        candidates,
+    )
+    .await
 }
 
 async fn probe_candidates(
@@ -1611,7 +1778,10 @@ fn classify_hidden(
     min_saving: f64,
 ) -> (Vec<HiddenCityMatch>, Vec<String>) {
     let Some(local_usd) = offer_in_usd(local).filter(|o| o.price.is_some()) else {
-        return (vec![], vec!["honest fare could not be converted to USD".into()]);
+        return (
+            vec![],
+            vec!["honest fare FX unverified (could not convert to USD)".into()],
+        );
     };
     let mut matches = Vec::new();
     let mut rejected = Vec::new();
@@ -1620,7 +1790,15 @@ fn classify_hidden(
             continue;
         }
         let Some(mut converted) = offer_in_usd(offer).filter(|o| o.price.is_some()) else {
-            rejected.push(format!("{}: could not convert to USD", offer.id));
+            rejected.push(format!(
+                "{}: FX unverified ({})",
+                offer.id,
+                if offer.currency.is_empty() {
+                    "unknown"
+                } else {
+                    offer.currency.as_str()
+                }
+            ));
             continue;
         };
         if is_standard_to(&converted, intended) {
@@ -1731,7 +1909,11 @@ pub fn _on_route(offer: &Offer, origins: &HashSet<String>, dests: &HashSet<Strin
         && allowed_d.contains(&ticketed_destination(offer))
 }
 
-pub fn _keep_on_route(offers: &[Offer], origins: &HashSet<String>, dests: &HashSet<String>) -> Vec<Offer> {
+pub fn _keep_on_route(
+    offers: &[Offer],
+    origins: &HashSet<String>,
+    dests: &HashSet<String>,
+) -> Vec<Offer> {
     offers
         .iter()
         .filter(|o| _on_route(o, origins, dests))
@@ -1992,7 +2174,11 @@ pub fn pick_best(
         return Some(as_pick(best, "Best — cheapest nonstop"));
     }
     let min_stops = priced.iter().map(|o| o.stops).min()?;
-    let fewest: Vec<Offer> = priced.iter().filter(|o| o.stops == min_stops).cloned().collect();
+    let fewest: Vec<Offer> = priced
+        .iter()
+        .filter(|o| o.stops == min_stops)
+        .cloned()
+        .collect();
     let best = fewest.into_iter().min_by(_honest_rank)?;
     if Some(best.id.as_str()) == cheap_id {
         return None;
@@ -2077,7 +2263,9 @@ pub fn _gaps(
     mock: Option<&MockProvider>,
     round_trip: bool,
 ) -> Vec<String> {
-    gaps(settings, duffel, box_, priced, hidden, traffic, _board, mock, round_trip)
+    gaps(
+        settings, duffel, box_, priced, hidden, traffic, _board, mock, round_trip, false, 0, true,
+    )
 }
 
 fn gaps(
@@ -2090,6 +2278,9 @@ fn gaps(
     _board: &[BoardFlight],
     mock: Option<&MockProvider>,
     round_trip: bool,
+    reused_honest: bool,
+    reused_from_index: i32,
+    fx_live: bool,
 ) -> Vec<String> {
     let mut gaps = Vec::new();
     if settings.duffel_sandbox() {
@@ -2103,22 +2294,26 @@ A duffel_live_… token is required for real fares."
             "No Duffel token and mock is off. Priced offers stay empty until DUFFEL_TOKEN or MOCK_ENABLED."
                 .into(),
         );
-    } else if priced.is_empty() {
+    }
+    let no_keys = duffel.is_none() && mock.is_none();
+    if priced.is_empty() && !no_keys {
         let duffel_failed = LEDGER
-            .try_with(|l| {
-                l.calls()
-                    .iter()
-                    .any(|c| c.provider == "duffel" && !c.ok)
-            })
+            .try_with(|l| l.calls().iter().any(|c| c.provider == "duffel" && !c.ok))
             .unwrap_or(false);
         if duffel_failed {
             gaps.push(
                 "Duffel shop failed. Check DUFFEL_TOKEN and Duffel-Version; this is not an empty market."
                     .into(),
             );
+        } else if settings.duffel_sandbox() {
+            gaps.push(
+                "Sandbox shop returned no live fares (live_mode=false is dropped). This is not a live empty market."
+                    .into(),
+            );
         } else {
             gaps.push(
-                "Duffel returned no priced offers for this city-pair/date (coverage or date).".into(),
+                "Duffel returned no priced offers for this city-pair/date (coverage or date)."
+                    .into(),
             );
         }
     }
@@ -2130,6 +2325,21 @@ A duffel_live_… token is required for real fares."
         gaps.push(
             "No priced inversion P(A,B,C)<P(A,B) in the current shop. Connection hints are not savings."
                 .into(),
+        );
+    }
+    if reused_honest {
+        gaps.push(
+            "Honest A→B reused a live Duffel fare less than 60 seconds old. Hidden-city candidates still come from the index."
+                .into(),
+        );
+    } else if reused_from_index > 0 {
+        gaps.push(format!(
+            "Reused {reused_from_index} priced offer(s) from the index. Those through tickets were not shopped again this request."
+        ));
+    }
+    if !fx_live {
+        gaps.push(
+            "FX unverified: Frankfurter has not returned rates yet. Non-USD offers were omitted from ranking (baked-in rates are not used).".into(),
         );
     }
     if traffic.aircraft.is_empty() {

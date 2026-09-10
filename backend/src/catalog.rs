@@ -1,6 +1,6 @@
+use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::LazyLock;
-use serde_json::Value;
 
 use crate::models::SourceDef;
 
@@ -73,8 +73,8 @@ pub static SOURCES: LazyLock<Vec<SourceDef>> = LazyLock::new(|| {
             "OpenSky Network",
             "live-track",
             "ADS-B / MLAT / ASTERIX / FLARM state vectors: who is in the air right now near an airport.",
-            "Not a ticket, not a fare, not a future schedule. Coverage has gaps (oceans, sparse receivers). Anonymous access is current states only, ~10s resolution.",
-            "Live (seconds). Historical arrivals/departures need an OpenSky account.",
+            "Not a ticket, not a fare, not a future schedule. Coverage has gaps (oceans, sparse receivers). Anonymous access is current states only, ~10s resolution. OAuth (client id + secret) is a higher rate limit, not a fare shop.",
+            "Live (seconds). Anonymous unless OPENSKY_CLIENT_ID and OPENSKY_CLIENT_SECRET are both set.",
             "https://opensky-network.org",
             false,
             false,
@@ -121,8 +121,8 @@ pub static SOURCES: LazyLock<Vec<SourceDef>> = LazyLock::new(|| {
             "Duffel",
             "priced-offer",
             "Airline-retailing aggregator (NDC + other). Offer Request = shop. Order = book. This app shops only; it never creates an order or takes payment.",
-            "Test tokens return Duffel Airways sandbox offers, which are not real tickets.",
-            "Live shop if DUFFEL_TOKEN is set.",
+            "Test tokens return Duffel Airways sandbox offers, which are not real tickets. This app drops every sandbox offer (_drop_sandbox).",
+            "Live shop only with a duffel_live_… token. A duffel_test_… token is sandbox — offers are fetched then deleted.",
             "https://duffel.com/docs",
             true,
             false,
@@ -347,6 +347,86 @@ pub static SOURCES: LazyLock<Vec<SourceDef>> = LazyLock::new(|| {
     ]
 });
 
+/// Chip + configured flag for `/sources`. Duffel never uses `"on"`: a test token
+/// is sandbox (offers dropped), not a live shop. OpenSky is anonymous or OAuth.
+fn source_runtime(id: &str, enabled: &HashMap<String, bool>, default_on: bool) -> SourceRuntime {
+    match id {
+        "duffel" => {
+            if *enabled.get("duffel_live").unwrap_or(&false) {
+                SourceRuntime {
+                    configured: true,
+                    status: "live",
+                    status_label: "Live",
+                }
+            } else if *enabled.get("duffel_sandbox").unwrap_or(&false) {
+                SourceRuntime {
+                    configured: false,
+                    status: "sandbox",
+                    status_label: "Sandbox — offers dropped",
+                }
+            } else {
+                SourceRuntime {
+                    configured: false,
+                    status: "off",
+                    status_label: "Needs a key",
+                }
+            }
+        }
+        "opensky" => {
+            if *enabled.get("opensky_oauth").unwrap_or(&false) {
+                SourceRuntime {
+                    configured: true,
+                    status: "oauth",
+                    status_label: "OAuth",
+                }
+            } else {
+                SourceRuntime {
+                    configured: true,
+                    status: "anonymous",
+                    status_label: "Anonymous",
+                }
+            }
+        }
+        "aerodatabox" => {
+            if *enabled.get("aerodatabox").unwrap_or(&false) {
+                SourceRuntime {
+                    configured: true,
+                    status: "on",
+                    status_label: "On",
+                }
+            } else {
+                SourceRuntime {
+                    configured: false,
+                    status: "off",
+                    status_label: "Needs a key",
+                }
+            }
+        }
+        _ => {
+            let on = *enabled.get(id).unwrap_or(&default_on);
+            if on {
+                SourceRuntime {
+                    configured: true,
+                    status: "on",
+                    status_label: "On",
+                }
+            } else {
+                SourceRuntime {
+                    configured: false,
+                    status: "off",
+                    status_label: "Needs a key",
+                }
+            }
+        }
+    }
+}
+
+struct SourceRuntime {
+    configured: bool,
+    status: &'static str,
+    status_label: &'static str,
+}
+
 pub fn sources_payload(enabled: &HashMap<String, bool>) -> Vec<Value> {
     let mut out = Vec::new();
     for s in SOURCES.iter() {
@@ -359,20 +439,94 @@ pub fn sources_payload(enabled: &HashMap<String, bool>) -> Vec<Value> {
                 s.layer.as_str(),
                 "meta-search" | "ota" | "airline-direct" | "specialist-meta" | "live-track-link"
             );
-        let mut configured = *enabled.get(&s.id).unwrap_or(&default_on);
-        if s.id == "opensky" {
-            configured = true;
-        }
-        if s.id == "duffel" {
-            configured = *enabled.get("duffel").unwrap_or(&false);
-        }
-        if s.id == "aerodatabox" {
-            configured = *enabled.get("aerodatabox").unwrap_or(&false);
-        }
+        let runtime = source_runtime(&s.id, enabled, default_on);
         if let Some(obj) = item.as_object_mut() {
-            obj.insert("configured".into(), Value::Bool(configured));
+            obj.insert("configured".into(), Value::Bool(runtime.configured));
+            obj.insert("status".into(), Value::String(runtime.status.into()));
+            obj.insert(
+                "status_label".into(),
+                Value::String(runtime.status_label.into()),
+            );
         }
         out.push(item);
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn find_source(payload: &[Value], id: &str) -> Value {
+        payload
+            .iter()
+            .find(|s| s["id"] == id)
+            .cloned()
+            .unwrap_or_else(|| panic!("missing source {id}"))
+    }
+
+    fn duffel_flags(live: bool, sandbox: bool) -> HashMap<String, bool> {
+        HashMap::from([
+            ("duffel".into(), live || sandbox),
+            ("duffel_live".into(), live),
+            ("duffel_sandbox".into(), sandbox),
+            ("opensky_oauth".into(), false),
+            ("aerodatabox".into(), false),
+        ])
+    }
+
+    #[test]
+    fn duffel_live_token_is_live_not_on() {
+        let d = find_source(&sources_payload(&duffel_flags(true, false)), "duffel");
+        assert_eq!(d["status"], "live");
+        assert_eq!(d["status_label"], "Live");
+        assert_eq!(d["configured"], true);
+    }
+
+    #[test]
+    fn duffel_test_token_is_sandbox_not_on() {
+        let d = find_source(&sources_payload(&duffel_flags(false, true)), "duffel");
+        assert_eq!(d["status"], "sandbox");
+        assert_eq!(d["status_label"], "Sandbox — offers dropped");
+        assert_eq!(d["configured"], false);
+        assert_ne!(d["status"], "on");
+        assert_ne!(d["status_label"], "On");
+    }
+
+    #[test]
+    fn duffel_missing_token_needs_a_key() {
+        let d = find_source(&sources_payload(&duffel_flags(false, false)), "duffel");
+        assert_eq!(d["status"], "off");
+        assert_eq!(d["status_label"], "Needs a key");
+        assert_eq!(d["configured"], false);
+    }
+
+    #[test]
+    fn duffel_enabled_without_live_or_sandbox_flags_is_not_on() {
+        let enabled = HashMap::from([("duffel".into(), true)]);
+        let d = find_source(&sources_payload(&enabled), "duffel");
+        assert_eq!(d["status"], "off");
+        assert_eq!(d["status_label"], "Needs a key");
+        assert_ne!(d["status"], "on");
+    }
+
+    #[test]
+    fn opensky_anonymous_is_not_on() {
+        let o = find_source(&sources_payload(&duffel_flags(false, false)), "opensky");
+        assert_eq!(o["status"], "anonymous");
+        assert_eq!(o["status_label"], "Anonymous");
+        assert_eq!(o["configured"], true);
+        assert_ne!(o["status"], "on");
+    }
+
+    #[test]
+    fn opensky_oauth_is_not_on() {
+        let mut flags = duffel_flags(false, false);
+        flags.insert("opensky_oauth".into(), true);
+        let o = find_source(&sources_payload(&flags), "opensky");
+        assert_eq!(o["status"], "oauth");
+        assert_eq!(o["status_label"], "OAuth");
+        assert_eq!(o["configured"], true);
+        assert_ne!(o["status"], "on");
+    }
 }

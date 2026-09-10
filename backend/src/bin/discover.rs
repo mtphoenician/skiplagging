@@ -31,13 +31,7 @@ async fn main() -> anyhow::Result<()> {
         Some(args.date)
     };
     let summary = skiplagging::engines::discover::discover_hidden_deals(
-        &pool,
-        &settings,
-        &client,
-        args.limit,
-        args.dests,
-        day,
-        None,
+        &pool, &settings, &client, args.limit, args.dests, day, None,
     )
     .await?;
     println!("{summary}");

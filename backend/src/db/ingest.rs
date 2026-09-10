@@ -24,9 +24,11 @@ const CONTINENT_NAMES: &[(&str, &str)] = &[
     ("SA", "South America"),
 ];
 
-const ROUTE_NOTE: &str = "OpenFlights Airline Route Mapper extract. Dataset last published around 2014–2017; \
+const ROUTE_NOTE: &str =
+    "OpenFlights Airline Route Mapper extract. Dataset last published around 2014–2017; \
 not a current schedule, not availability, not a fare.";
-const AIRLINE_NOTE: &str = "OpenFlights airlines dump (last material update ~2017). Use IATA/ICAO as identifiers, \
+const AIRLINE_NOTE: &str =
+    "OpenFlights airlines dump (last material update ~2017). Use IATA/ICAO as identifiers, \
 not as proof the carrier still operates a given route.";
 
 fn type_rank(typ: &str) -> i32 {
@@ -310,17 +312,25 @@ pub async fn ingest(pool: &PgPool) -> anyhow::Result<Value> {
     let airports_url = format!("{OURAIRPORTS}/airports.csv");
     let runways_url = format!("{OURAIRPORTS}/runways.csv");
     let navaids_url = format!("{OURAIRPORTS}/navaids.csv");
-    let (oa_countries, oa_regions, oa_airports, oa_runways, oa_navaids, geo_raw, airlines_dat, routes_dat) =
-        tokio::try_join!(
-            fetch_text(&client, &countries_url),
-            fetch_text(&client, &regions_url),
-            fetch_text(&client, &airports_url),
-            fetch_text(&client, &runways_url),
-            fetch_text(&client, &navaids_url),
-            fetch_text(&client, GEONAMES_COUNTRIES),
-            fetch_text(&client, OPENFLIGHTS_AIRLINES),
-            fetch_text(&client, OPENFLIGHTS_ROUTES),
-        )?;
+    let (
+        oa_countries,
+        oa_regions,
+        oa_airports,
+        oa_runways,
+        oa_navaids,
+        geo_raw,
+        airlines_dat,
+        routes_dat,
+    ) = tokio::try_join!(
+        fetch_text(&client, &countries_url),
+        fetch_text(&client, &regions_url),
+        fetch_text(&client, &airports_url),
+        fetch_text(&client, &runways_url),
+        fetch_text(&client, &navaids_url),
+        fetch_text(&client, GEONAMES_COUNTRIES),
+        fetch_text(&client, OPENFLIGHTS_AIRLINES),
+        fetch_text(&client, OPENFLIGHTS_ROUTES),
+    )?;
     let geo = geonames(&geo_raw);
     let parsed = best_airports(&oa_airports)?;
 
@@ -444,7 +454,10 @@ pub async fn ingest(pool: &PgPool) -> anyhow::Result<Value> {
     let mut regions: HashMap<String, RegionRec> = HashMap::new();
     {
         for row in csv_rows(&oa_regions)? {
-            let code = row.get("code").map(|s| s.trim().to_string()).unwrap_or_default();
+            let code = row
+                .get("code")
+                .map(|s| s.trim().to_string())
+                .unwrap_or_default();
             if code.is_empty() {
                 continue;
             }
@@ -473,7 +486,14 @@ pub async fn ingest(pool: &PgPool) -> anyhow::Result<Value> {
     insert_regions(&mut *tx, regions.values().collect()).await?;
 
     let mut ident_to_iata: HashMap<String, String> = HashMap::new();
-    insert_airports(&mut *tx, parsed.values().collect(), &countries, &regions, now).await?;
+    insert_airports(
+        &mut *tx,
+        parsed.values().collect(),
+        &countries,
+        &regions,
+        now,
+    )
+    .await?;
     for a in parsed.values() {
         if let Some(ident) = &a.ident {
             ident_to_iata.insert(ident.clone(), a.iata.clone());
@@ -756,11 +776,7 @@ async fn insert_navaids(
             row.get("iso_country")
                 .map(|s| s.trim().to_uppercase())
                 .unwrap_or_default(),
-            if assoc.is_empty() {
-                None
-            } else {
-                Some(assoc)
-            },
+            if assoc.is_empty() { None } else { Some(assoc) },
             parse_float(row.get("latitude_deg").map(|s| s.as_str())),
             parse_float(row.get("longitude_deg").map(|s| s.as_str())),
         ));

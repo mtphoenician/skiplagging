@@ -220,9 +220,21 @@ pub fn booker_links(
     }
     let ret = return_date.unwrap_or("");
     let yymmdd = date[2..].replace('-', "");
-    let ret_yymmdd = if ret.len() >= 10 { ret[2..].replace('-', "") } else { String::new() };
-    let kayak_adults = if adults <= 1 { String::new() } else { format!("/{adults}adults") };
-    let kayak_dates = if !ret.is_empty() { format!("{date}/{ret}") } else { date.to_string() };
+    let ret_yymmdd = if ret.len() >= 10 {
+        ret[2..].replace('-', "")
+    } else {
+        String::new()
+    };
+    let kayak_adults = if adults <= 1 {
+        String::new()
+    } else {
+        format!("/{adults}adults")
+    };
+    let kayak_dates = if !ret.is_empty() {
+        format!("{date}/{ret}")
+    } else {
+        date.to_string()
+    };
     let sky_path = if !ret.is_empty() {
         format!("{yymmdd}/{ret_yymmdd}/")
     } else {
@@ -234,14 +246,33 @@ pub fn booker_links(
         format!("{}:ow", dmon(date))
     };
     let priceline_path = if !ret.is_empty() {
-        format!("{}-{}-{}/{}-{}-{}", o, d, date.replace('-', ""), d, o, ret.replace('-', ""))
+        format!(
+            "{}-{}-{}/{}-{}-{}",
+            o,
+            d,
+            date.replace('-', ""),
+            d,
+            o,
+            ret.replace('-', "")
+        )
     } else {
         format!("{}-{}-{}", o, d, date.replace('-', ""))
     };
     let edreams_path = if !ret.is_empty() {
-        format!("{}-{}/{}/{}/{adults}-0-0/", o.to_lowercase(), d.to_lowercase(), date, ret)
+        format!(
+            "{}-{}/{}/{}/{adults}-0-0/",
+            o.to_lowercase(),
+            d.to_lowercase(),
+            date,
+            ret
+        )
     } else {
-        format!("{}-{}/{}/{adults}-0-0/", o.to_lowercase(), d.to_lowercase(), date)
+        format!(
+            "{}-{}/{}/{adults}-0-0/",
+            o.to_lowercase(),
+            d.to_lowercase(),
+            date
+        )
     };
     let tvldt_pair = if !ret.is_empty() {
         format!("{}.{}", tvldt(date), tvldt(ret))
@@ -261,8 +292,16 @@ pub fn booker_links(
     };
     let q = encode(&format!(
         "{} flights from {o} to {d} on {date}{}",
-        if !ret.is_empty() { "round trip" } else { "one way" },
-        if !ret.is_empty() { format!(" returning {ret}") } else { String::new() }
+        if !ret.is_empty() {
+            "round trip"
+        } else {
+            "one way"
+        },
+        if !ret.is_empty() {
+            format!(" returning {ret}")
+        } else {
+            String::new()
+        }
     ))
     .into_owned();
     let ctx = std::collections::HashMap::from([
@@ -286,26 +325,103 @@ pub fn booker_links(
         ("kayak_dates", kayak_dates),
         ("sky_rtn", if !ret.is_empty() { "1" } else { "0" }.into()),
         ("sky_path", sky_path),
-        ("trip", if !ret.is_empty() { "roundtrip" } else { "oneway" }.into()),
+        (
+            "trip",
+            if !ret.is_empty() {
+                "roundtrip"
+            } else {
+                "oneway"
+            }
+            .into(),
+        ),
         ("wego_dates", wego_dates),
-        ("book_type", if !ret.is_empty() { "ROUNDTRIP" } else { "ONEWAY" }.into()),
-        ("book_return", if !ret.is_empty() { format!("&return={ret}") } else { String::new() }),
-        ("trip_adate", if !ret.is_empty() { format!("&adate={ret}") } else { String::new() }),
+        (
+            "book_type",
+            if !ret.is_empty() {
+                "ROUNDTRIP"
+            } else {
+                "ONEWAY"
+            }
+            .into(),
+        ),
+        (
+            "book_return",
+            if !ret.is_empty() {
+                format!("&return={ret}")
+            } else {
+                String::new()
+            },
+        ),
+        (
+            "trip_adate",
+            if !ret.is_empty() {
+                format!("&adate={ret}")
+            } else {
+                String::new()
+            },
+        ),
         ("priceline_path", priceline_path),
-        ("cheapo_trip", if !ret.is_empty() { "ROUNDTRIP" } else { "ONEWAY" }.into()),
-        ("cheapo_ret", if !ret.is_empty() { format!("&toDt={}", us(ret)) } else { String::new() }),
+        (
+            "cheapo_trip",
+            if !ret.is_empty() {
+                "ROUNDTRIP"
+            } else {
+                "ONEWAY"
+            }
+            .into(),
+        ),
+        (
+            "cheapo_ret",
+            if !ret.is_empty() {
+                format!("&toDt={}", us(ret))
+            } else {
+                String::new()
+            },
+        ),
         ("edreams_path", edreams_path),
         ("tvldt_pair", tvldt_pair),
         ("mmt_itin", mmt_itin),
         ("mmt_trip", if !ret.is_empty() { "R" } else { "O" }.into()),
-        ("despegar_kind", if !ret.is_empty() { "roundtrip" } else { "oneway" }.into()),
-        ("despegar_ret", if !ret.is_empty() { format!("/{ret}") } else { String::new() }),
-        ("kiwi_ret", if !ret.is_empty() { ret.to_string() } else { "no-return".into() }),
-        ("flighttype", if !ret.is_empty() { "rt" } else { "ow" }.into()),
+        (
+            "despegar_kind",
+            if !ret.is_empty() {
+                "roundtrip"
+            } else {
+                "oneway"
+            }
+            .into(),
+        ),
+        (
+            "despegar_ret",
+            if !ret.is_empty() {
+                format!("/{ret}")
+            } else {
+                String::new()
+            },
+        ),
+        (
+            "kiwi_ret",
+            if !ret.is_empty() {
+                ret.to_string()
+            } else {
+                "no-return".into()
+            },
+        ),
+        (
+            "flighttype",
+            if !ret.is_empty() { "rt" } else { "ow" }.into(),
+        ),
         ("sky_cabin", sky_cabin.into()),
         ("book_cabin", cabin_u.clone()),
         ("us", us(date)),
-        ("ret_us", if !ret.is_empty() { us(ret) } else { String::new() }),
+        (
+            "ret_us",
+            if !ret.is_empty() {
+                us(ret)
+            } else {
+                String::new()
+            },
+        ),
         ("q", q),
     ]);
     let mut links = Vec::new();

@@ -18,6 +18,9 @@
       </div>
       <div class="note">{traffic.aircraft.length} aircraft</div>
     </div>
+    {#if traffic.note}
+      <p class="note" style="margin:10px 0 0">{traffic.note}</p>
+    {/if}
     {#if traffic.aircraft.length}
       <table class="mini" style="margin-top:10px">
         <thead>
@@ -38,7 +41,7 @@
         </tbody>
       </table>
     {:else}
-      <p class="note" style="margin:10px 0 0">No live positions right now.</p>
+      <p class="note" style="margin:10px 0 0">No live positions right now. That is not a missing fare.</p>
     {/if}
   </section>
 {/if}

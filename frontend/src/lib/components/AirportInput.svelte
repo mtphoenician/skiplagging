@@ -1,6 +1,10 @@
 <script lang="ts">
+  import { onDestroy } from 'svelte';
   import { fetchAirport, searchAirports } from '$lib/api';
   import type { Airport } from '$lib/types';
+
+  /** Pause after the last keystroke before searching. Cancels in-flight prefix queries. */
+  const DEBOUNCE_MS = 500;
 
   let {
     label,
@@ -10,11 +14,13 @@
 
   let open = $state(false);
   let hits = $state<Airport[]>([]);
+  let hitsQuery = $state('');
   let active = $state(0);
   let draft = $state('');
   let picked = $state<Airport | null>(null);
   let focused = $state(false);
-  let timer: ReturnType<typeof setTimeout>;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let abort: AbortController | null = null;
   let root: HTMLDivElement | undefined = $state();
   let inputEl: HTMLInputElement | undefined = $state();
 
@@ -24,6 +30,17 @@
 
   function displayOf(a: Airport) {
     return a.type === 'city' ? a.city : a.iata;
+  }
+
+  function isAbortError(e: unknown): boolean {
+    return e instanceof Error && e.name === 'AbortError';
+  }
+
+  function cancelLookup() {
+    clearTimeout(timer);
+    timer = undefined;
+    abort?.abort();
+    abort = null;
   }
 
   $effect(() => {
@@ -63,19 +80,42 @@
   }
 
   async function lookup(q: string) {
-    if (q.trim().length < 1) {
+    if (draft.trim() !== q) return;
+    abort?.abort();
+    const ac = new AbortController();
+    abort = ac;
+    try {
+      const next = await searchAirports(q, ac.signal);
+      if (ac.signal.aborted || draft.trim() !== q) return;
+      hits = next;
+      hitsQuery = q;
+      open = hits.length > 0;
+      active = 0;
+    } catch (e) {
+      if (isAbortError(e) || draft.trim() !== q) return;
       hits = [];
+      hitsQuery = '';
+      open = false;
+    }
+  }
+
+  function scheduleLookup(q: string, immediate = false) {
+    cancelLookup();
+    if (q.length < 1) {
+      hits = [];
+      hitsQuery = '';
       open = false;
       return;
     }
-    try {
-      hits = await searchAirports(q);
-      open = hits.length > 0;
-      active = 0;
-    } catch {
+    if (hitsQuery !== q) {
       hits = [];
       open = false;
     }
+    if (immediate) {
+      void lookup(q);
+      return;
+    }
+    timer = setTimeout(() => lookup(q), DEBOUNCE_MS);
   }
 
   function onInput(e: Event) {
@@ -83,16 +123,17 @@
     draft = next;
     picked = null;
     value = next;
-    clearTimeout(timer);
-    timer = setTimeout(() => lookup(next.trim()), 80);
+    scheduleLookup(next.trim());
   }
 
   function pick(a: Airport) {
+    cancelLookup();
     picked = a;
     value = placeId(a);
     draft = displayOf(a);
     open = false;
     hits = [];
+    hitsQuery = '';
   }
 
   function onFocus() {
@@ -100,8 +141,9 @@
     if (picked && picked.type !== 'city' && /^[A-Za-z]{3}$/.test(draft)) {
       queueMicrotask(() => inputEl?.select());
     }
-    if (hits.length) open = true;
-    else if (draft.trim().length >= 1) lookup(draft.trim());
+    const q = draft.trim();
+    if (hits.length && hitsQuery === q) open = true;
+    else if (q.length >= 1) scheduleLookup(q, true);
   }
 
   function onBlur() {
@@ -134,6 +176,8 @@
     if (a.type === 'heliport') return 'Heliport';
     return '';
   }
+
+  onDestroy(cancelLookup);
 </script>
 
 <svelte:window onclick={onDoc} />

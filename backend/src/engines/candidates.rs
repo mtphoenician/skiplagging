@@ -17,9 +17,41 @@ pub static WEIGHTS: LazyLock<HashMap<&'static str, f64>> = LazyLock::new(|| {
 });
 
 pub const DEFAULT_MIN_SCORE: f64 = 0.35;
+/// Default cold-start fill in unit tests. Live search passes FAST_CANDIDATES (floor 5).
 pub const COLD_START_PROBES: usize = 3;
 pub const DEAD_AFTER_CHECKS: i32 = 5;
 pub const FRESHNESS_HALF_LIFE_DAYS: f64 = 7.0;
+/// Frozen OpenFlights (~2014–2017) is a structural prior, not a timetable.
+pub const OPENFLIGHTS_HUB: f64 = 0.35;
+/// B→C seen inside a priced ticket, or a hidden-city stat row.
+pub const LEARNED_HUB: f64 = 1.0;
+
+pub fn source_priority(source: &str) -> i32 {
+    match source {
+        "stats" => 4,
+        "index" => 3,
+        "edges" => 2,
+        "openflights" | "hub" => 0,
+        _ => 1,
+    }
+}
+
+pub fn is_learned_source(source: &str) -> bool {
+    matches!(source, "stats" | "index" | "edges")
+}
+
+/// Keep the stronger planner source. OpenFlights never overwrites learned rows.
+pub fn assign_source(pool: &mut HashMap<String, String>, code: String, source: &str) {
+    let incoming = source_priority(source);
+    let current = pool.get(&code).map(|s| source_priority(s)).unwrap_or(-1);
+    if incoming > current {
+        pool.insert(code, source.to_string());
+    }
+}
+
+fn is_learned_candidate(c: &Candidate) -> bool {
+    c.observations > 0 || is_learned_source(&c.source)
+}
 
 #[derive(Debug, Clone)]
 pub struct RouteStat {
@@ -153,14 +185,21 @@ pub fn is_dead(stat: Option<&RouteStat>) -> bool {
 
 pub fn hub_probabilities(
     intended: &HashSet<String>,
-    route_map: &HashMap<String, HashSet<String>>,
+    openflights: &HashMap<String, HashSet<String>>,
+    learned: &HashSet<String>,
 ) -> HashMap<String, f64> {
     let mut out: HashMap<String, f64> = HashMap::new();
     for b in intended {
-        if let Some(cs) = route_map.get(&b.to_uppercase()) {
+        if let Some(cs) = openflights.get(&b.to_uppercase()) {
             for c in cs {
-                out.insert(c.to_uppercase(), 1.0);
+                out.insert(c.to_uppercase(), OPENFLIGHTS_HUB);
             }
+        }
+    }
+    for c in learned {
+        let c = c.to_uppercase();
+        if c.len() == 3 {
+            out.insert(c, LEARNED_HUB);
         }
     }
     out
@@ -183,13 +222,13 @@ pub fn rank_candidates(
     for (code, source) in pool {
         let c = code.to_uppercase();
         if c.len() == 3 && !excluded.contains(&c) {
-            codes.entry(c).or_insert_with(|| source.clone());
+            assign_source(&mut codes, c, source);
         }
     }
     for c in stats.keys() {
         let c = c.to_uppercase();
         if c.len() == 3 && !excluded.contains(&c) {
-            codes.entry(c).or_insert_with(|| "stats".into());
+            codes.insert(c, "stats".into());
         }
     }
     let mut out = Vec::new();
@@ -224,6 +263,7 @@ pub fn rank_candidates(
         b.score
             .partial_cmp(&a.score)
             .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| source_priority(&b.source).cmp(&source_priority(&a.source)))
             .then_with(|| b.observations.cmp(&a.observations))
             .then_with(|| a.code.cmp(&b.code))
     });
@@ -253,16 +293,23 @@ pub fn select_candidates(
         .filter(|i| ranked[*i].score >= min_score)
         .take(budget)
         .collect();
+    let has_learned = usable.iter().any(|i| is_learned_candidate(&ranked[*i]));
     let fill_to = cold_start.min(budget);
     if chosen_idx.len() < fill_to {
-        let picked: HashSet<String> = chosen_idx.iter().map(|i| ranked[*i].code.clone()).collect();
-        for i in usable {
+        let mut picked: HashSet<String> =
+            chosen_idx.iter().map(|i| ranked[*i].code.clone()).collect();
+        for i in &usable {
             if chosen_idx.len() >= fill_to {
                 break;
             }
-            if !picked.contains(&ranked[i].code) {
-                chosen_idx.push(i);
+            if picked.contains(&ranked[*i].code) {
+                continue;
             }
+            if has_learned && !is_learned_candidate(&ranked[*i]) {
+                continue;
+            }
+            picked.insert(ranked[*i].code.clone());
+            chosen_idx.push(*i);
         }
     }
     for c in ranked.iter_mut() {

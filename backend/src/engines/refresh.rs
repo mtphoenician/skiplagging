@@ -16,7 +16,11 @@ pub async fn refresh_priced_offer(
     let source = offer.source.to_lowercase();
     let oid = offer.id.as_str();
     let fresh = if source == "mock" || oid.starts_with("mock-") {
-        MockProvider::new().refresh_offer(offer).await.ok().flatten()
+        MockProvider::new()
+            .refresh_offer(offer)
+            .await
+            .ok()
+            .flatten()
     } else if source == "duffel" || oid.starts_with("duffel-") {
         if !settings.duffel_enabled() {
             return None;

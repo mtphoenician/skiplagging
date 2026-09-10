@@ -26,6 +26,11 @@ services:
     environment:
       DATABASE_URL: postgresql://skiplag:skiplag@db:5432/skiplagging
       CORS_ORIGINS: http://localhost:5173,http://127.0.0.1:5173
+      DUFFEL_TOKEN: ${DUFFEL_TOKEN:-}
+      MOCK_ENABLED: ${MOCK_ENABLED:-false}
+      RAPIDAPI_KEY: ${RAPIDAPI_KEY:-}
+      OPENSKY_CLIENT_ID: ${OPENSKY_CLIENT_ID:-}
+      OPENSKY_CLIENT_SECRET: ${OPENSKY_CLIENT_SECRET:-}
     depends_on:
       db:
         condition: service_healthy
