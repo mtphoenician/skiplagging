@@ -22,7 +22,7 @@ use crate::metros::{catalog_code_for_member, normalize_place_id, METROS};
 use crate::models::{
     Airport, BookerLink, Country, HiddenCityMatch, HiddenDeal, Navaid, Offer, Region, Runway,
 };
-use crate::providers::bookers::booker_links;
+use crate::providers::bookers::featured_booker_links;
 use crate::providers::sandbox::is_live_fare;
 
 static CONTINENTS: Mutex<Option<Arc<HashMap<String, String>>>> = Mutex::new(None);
@@ -1953,26 +1953,55 @@ pub async fn default_pair(pool: &PgPool) -> anyhow::Result<(Option<Airport>, Opt
     Ok((Some(origin), dest))
 }
 
-fn call_bookers(
+async fn place_geo(pool: &PgPool, code: &str) -> (String, String) {
+    match get_place(pool, code, false).await.ok().flatten() {
+        Some(ap) => (ap.continent, ap.country),
+        None => (String::new(), String::new()),
+    }
+}
+
+async fn place_geos(pool: &PgPool, codes: &[String]) -> HashMap<String, (String, String)> {
+    let mut out = HashMap::new();
+    let aps = airports_by_iata(pool, codes).await.unwrap_or_default();
+    for (iata, ap) in aps {
+        out.insert(iata, (ap.continent, ap.country));
+    }
+    for code in codes {
+        let key = code.to_uppercase();
+        if key.is_empty() || out.contains_key(&key) {
+            continue;
+        }
+        let geo = place_geo(pool, &key).await;
+        if !geo.0.is_empty() || !geo.1.is_empty() {
+            out.insert(key, geo);
+        }
+    }
+    out
+}
+
+async fn featured_bookers_for_places(
+    pool: &PgPool,
     origin: &str,
     dest: &str,
     date: &str,
-    adults: i32,
-    airlines: &[(String, String)],
-    currency: &str,
-    cabin: &str,
-    return_date: Option<&str>,
 ) -> Vec<BookerLink> {
-    booker_links(
+    let o = place_geo(pool, origin).await;
+    let d = place_geo(pool, dest).await;
+    featured_booker_links(
         origin,
         dest,
         date,
-        adults,
-        airlines,
-        currency,
-        cabin,
-        return_date,
+        1,
+        "USD",
+        "ECONOMY",
+        None,
+        Some((o.0.as_str(), o.1.as_str())),
+        Some((d.0.as_str(), d.1.as_str())),
     )
+}
+
+fn call_bookers(origin: &str, dest: &str, date: &str) -> Vec<BookerLink> {
+    featured_booker_links(origin, dest, date, 1, "USD", "ECONOMY", None, None, None)
 }
 
 pub async fn persist_hidden_deals(
@@ -2014,7 +2043,7 @@ pub async fn persist_hidden_deals(
         };
         let first = through.first_flight.clone();
         let bookers = if m.bookers.is_empty() {
-            call_bookers(origin, &m.hidden_city, date, 1, &[], "USD", "ECONOMY", None)
+            featured_bookers_for_places(pool, origin, &m.hidden_city, date).await
         } else {
             m.bookers.clone()
         };
@@ -2128,16 +2157,7 @@ pub fn deal_from_row(row: &HiddenDealRow) -> Option<HiddenDeal> {
     } else {
         row.saving_pct
     };
-    let bookers = call_bookers(
-        &row.origin,
-        &row.hidden_city,
-        &row.date,
-        1,
-        &[],
-        "USD",
-        "ECONOMY",
-        None,
-    );
+    let bookers = call_bookers(&row.origin, &row.hidden_city, &row.date);
     let local = raw_local.as_ref().and_then(offer_in_usd);
     let through_offer = raw_through.as_ref().and_then(offer_in_usd);
     if through_offer.as_ref().is_some_and(|o| !offer_unexpired(o)) {
@@ -2183,6 +2203,30 @@ pub fn deal_from_row(row: &HiddenDealRow) -> Option<HiddenDeal> {
     })
 }
 
+async fn apply_featured_bookers(pool: &PgPool, deals: &mut [HiddenDeal]) {
+    let mut codes = Vec::new();
+    for d in deals.iter() {
+        codes.push(d.origin.clone());
+        codes.push(d.hidden_city.clone());
+    }
+    let geos = place_geos(pool, &codes).await;
+    for d in deals.iter_mut() {
+        let o = geos.get(&d.origin.to_uppercase());
+        let h = geos.get(&d.hidden_city.to_uppercase());
+        d.bookers = featured_booker_links(
+            &d.origin,
+            &d.hidden_city,
+            &d.date,
+            1,
+            "USD",
+            "ECONOMY",
+            None,
+            o.map(|(c, i)| (c.as_str(), i.as_str())),
+            h.map(|(c, i)| (c.as_str(), i.as_str())),
+        );
+    }
+}
+
 pub async fn list_hidden_deals(
     pool: &PgPool,
     limit: i64,
@@ -2204,6 +2248,7 @@ pub async fn list_hidden_deals(
     .fetch_all(pool)
     .await?;
     let mut deals: Vec<HiddenDeal> = rows.iter().filter_map(deal_from_row).collect();
+    apply_featured_bookers(pool, &mut deals).await;
     let mut fps = Vec::new();
     let mut origins = Vec::new();
     let mut ticketed = Vec::new();
@@ -2971,7 +3016,11 @@ pub async fn fare_series(
         .filter(|s| !s.is_empty())
         .map(|s| clip(s, 240))
         .collect();
-    let origins: Vec<String> = origins.iter().map(|s| iata3(s)).filter(|s| !s.is_empty()).collect();
+    let origins: Vec<String> = origins
+        .iter()
+        .map(|s| iata3(s))
+        .filter(|s| !s.is_empty())
+        .collect();
     let ticketed: Vec<String> = ticketed
         .iter()
         .map(|s| iata3(s))

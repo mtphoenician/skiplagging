@@ -27,8 +27,16 @@ pub fn urgency_rank(urgency: &str) -> u8 {
 
 pub fn sort_matches(matches: &mut [HiddenCityMatch]) {
     matches.sort_by(|a, b| {
-        let ua = a.window.as_ref().map(|w| urgency_rank(&w.urgency)).unwrap_or(0);
-        let ub = b.window.as_ref().map(|w| urgency_rank(&w.urgency)).unwrap_or(0);
+        let ua = a
+            .window
+            .as_ref()
+            .map(|w| urgency_rank(&w.urgency))
+            .unwrap_or(0);
+        let ub = b
+            .window
+            .as_ref()
+            .map(|w| urgency_rank(&w.urgency))
+            .unwrap_or(0);
         ub.cmp(&ua)
             .then_with(|| {
                 b.gross_saving
@@ -46,8 +54,16 @@ pub fn sort_matches(matches: &mut [HiddenCityMatch]) {
 
 pub fn sort_deals(deals: &mut [HiddenDeal]) {
     deals.sort_by(|a, b| {
-        let ua = a.window.as_ref().map(|w| urgency_rank(&w.urgency)).unwrap_or(0);
-        let ub = b.window.as_ref().map(|w| urgency_rank(&w.urgency)).unwrap_or(0);
+        let ua = a
+            .window
+            .as_ref()
+            .map(|w| urgency_rank(&w.urgency))
+            .unwrap_or(0);
+        let ub = b
+            .window
+            .as_ref()
+            .map(|w| urgency_rank(&w.urgency))
+            .unwrap_or(0);
         ub.cmp(&ua)
             .then_with(|| {
                 b.saving
@@ -76,7 +92,11 @@ pub fn attach_windows(matches: &mut [HiddenCityMatch], series: &[FarePoint], now
 pub fn attach_deal_windows(deals: &mut [HiddenDeal], series: &[FarePoint], now: DateTime<Utc>) {
     for d in deals.iter_mut() {
         let Some(through) = d.through_offer.as_ref() else {
-            d.window = Some(window_for_price(d.through_price, series_for_deal(d, series), now));
+            d.window = Some(window_for_price(
+                d.through_price,
+                series_for_deal(d, series),
+                now,
+            ));
             continue;
         };
         d.window = Some(window_for(through, Some(d.through_price), series, now));
@@ -238,11 +258,11 @@ fn downsample(rows: &[FarePoint]) -> Vec<PricePoint> {
         return rows.iter().map(to_point).collect();
     }
     let mut keep = vec![0usize];
-    if let Some((i, _)) = rows
-        .iter()
-        .enumerate()
-        .min_by(|a, b| a.1.price.partial_cmp(&b.1.price).unwrap_or(std::cmp::Ordering::Equal))
-    {
+    if let Some((i, _)) = rows.iter().enumerate().min_by(|a, b| {
+        a.1.price
+            .partial_cmp(&b.1.price)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    }) {
         keep.push(i);
     }
     let step = (rows.len() - 1) as f64 / (MAX_POINTS - 1) as f64;
@@ -420,9 +440,7 @@ fn headline(
         if let (Some(c), Some(l)) = (current, low) {
             if l > 0.0 && c > l {
                 let pct = ((c / l - 1.0) * 100.0).round();
-                return format!(
-                    "Up {pct:.0}% from the recent low. The unused segment is filling."
-                );
+                return format!("Up {pct:.0}% from the recent low. The unused segment is filling.");
             }
         }
         return "The through fare is rising. Book while it is still cheaper than flying only to your stop.".into();
@@ -430,7 +448,8 @@ fn headline(
     if trend == "new" {
         return "First time we have priced this ticket. Recheck before you buy — inventory moves by the hour.".into();
     }
-    "Still cheaper than the honest A→B ticket. Recheck before you buy; we do not hold inventory.".into()
+    "Still cheaper than the honest A→B ticket. Recheck before you buy; we do not hold inventory."
+        .into()
 }
 
 pub fn human_mins(minutes: i64) -> String {

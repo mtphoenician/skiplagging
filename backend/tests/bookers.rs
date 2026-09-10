@@ -1,7 +1,9 @@
 use chrono::Utc;
 use serde_json::json;
 use skiplagging::db::repo::{deal_from_row, HiddenDealRow};
-use skiplagging::providers::bookers::{booker_links, google_flights_url, google_tfs};
+use skiplagging::providers::bookers::{
+    booker_links, featured_booker_links, google_flights_url, google_tfs,
+};
 use sqlx::types::Json;
 
 #[test]
@@ -240,6 +242,117 @@ fn invalid_month_does_not_panic() {
     assert!(!links.is_empty());
     let google = links.iter().find(|b| b.id == "google-flights").unwrap();
     assert!(google.url.contains("tfs="));
+}
+
+fn featured_ids(
+    origin: &str,
+    dest: &str,
+    origin_geo: Option<(&str, &str)>,
+    dest_geo: Option<(&str, &str)>,
+) -> Vec<String> {
+    featured_booker_links(
+        origin,
+        dest,
+        "2026-11-02",
+        1,
+        "USD",
+        "ECONOMY",
+        None,
+        origin_geo,
+        dest_geo,
+    )
+    .into_iter()
+    .map(|b| b.id)
+    .collect()
+}
+
+#[test]
+fn featured_bookers_use_airport_row_not_iata_guess() {
+    let blind = featured_ids("PAR", "LON", None, None);
+    assert_eq!(
+        blind,
+        vec![
+            "google-flights",
+            "kayak",
+            "booking-com",
+            "expedia",
+            "skyscanner"
+        ]
+    );
+    assert!(!blind.iter().any(|id| id == "edreams" || id == "wego"));
+
+    let europe = featured_ids("PAR", "LON", Some(("EU", "FR")), Some(("EU", "GB")));
+    assert_eq!(
+        europe,
+        vec![
+            "google-flights",
+            "kayak",
+            "edreams",
+            "booking-com",
+            "skyscanner"
+        ]
+    );
+    assert!(!europe.iter().any(|id| id == "wego" || id == "cheapflights"));
+
+    let us = featured_ids("JFK", "ORD", Some(("NA", "US")), Some(("NA", "US")));
+    assert_eq!(
+        us,
+        vec![
+            "google-flights",
+            "kayak",
+            "cheapflights",
+            "expedia",
+            "skyscanner"
+        ]
+    );
+    assert!(!us.iter().any(|id| id == "edreams" || id == "wego"));
+
+    let gulf_asia = featured_ids("DXB", "BKK", Some(("AS", "AE")), Some(("AS", "TH")));
+    assert_eq!(
+        gulf_asia,
+        vec!["google-flights", "kayak", "wego", "traveloka", "skyscanner"]
+    );
+    assert!(!gulf_asia.iter().any(|id| id == "edreams"));
+
+    let india_europe = featured_ids("DEL", "LHR", Some(("AS", "IN")), Some(("EU", "GB")));
+    assert_eq!(
+        india_europe,
+        vec![
+            "google-flights",
+            "kayak",
+            "makemytrip",
+            "edreams",
+            "skyscanner"
+        ]
+    );
+
+    let latam_us = featured_ids("GRU", "MIA", Some(("SA", "BR")), Some(("NA", "US")));
+    assert_eq!(
+        latam_us,
+        vec![
+            "google-flights",
+            "kayak",
+            "despegar",
+            "cheapflights",
+            "skyscanner"
+        ]
+    );
+}
+
+#[test]
+fn bookers_have_no_iata_gazetteer() {
+    let src = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src/providers/bookers.rs"
+    ));
+    for banned in [
+        "fn hub_iso2",
+        "fn continent_for_iso2",
+        "fn iata_place",
+        "fn extras_for",
+    ] {
+        assert!(!src.contains(banned), "{banned}");
+    }
 }
 
 #[test]

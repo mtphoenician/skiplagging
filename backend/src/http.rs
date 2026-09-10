@@ -421,7 +421,10 @@ async fn search_expand(
 }
 
 fn traffic_empty(traffic: &Option<LiveTraffic>) -> bool {
-    traffic.as_ref().map(|t| t.aircraft.is_empty()).unwrap_or(true)
+    traffic
+        .as_ref()
+        .map(|t| t.aircraft.is_empty())
+        .unwrap_or(true)
 }
 
 async fn refresh_offer(

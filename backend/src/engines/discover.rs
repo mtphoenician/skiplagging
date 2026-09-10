@@ -14,7 +14,7 @@ use crate::engines::risk::attach_risk;
 use crate::engines::shop::{_drop_sandbox, _priced_in_currency, _shop_providers, layover_minutes};
 use crate::fx::{offer_in_usd, refresh_rates};
 use crate::models::{Offer, ShopRequest};
-use crate::providers::bookers::booker_links;
+use crate::providers::bookers::{airport_geo, featured_booker_links};
 use crate::providers::duffel::DuffelProvider;
 use crate::providers::sandbox::is_live_fare;
 
@@ -322,8 +322,17 @@ pub async fn discover_hidden_deals(
                         &c_ap.country,
                         exit_i,
                     );
-                    match_.bookers =
-                        booker_links(origin, &dest_c, date, 1, &[], "USD", "ECONOMY", None);
+                    match_.bookers = featured_booker_links(
+                        origin,
+                        &dest_c,
+                        date,
+                        1,
+                        "USD",
+                        "ECONOMY",
+                        None,
+                        Some(airport_geo(&o_ap)),
+                        Some(airport_geo(&c_ap)),
+                    );
                     repo::persist_hidden_deals(
                         pool,
                         &[match_.clone()],

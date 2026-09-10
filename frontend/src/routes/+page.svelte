@@ -80,7 +80,7 @@
     </article>
     <article>
       <b><span class="step">3</span><span>Book there</span></b>
-      <p>Google Flights, Kayak, Skyscanner, and other bookers. We never issue a ticket.</p>
+      <p>Google Flights, Kayak, two sites for those cities, and Skyscanner. We never issue a ticket.</p>
     </article>
   </section>
 </div>

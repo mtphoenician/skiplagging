@@ -53,7 +53,12 @@ fn now() -> chrono::DateTime<Utc> {
 #[test]
 fn two_seats_is_now() {
     let dep = (now() + Duration::days(14)).to_rfc3339();
-    let w = window_for(&offer_at(&dep, Some(2), None, 180.0), Some(180.0), &[], now());
+    let w = window_for(
+        &offer_at(&dep, Some(2), None, 180.0),
+        Some(180.0),
+        &[],
+        now(),
+    );
     assert_eq!(w.urgency, "now");
     assert!(w.label.contains("seats"));
     assert!(w.headline.contains("through ticket"));
@@ -63,7 +68,12 @@ fn two_seats_is_now() {
 fn quote_expiring_is_now() {
     let dep = (now() + Duration::days(20)).to_rfc3339();
     let exp = (now() + Duration::minutes(12)).to_rfc3339();
-    let w = window_for(&offer_at(&dep, Some(9), Some(&exp), 180.0), Some(180.0), &[], now());
+    let w = window_for(
+        &offer_at(&dep, Some(9), Some(&exp), 180.0),
+        Some(180.0),
+        &[],
+        now(),
+    );
     assert_eq!(w.urgency, "now");
     assert!(w.headline.contains("dies"));
 }
@@ -71,7 +81,12 @@ fn quote_expiring_is_now() {
 #[test]
 fn departs_tonight_is_now() {
     let dep = (now() + Duration::hours(11)).to_rfc3339();
-    let w = window_for(&offer_at(&dep, Some(9), None, 180.0), Some(180.0), &[], now());
+    let w = window_for(
+        &offer_at(&dep, Some(9), None, 180.0),
+        Some(180.0),
+        &[],
+        now(),
+    );
     assert_eq!(w.urgency, "now");
     assert!(w.headline.contains("close in"));
 }
@@ -79,14 +94,24 @@ fn departs_tonight_is_now() {
 #[test]
 fn three_days_out_is_soon() {
     let dep = (now() + Duration::hours(48)).to_rfc3339();
-    let w = window_for(&offer_at(&dep, Some(9), None, 180.0), Some(180.0), &[], now());
+    let w = window_for(
+        &offer_at(&dep, Some(9), None, 180.0),
+        Some(180.0),
+        &[],
+        now(),
+    );
     assert_eq!(w.urgency, "soon");
 }
 
 #[test]
 fn far_out_few_seats_stays_urgent() {
     let dep = (now() + Duration::days(40)).to_rfc3339();
-    let w = window_for(&offer_at(&dep, Some(4), None, 180.0), Some(180.0), &[], now());
+    let w = window_for(
+        &offer_at(&dep, Some(4), None, 180.0),
+        Some(180.0),
+        &[],
+        now(),
+    );
     assert_eq!(w.urgency, "soon");
 }
 
@@ -111,7 +136,12 @@ fn rising_price_bumps_open_to_watch() {
             observed_at: now() - Duration::days(2),
         },
     ];
-    let w = window_for(&offer_at(&dep, Some(9), None, 180.0), Some(180.0), &series, now());
+    let w = window_for(
+        &offer_at(&dep, Some(9), None, 180.0),
+        Some(180.0),
+        &series,
+        now(),
+    );
     assert_eq!(w.trend, "rising");
     assert!(urgency_rank(&w.urgency) >= urgency_rank("watch"));
     assert!(w.low.unwrap() <= 140.5);
@@ -132,7 +162,12 @@ fn sparkline_keeps_current_and_low() {
             observed_at: now() - Duration::days(40 - i),
         });
     }
-    let w = window_for(&offer_at(&dep, None, None, 150.0), Some(150.0), &series, now());
+    let w = window_for(
+        &offer_at(&dep, None, None, 150.0),
+        Some(150.0),
+        &series,
+        now(),
+    );
     assert!(w.points.len() <= 24);
     assert!(w.points.last().unwrap().price <= 151.0);
     assert!(w.low.unwrap() <= w.high.unwrap());

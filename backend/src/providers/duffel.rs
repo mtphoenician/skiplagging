@@ -423,7 +423,10 @@ fn payment_deadline(raw: &Value) -> Option<String> {
 
 fn as_i(v: Option<&Value>) -> Option<i32> {
     v.and_then(|v| match v {
-        Value::Number(n) => n.as_i64().map(|n| n as i32).or_else(|| n.as_f64().map(|n| n as i32)),
+        Value::Number(n) => n
+            .as_i64()
+            .map(|n| n as i32)
+            .or_else(|| n.as_f64().map(|n| n as i32)),
         Value::String(s) => s.parse().ok(),
         _ => None,
     })

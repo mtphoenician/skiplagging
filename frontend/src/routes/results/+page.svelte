@@ -359,7 +359,7 @@
   });
   const confirmNote = $derived(
     data
-      ? `Compare ${data.origin.iata} → ${data.destination.iata} on other sites. We do not copy their prices.`
+      ? `Compare ${data.origin.iata} → ${data.destination.iata} on sites used for this route. We do not copy their prices.`
       : ''
   );
   const selfTransfers = $derived(data?.channels.find((c) => c.kind === 'self-transfer')?.offers ?? []);

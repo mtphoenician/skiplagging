@@ -19,13 +19,13 @@ use crate::engines::hidden::{
     detect_hidden_city, hidden_city_savings, is_standard_to, itinerary_fingerprint,
     meaningful_saving, ticketed_destination,
 };
-use crate::engines::window::{attach_windows, sort_matches};
 use crate::engines::index::{classify_for_search, ticketed_dests_through};
 use crate::engines::learn::build_batch;
 use crate::engines::risk::{assess, attach_risk};
 use crate::engines::self_transfer::{
     bridge_pairs, combine_at_hubs, next_day, pick_transfer_hubs, MAX_LEG_FLIGHTS,
 };
+use crate::engines::window::{attach_windows, sort_matches};
 use crate::fx::{offer_in_usd, offers_in_usd, refresh_rates, take_offers_in_usd};
 use crate::models::{
     Airport, BoardFlight, CandidateTrace, ChannelGroup, ConnectionHint, HiddenCityMatch,
@@ -33,7 +33,7 @@ use crate::models::{
     TrackedAircraft,
 };
 use crate::providers::aerodatabox::AeroDataBoxProvider;
-use crate::providers::bookers::booker_links;
+use crate::providers::bookers::{airport_geo, featured_booker_links};
 use crate::providers::duffel::DuffelProvider;
 use crate::providers::mock::MockProvider;
 use crate::providers::opensky::{tracker_links, OpenSkyProvider};
@@ -145,14 +145,8 @@ struct SearchPersist {
 
 fn spawn_search_persist(job: SearchPersist) {
     tokio::spawn(async move {
-        let _ = repo::remember_offers(
-            &job.pool,
-            &job.learned,
-            &job.date,
-            job.adults,
-            &job.cabin,
-        )
-        .await;
+        let _ =
+            repo::remember_offers(&job.pool, &job.learned, &job.date, job.adults, &job.cabin).await;
         let batch = build_batch(
             &job.learned,
             &job.origins,
@@ -661,12 +655,13 @@ async fn search_all_ways_inner(
         repo::airports_by_iata(pool, &ticketed_codes),
         repo::fare_series(pool, &hist_fps, &hist_origins, &hist_ticketed),
     );
-    apply_ticketed_airports(
+    let ticketed_aps = ticketed_aps.unwrap_or_default();
+    apply_ticketed_airports(&mut hidden_matches, &o_ap.country, &ticketed_aps);
+    attach_windows(
         &mut hidden_matches,
-        &o_ap.country,
-        &ticketed_aps.unwrap_or_default(),
+        &series.unwrap_or_default(),
+        chrono::Utc::now(),
     );
-    attach_windows(&mut hidden_matches, &series.unwrap_or_default(), chrono::Utc::now());
     sort_matches(&mut hidden_matches);
 
     let mut learned_src = raw_local;
@@ -768,33 +763,33 @@ async fn search_all_ways_inner(
         .await
         .unwrap_or_default();
     let book_ccy = "USD";
-    let bookers = booker_links(
+    let origin_geo = Some(airport_geo(&o_ap));
+    let bookers = featured_booker_links(
         &o_ap.iata,
         &d_ap.iata,
         &query.date,
         query.adults,
-        &airline_pairs[..airline_pairs.len().min(6)],
         book_ccy,
         &query.cabin,
         query.return_date.as_deref(),
+        origin_geo,
+        Some(airport_geo(&d_ap)),
     );
     let airline_names: HashMap<String, String> = airline_pairs.into_iter().collect();
     for match_ in hidden_matches.iter_mut() {
-        let code = match_.through_offer.carrier.to_uppercase();
-        let thru_al: Vec<(String, String)> = if let Some(name) = airline_names.get(&code) {
-            vec![(code.clone(), name.clone())]
-        } else {
-            vec![]
-        };
-        match_.bookers = booker_links(
+        let c_ap = ticketed_aps
+            .get(&match_.hidden_city)
+            .or_else(|| ticketed_aps.get(&ticketed_code(match_)));
+        match_.bookers = featured_booker_links(
             &o_ap.iata,
             &match_.hidden_city,
             &query.date,
             query.adults,
-            &thru_al,
             book_ccy,
             &query.cabin,
             None,
+            origin_geo,
+            c_ap.map(airport_geo),
         );
     }
 
@@ -875,24 +870,10 @@ async fn search_all_ways_inner(
         "ourairports".into(),
         "openflights-routes".into(),
         "opensky".into(),
-        "google-flights".into(),
-        "kayak".into(),
-        "skyscanner".into(),
-        "momondo".into(),
-        "cheapflights".into(),
-        "wego".into(),
-        "expedia".into(),
-        "booking-com".into(),
-        "trip-com".into(),
-        "priceline".into(),
-        "kiwi".into(),
-        "cheapoair".into(),
-        "edreams".into(),
-        "traveloka".into(),
-        "makemytrip".into(),
-        "despegar".into(),
-        "skiplagged-com".into(),
     ];
+    for b in &bookers {
+        sources_used.push(b.id.clone());
+    }
     if duffel.is_some() {
         sources_used.push("duffel".into());
     }
@@ -931,7 +912,12 @@ async fn search_all_ways_inner(
         .iter()
         .take(30)
         .cloned()
-        .chain(hidden_matches.iter().take(15).map(|m| m.through_offer.clone()))
+        .chain(
+            hidden_matches
+                .iter()
+                .take(15)
+                .map(|m| m.through_offer.clone()),
+        )
         .collect();
     let search_id = repo::persist_search(
         pool,
